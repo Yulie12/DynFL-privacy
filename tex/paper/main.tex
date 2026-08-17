@@ -1,0 +1,1665 @@
+\documentclass[preprint,12pt]{elsarticle}
+
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{placeins}
+\usepackage{array}
+\usepackage{subfig}
+\usepackage{textcomp}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{makecell}
+\usepackage{multirow}
+\usepackage{adjustbox}
+\usepackage{amsthm}
+
+
+\graphicspath{{figures/}{figures_en/}}
+
+\journal{Future Generation Computer Systems-The International Journal of eScience}
+
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{assumption}[theorem]{Assumption}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\tabref}[1]{Table~\ref{#1}}
+\newcommand{\figref}[1]{Fig.~\ref{#1}}
+\newcommand{\secref}[1]{Section~\ref{#1}}
+\newcommand{\equref}[1]{(\ref{#1})}
+
+\makeatletter
+\newenvironment{breakablealgorithm}
+{%
+  \par\addvspace{\intextsep}
+  \refstepcounter{algorithm}%
+  \hrule height 0.8pt depth 0pt
+  \kern 2pt
+  \renewcommand{\caption}[2][\relax]{%
+    \noindent\textbf{\ALG@name~\thealgorithm}\ ##2\par
+    \ifx\relax##1\relax
+      \addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##2}%
+    \else
+      \addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##1}%
+    \fi
+    \kern 2pt
+    \hrule height 0.8pt depth 0pt
+    \kern 2pt
+  }%
+}
+{%
+  \kern 2pt
+  \hrule height 0.8pt depth 0pt
+  \par\addvspace{\intextsep}
+}
+\makeatother
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Dynamic Cloud-Edge-End Mode Selection for Federated Learning under Resource and Privacy Constraints}
+
+\author[bupt]{Tingting Yang}
+\author[bupt]{Wenbo Zhang}
+\author[bupt]{Shaohua Liu}
+\author[bupt]{Lihua Zhang}
+\author[bupt]{Xinyuan Lin}
+\author[bupt]{Qian Liu}
+
+\affiliation[bupt]{organization={Beijing University of Posts and Telecommunications},
+            city={Beijing},
+            country={China}}
+
+\begin{abstract}
+Hierarchical federated learning (HFL) introduces edge nodes into federated learning so that IoT end devices can perform local training and edge nodes can conduct intermediate aggregation before cloud aggregation.
+This structure reduces direct communication between IoT end devices and the cloud.
+In practical IoT systems, end devices often have substantially different computation capabilities, memory capacities, and response delays.
+Such device heterogeneity lowers training efficiency when delayed and resource limited devices are forced to follow the same training process as stronger devices.
+Meanwhile, end devices, edge nodes, and cloud servers all operate under their own resource constraints.
+Privacy requirements can further affect model accuracy because differential privacy (DP) noise may perturb model updates and intermediate representations.
+This paper studies dynamic collaborative mode selection for federated learning under cloud-edge-end resource and privacy constraints.
+
+To address these challenges, we build a dynamic collaborative mode selection method for federated learning in cloud-edge-end systems.
+We first analyze how DP perturbation and encrypted transmission overhead affect training efficiency and convergence error.
+We then establish efficiency, privacy budget, and convergence error models.
+The proposed link graph representation describes different cloud-edge-end collaborative modes with collaborative link blocks and link flows, which jointly capture computation, communication, aggregation, and privacy related interactions.
+Based on this representation, we propose a privacy aware dynamic collaborative mode selection algorithm that constructs a global Pareto front and uses an ideal-point Tchebycheff criterion to select one tradeoff solution.
+The proposed algorithm takes candidate collaborative modes, link structures, and candidate privacy policies as input, and dynamically selects suitable model split positions and privacy mechanisms according to resource constraints, communication overhead, privacy budgets, and task requirements.
+Experiments include Fashion-MNIST with LeNet-5 training and CIFAR-10 with ResNet-18 cloud-edge-end simulation.
+Results show that the proposed algorithm can maintain resource and privacy feasibility, reduce the cost of fixed privacy mechanisms, and provide a tunable tradeoff among privacy consumption, training efficiency, and empirical test accuracy.
+\end{abstract}
+
+\begin{highlights}
+\item A dynamic collaborative mode selection problem is formulated for federated learning under cloud-edge-end resource and privacy constraints.
+\item A graph based on collaborative link blocks and link flows represents computation, communication, aggregation, and privacy-related interactions across end, edge, and cloud layers.
+\item The proposed method jointly considers latency, privacy budget, and convergence error when selecting collaborative modes and privacy mechanisms.
+\item Experiments on Fashion-MNIST with LeNet-5 and CIFAR-10 with ResNet-18 show tunable tradeoffs among privacy consumption, training efficiency, and test accuracy.
+\end{highlights}
+
+\begin{keyword}
+Internet of Things \sep hierarchical federated learning \sep cloud-edge-end collaboration \sep collaborative mode selection \sep differential privacy \sep device heterogeneity \sep resource constraints
+\end{keyword}
+
+\end{frontmatter}
+\section{Introduction}
+\label{sec:introduction}
+Federated learning (FL) enables multiple end devices to collaboratively train a model by keeping data local and uploading model parameters and gradient based updates~\cite{fedavg}.
+With the development of artificial intelligence for IoT (AIoT), mobile edge computing, and intelligent sensing systems, training data are increasingly generated by cameras, mobile terminals, vehicles, and industrial sensors.
+Cloud-edge-end hierarchical federated learning (HFL) has therefore been introduced to reduce long distance communication between end devices and the cloud through edge aggregation~\cite{hfl}.
+It also enables multiple edge domains to participate in a shared cloud level training process.
+
+However, HFL in cloud-edge-end environments still faces two major challenges.
+First, end device data are usually non-IID, and significant distribution differences among devices can lead to model drift and performance degradation under simple weighted aggregation~\cite{fedavgm,fedprox}.
+Second, IoT devices are system heterogeneous.
+Low power cameras and sensors may be unable to support full training of a large deep model, whereas edge servers and cloud servers usually have stronger computation and memory resources~\cite{wang2019adaptivefl}.
+If all devices are forced to follow the same training process, weak and delayed devices may become stragglers and may even be excluded by resource constraints.
+
+Existing work has addressed these issues from several directions, but most studies improve a fixed HFL procedure rather than dynamically selecting how training tasks are assigned among the end, edge, and cloud layers.
+Personalized HFL mitigates non-IID drift through edge side personalization, similarity aware aggregation, and model decoupling~\cite{Personalizedhfl,JSJX202502007}.
+Resource constrained and wireless FL optimize local update frequency, communication rounds, energy consumption, and wireless resource allocation~\cite{wang2019adaptivefl,dinh2021wirelessfl}.
+Cloud-edge-end FL studies further consider heterogeneous model collaboration, multiple server edge aggregation, and split training mechanisms~\cite{BSBODP,mazloomi2025multiserver,SFETEC}.
+Nevertheless, most existing methods are built around a specific collaborative procedure with a fixed hierarchical structure.
+They pay insufficient attention to the mode selection variable, namely which model blocks should be executed at the end, edge, and cloud layers, which aggregation flow should be used, and how this task assignment should interact with privacy mechanisms.
+
+Privacy protection further complicates this decision.
+DP limits the influence of a single sample and client by clipping and perturbing intermediate features and model updates, but it may degrade convergence.
+Adaptive DP methods tune privacy budgets, clipping thresholds, and client selection to improve the privacy utility tradeoff~\cite{GLDP,xu2025adpfl,elabd2025dynamicdp}.
+HE, secure aggregation, and privacy preserving offloading have also been studied in FL and cloud-edge-end systems~\cite{dong2026privacyoffloading,PPHFL,islam2025pphffl}.
+Different collaborative modes expose different privacy related objects.
+For example, split training between end devices and edge nodes transmits intermediate features and backward gradients, whereas aggregation between edge nodes and the cloud transmits model updates.
+Therefore, the communication, computation, and convergence error effects of privacy mechanisms should be modeled together with collaborative mode selection.
+
+The central difficulty is that privacy protection, training utility, and system efficiency are tightly coupled.
+Stronger privacy protection can increase computation and communication overhead and can introduce clipping distortion and perturbation noise.
+Moving computation among the end, edge, and cloud layers can relieve resource-limited devices, but it also changes cross-layer transmission, synchronization latency, and the objects exposed to privacy mechanisms.
+Consequently, improving one aspect may degrade another, and a global cloud-edge-end decision must balance privacy protection, training efficiency, and convergence behavior.
+Figure~\ref{fig:balance} illustrates this coupled design objective.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.78\columnwidth]{balance.png}
+\caption{Coupled tradeoff among privacy protection, training utility, and efficiency.}
+\label{fig:balance}
+\end{figure}
+\FloatBarrier
+
+Motivated by this challenge, this paper formulates dynamic joint selection of collaborative modes and privacy mechanisms under cloud-edge-end resource and privacy constraints.
+Dynamic cloud-edge-end collaboration is realized through collaborative mode selection. Each mode specifies how model computation and aggregation are assigned among the end, edge, and cloud layers.
+Different from conventional HFL, where the hierarchy mainly describes multi level aggregation, the collaborative mode in this work describes the joint assignment of model blocks, computation placement, aggregation flow, and privacy mechanisms across the end, edge, and cloud layers.
+The main contributions are summarized as follows.
+\begin{itemize}
+    \item We formulate dynamic collaborative mode selection for cloud-edge-end FL, where training tasks can be assigned to end devices, edge nodes, and the cloud according to device heterogeneity, resource constraints, communication overhead, and privacy requirements.
+    \item We define a graph based on collaborative link blocks and link flows to represent cloud-edge-end collaborative modes. This representation describes model block execution, cross layer transmission, aggregation, model return, and privacy related interactions in a unified form.
+    \item We establish a joint cost model for latency, communication, privacy budget, and convergence error. The model captures the effects of DP perturbation, encrypted transmission overhead, synchronization waiting, and cloud level fusion.
+    \item We develop a privacy aware mode selection algorithm that constructs non-dominated global decisions and uses an ideal-point Tchebycheff criterion to select one tradeoff between system latency and convergence error under resource and privacy constraints.
+    \item We evaluate the proposed method using Fashion-MNIST with LeNet-5 training and CIFAR-10 with ResNet-18 experiments, including data distribution, resource heterogeneity, strategy update period, aggregation fraction, and multiple random seed analyses.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related_work}
+\subsection{HFL Under Heterogeneous Environments}
+HFL introduces edge servers between end devices and the cloud to reduce direct cloud communication pressure through edge pre aggregation~\cite{hfl}.
+Resource aware FL studies reduce stragglers and communication overhead by adjusting client selection, local update frequency, pruning, and model compression under limited computation, energy, and bandwidth resources~\cite{phfl,xu2022adaptive,wang2019adaptivefl,dinh2021wirelessfl}.
+Personalized HFL further mitigates performance degradation under non-IID data through edge side personalized models, similarity aggregation, and model decoupling~\cite{Personalizedhfl,JSJX202502007}.
+These methods show that HFL can improve training from resource scheduling, communication control, and data heterogeneity adaptation.
+However, when end device resources differ across computation, memory, and communication capabilities, using the same training flow for all clients can still cause straggler blocking in conventional synchronous aggregation and prevent weak devices from participating effectively.
+This paper jointly considers end device computation constraints, memory constraints, communication overhead, and model split positions during mode selection.
+Dynamic selection itself may also introduce reconfiguration overhead. Recent multi job FL studies explicitly model switching cost in client selection and reduce it through block wise selection, where the selected client subset is kept unchanged across multiple rounds rather than being changed every round~\cite{CHEN2026112204,10757319}. This observation motivates the use of a strategy update period in our framework. Collaborative modes are re evaluated only at update points, which limits unnecessary mode reconfiguration while preserving adaptability to resource and link changes.
+
+\subsection{Cloud-Edge-End Collaborative Federated Learning}
+HFL is a representative form of cloud-edge-end collaborative FL, in which end devices, edge nodes, and the cloud jointly execute computation, aggregation, and communication tasks.
+As model size and system heterogeneity increase, fixed full end device training followed by edge aggregation becomes less suitable for resource limited IoT devices.
+FedAgg~\cite{BSBODP} uses bridge samples and online distillation to enable models of different scales at the end, edge, and cloud layers to collaborate.
+SFETEC~\cite{SFETEC} introduces split federated learning into Thing Edge Cloud environments and partitions model computation across layers to reduce end device computation load.
+Cloud-edge-end task offloading studies also combine FL, privacy protection, and task efficiency~\cite{dong2026privacyoffloading}.
+These studies show the value of collaboration among the three layers, but they usually assume a fixed mode selection strategy.
+In contrast, this paper studies how each device should select a collaborative mode under given resource and privacy conditions.
+The need to balance reconfiguration gain and reconfiguration cost is also consistent with edge-computing task migration studies. In mobile edge computing, migration can reduce service delay when users move away from the original edge server, but it also consumes backhaul transmission and reconfiguration resources~\cite{ZHANG2019111}. Load-aware task migration further models migration cost as a combination of communication, queuing, and computation costs, and notes that migration cost can be related to physical distance between edge nodes~\cite{ZHU2024303}. These studies suggest that dynamic cloud-edge-end collaboration should account for both the benefit of changing execution paths and the overhead caused by such changes.
+
+\subsection{Privacy Preserving HFL}
+Model parameters, gradients, and intermediate representations in federated training may leak information about private data.
+Differential privacy (DP), homomorphic encryption (HE), and secure aggregation are therefore widely used in FL.
+For HFL, group local DP provides personalized privacy through sampling, randomized response, and shuffling~\cite{GLDP}.
+Adaptive DP-FL improves convergence and model utility through dynamic privacy budget allocation, adaptive clipping, and client selection~\cite{xu2025adpfl}.
+Other privacy preserving HFL studies combine client level DP, secure aggregation, and CKKS-style HE for data space scenarios~\cite{PPHFL}. Related fog FL studies combine hierarchical aggregation, personalization, and DP for IoT intrusion detection~\cite{islam2025pphffl}.
+These studies mainly focus on the security guarantee, budget allocation, and accuracy degradation of a particular privacy mechanism.
+The joint modeling of privacy induced communication cost, computation latency, convergence error, and cloud-edge-end mode selection remains insufficiently studied.
+
+\section{Model Construction}
+\label{sec:model}
+\subsection{Cloud-Edge-End Collaborative Link Modeling}
+\label{sec:link_model}
+We consider a three tier cloud-edge-end collaborative FL system composed of end devices, edge nodes, and a cloud node.
+Let \(\mathcal{N}\) denote the set of end devices.
+Each end device \(i\in\mathcal{N}\) selects one collaborative mode \(h_i\) from a candidate mode set \(\mathcal{H}\).
+In this paper, a collaborative mode specifies the model split position, the layer that executes each model block, the aggregation flow, and the return path of aggregation results across the end, edge, and cloud layers.
+Given a global model \(M\), different modes induce the partition
+\(M=M_L^{h_i}\cup M_E^{h_i}\cup M_C^{h_i}\), where \(M_L^{h_i}\),
+\(M_E^{h_i}\), and \(M_C^{h_i}\) are the submodels executed at the end,
+edge, and cloud layers, respectively.
+Weaker devices use split positions closer to the input layer and offload more computation toward upper layers, whereas stronger devices can undertake a larger proportion of local training.
+
+\begin{definition}[Collaborative Link Block]
+Given a collaborative mode \(h_i\), a collaborative link block is the local
+training step and cross layer interaction associated with end device \(i\)
+before an aggregation event. Formally,
+\(B_i^{h_i}=(d_i,\ell_i,g_i,\mathcal{E}_{B,i}^{h_i})\), where \(d_i\) is the
+participating end device, \(\ell_i\in\{L,E,C\}\) indicates the
+update-submission layer from which the local model update is uploaded to the
+aggregation node before aggregation, \(g_i\in\{A_e,A_c\}\) is the aggregation
+node that receives the update, and \(\mathcal{E}_{B,i}^{h_i}\) is the set of
+intermediate feature, backward gradient, and model update transmission links
+caused by split training.
+According to \(\ell_i\), \(B_i^{h_i}\) is classified as \(B_L\), \(B_E\), or \(B_C\), corresponding to a local update submitted for aggregation from the end, edge, or cloud layer, respectively.
+\end{definition}
+
+\begin{definition}[Collaborative Link Flow]
+A collaborative link flow is a complete training link formed by at least one collaborative link block, the aggregation node, and the model return process.
+A one level aggregation collaborative link flow can be abstracted as
+\begin{equation}
+    \text{Link flow}\quad d_i \xrightarrow{B_i^{h_i}\times L_B} \ell_i
+    \xrightarrow{\text{upload}} a
+    \xrightarrow{\text{download}} q_i .
+\end{equation}
+Here, \(\xrightarrow{B_i^{h_i}\times L_B}\) denotes that end device \(i\) performs \(L_B\) link blocks under collaborative mode \(h_i\), with the local update submitted for aggregation from layer \(\ell_i\). \(a\) is the selected aggregation node, and \(q_i\) denotes the specific return receiver for device \(i\). In the modes studied here, \(q_i\) is the end device \(d_i\) when the returned state is used locally, and it is the associated edge node when the returned submodel is kept at the edge side.
+If two level aggregation exists, the collaborative link flow also contains an edge aggregation node \(A_e\), the cloud aggregation node \(A_c\), and the final return to the end device.
+\begin{equation}
+\begin{aligned}
+    \text{Link flow}\quad [d_i \xrightarrow{B_i^{h_i}\times L_B} \ell_i
+    \xrightarrow{\text{upload}} A_e] \times E_B\\
+    \xrightarrow{\text{upload}} A_c
+    \xrightarrow{\text{download}} A_e
+    \xrightarrow{\text{download}} d_i .
+\end{aligned}
+\end{equation}
+\(E_B\) denotes the number of edge level aggregation loops completed at \(A_e\) before the edge aggregated update is uploaded to \(A_c\).
+\end{definition}
+
+\begin{definition}[Cloud-Edge-End Collaborative Link Graph]
+For a collaborative mode \(h_i\), its training process is represented by the
+directed graph \(\mathcal{G}^{h_i}=(\mathcal{V},\mathcal{E})\), where
+\(\mathcal{V}\) contains end, edge, and cloud nodes and \(\mathcal{E}\)
+contains their interaction links. Each link is denoted by
+\(\lambda=(u,v,b)\), where \(u\) and \(v\) are the source and target nodes and
+\(b\) is the interaction type.
+The link size, rate, and latency are treated as link attributes in the cost model.
+\end{definition}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{classic.png}
+\caption{Abstract training flow and candidate interaction interfaces in cloud-edge-end collaborative FL. Interfaces I, II, and III represent feature transmission, split-training update and gradient interaction, and aggregation update transmission, respectively. The labels \(\mathrm{emb}\), \(\mathrm{lupd}\), \(\mathrm{grad}\), \(\mathrm{eupd}\), and \(\mathrm{gupd}\) denote intermediate embedding, local update, backward gradient, edge aggregated update, and global aggregated update.}
+\label{fig:classic}
+\end{figure}
+
+Based on the abstract training flow illustrated in \figref{fig:classic}, this paper considers seven basic modes over the end (\(L\)), edge (\(E\)), and cloud (\(C\)) layers. The interfaces mark candidate interaction boundaries from shallow to deep stages. A deeper boundary keeps more computation on the end side, whereas an earlier boundary offloads more computation toward upper layers.
+\begin{equation}
+\mathcal{H}=\{\mathrm{LIE},\mathrm{LIC},\mathrm{LIIE},\mathrm{LIIC},\mathrm{LIEIIC},\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
+\end{equation}
+The symbols \(L\), \(E\), and \(C\) indicate the update-submission layer of a collaborative link block, while \(\mathrm{I}\), \(\mathrm{II}\), and \(\mathrm{III}\) denote the selected model split interface.
+
+\begin{definition}[Collaborative Link Transmission Indicator Matrix]
+Let the node order be \((L,E,C)\), and let \(\mathcal{B}=\{\mathrm{emb},\mathrm{grad},\mathrm{upd}\}\), where \(\mathrm{emb}\) denotes intermediate embedding transmission, \(\mathrm{grad}\) denotes backward gradient transmission in split training, and \(\mathrm{upd}\) denotes model update transmission, including local, edge aggregated, and global aggregated updates.
+For mode \(h_i\) and transmission type \(b\in\mathcal{B}\), the collaborative link transmission indicator matrix is
+\begin{equation}
+    \mathbf{I}_{b}^{h_i}(u,v)=
+    \begin{cases}
+    1, & \text{mode } h_i \text{ transmits type } b \text{ from } u \text{ to } v,\\
+    0, & \text{otherwise}.
+    \end{cases}
+\end{equation}
+For example, for one complete LIEIIC link flow,
+\begin{equation}
+\mathbf{I}_{\mathrm{emb}}^{\mathrm{LIEIIC}}=
+\begin{pmatrix}
+0 & 1 & 0\\
+0 & 0 & 0\\
+0 & 0 & 0
+\end{pmatrix},\quad
+\mathbf{I}_{\mathrm{grad}}^{\mathrm{LIEIIC}}=
+\begin{pmatrix}
+0 & 0 & 0\\
+1 & 0 & 0\\
+0 & 0 & 0
+\end{pmatrix},\quad
+\mathbf{I}_{\mathrm{upd}}^{\mathrm{LIEIIC}}=
+\begin{pmatrix}
+0 & 0 & 0\\
+1 & 0 & 1\\
+0 & 1 & 0
+\end{pmatrix}.
+\end{equation}
+The nonzero entries indicate transmission directions only.
+The corresponding candidate mechanism matrix is
+\begin{equation}
+\mathcal{O}_{b}^{h_i}(u,v)=
+\begin{cases}
+\{\mathrm{DP}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1 \text{ and } b\in\{\mathrm{emb},\mathrm{grad}\},\\
+\{\mathrm{DP},\mathrm{HE}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1 \text{ and the link is an update upload},\\
+\{\mathrm{none}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1 \text{ and the link is a model return},\\
+\emptyset, & \mathbf{I}_{b}^{h_i}(u,v)=0.
+\end{cases}
+\end{equation}
+Thus, \(\mathbf{I}_{b}^{h_i}\) says whether a transmission exists.
+\(\mathcal{O}_{b}^{h_i}\) gives the candidate privacy mechanisms for that transmission.
+For LIEIIC, the update mechanism matrix is
+\begin{equation}
+\mathcal{O}_{\mathrm{upd}}^{\mathrm{LIEIIC}}=
+\begin{pmatrix}
+\emptyset & \emptyset & \emptyset\\
+\{\mathrm{none}\} & \emptyset & \{\mathrm{DP},\mathrm{HE}\}\\
+\emptyset & \{\mathrm{none}\} & \emptyset
+\end{pmatrix}.
+\end{equation}
+The entries with \(\{\mathrm{none}\}\) are model return links.
+\end{definition}
+
+The selected mode determines the transmitted objects, and the indicator matrices record their directions.
+Privacy mechanisms are then selected for the eligible transmitted objects.
+Embeddings and gradients may use DP, while model updates may use DP or HE~\cite{PPHFL}.
+\(\Pi(h_i)\) denotes the candidate privacy policy set under mode \(h_i\), and each policy \(\pi_i\in\Pi(h_i)\) maps an eligible link to a selected privacy mechanism.
+For each transmitted link \(\lambda=(u,v,b)\), the selected privacy mechanism \(\pi_i(\lambda)\) must belong to \(\mathcal{O}_{b}^{h_i}(u,v)\).
+Model return links are counted for communication latency only and are not assigned DP or HE.
+
+\textbf{Collaborative link flows of the seven modes.}
+The following expressions summarize the block execution layer, aggregation node, and model return path of each mode.
+Detailed transmitted objects and candidate privacy mechanisms are determined by \(\mathbf{I}_{b}^{h_i}\) and \(\mathcal{O}_{b}^{h_i}\).
+\begin{itemize}
+    \item \textbf{LIE} \(\mathcal{F}(\mathrm{LIE}) = B_E \times L_B \rightarrow A_e \rightarrow \mathrm{end}\).
+    \item \textbf{LIIE} \(\mathcal{F}(\mathrm{LIIE}) = B_L \times L_B \rightarrow A_e \rightarrow \mathrm{end}\).
+    \item \textbf{LIC} \(\mathcal{F}(\mathrm{LIC}) = B_C \times L_B \rightarrow A_c \rightarrow \mathrm{end}\).
+    \item \textbf{LIIC} \(\mathcal{F}(\mathrm{LIIC}) = B_L \times L_B \rightarrow A_c \rightarrow \mathrm{end}\).
+    \item \textbf{LIEIIC} \(\mathcal{F}(\mathrm{LIEIIC}) = B_E \times L_B \rightarrow A_c \rightarrow A_e \rightarrow \mathrm{end}\).
+    \item \textbf{LIEIIIC} \(\mathcal{F}(\mathrm{LIEIIIC}) = [B_E \times L_B \rightarrow A_e \rightarrow \mathrm{end}] \times E_B \rightarrow A_c \rightarrow A_e \rightarrow \mathrm{end}\).
+    \item \textbf{LIIEIIIC} \(\mathcal{F}(\mathrm{LIIEIIIC}) = [B_L \times L_B \rightarrow A_e \rightarrow \mathrm{end}] \times E_B \rightarrow A_c \rightarrow A_e \rightarrow \mathrm{end}\).
+\end{itemize}
+The corresponding cloud-edge-end collaborative link graphs of the seven modes are illustrated in \figref{fig:eecblockflow}.
+Each subfigure corresponds to one collaborative mode.
+Orange links show link block execution repeated \(L_B\) times.
+Green self loops show the edge aggregation loop before global aggregation, repeated \(E_B\) times.
+Black self loops show the final global aggregation.
+Black arrows show update upload and model return paths among end devices, edge nodes, and the cloud.
+Modes LIE and LIIE finish aggregation at the edge side.
+Modes LIC and LIIC use cloud aggregation directly.
+Mode LIEIIC uploads edge side updates to the cloud and then returns the aggregated model through the edge side.
+Modes LIEIIIC and LIIEIIIC add the \(E_B\) edge aggregation loop before cloud aggregation and final model return.
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{eecblockflow.png}
+\caption{Cloud-edge-end collaborative link graphs of the seven collaborative modes.}
+\label{fig:eecblockflow}
+\end{figure*}
+
+\subsection{Joint Cost and Utility Modeling}
+\label{sec:cost_utility_model}
+After the link topology is determined, each client selects a collaborative mode \(h_i\) and a privacy policy \(\pi_i\).
+The selected mode must satisfy the computation and memory limits of the end device, while the joint decision profile determines the system level latency and convergence error.
+The modeling below is organized in five parts, including end side resource feasibility, path level latency, buffered aggregation cost, DP budget consumption, and convergence error.
+
+\subsubsection{End Side Resource Feasibility}
+Let \(n_i\) be the number of local samples processed by device \(i\) in one round, and let \(L_B\) be the number of local link block iterations.
+Under mode \(h_i\), \(\chi(h_i)\) denotes the profiled computation workload required by the end layer to process one sample.
+The subscript \(L\) denotes the local end device layer.
+The single round local computation workload is
+\(W_{i,L}^{\mathrm{comp}}(h_i)=L_Bn_i\chi(h_i)\).
+
+The value of \(\chi(h_i)\) depends on the model blocks assigned to the end device and is obtained through offline profiling.
+When detailed operator level profiling is unavailable, it is approximated as
+\(\chi(h_i)\approx\kappa_cm_i(h_i)\), where \(m_i(h_i)\) is the parameter
+scale assigned to device \(i\), and \(\kappa_c\) is a calibrated conversion
+coefficient.
+This provides a lightweight complexity estimate for candidate mode screening and is in line with resource aware FL latency models~\cite{zhou2023joint}.
+
+Let \(F_i\) denote the effective computing rate of device \(i\). The end side
+computation latency is
+\(T_{i,L}^{\mathrm{comp}}(h_i)=W_{i,L}^{\mathrm{comp}}(h_i)/F_i\).
+This follows the common wireless FL latency model, where local computation time depends on local iterations, local data size, per sample computation workload, and device computing rate.
+Given the maximum allowable computation time \(\tau_i^{\max}\), the
+computation budget is \(Q_{\mathrm{comp},i}=F_i\tau_i^{\max}\).
+
+The memory requirement under mode \(h_i\) is
+\(M_i^{\mathrm{mem}}(h_i)=s_{\mathrm{state}}m_i(h_i)+a_i(h_i)\).
+This model follows the common separation between parameter related model states and residual training memory~\cite{3433701.3433727}.
+Here, \(s_{\mathrm{state}}\) is the profiled per parameter model state memory coefficient, covering parameters, gradients, optimizer states such as Adam momentum and variance, and other persistent training states such as mixed precision parameter copies.
+The term \(a_i(h_i)\) denotes residual memory that is not captured by the parameter scale, including activations and temporary training buffers.
+
+Let \(Q_{\mathrm{mem},i}\) denote the available memory of device \(i\).
+The resource feasible mode set is
+\begin{equation}
+    \mathcal{H}_i^{\mathrm{res}}=
+    \{h_i\in\mathcal{H}\mid
+    W_{i,L}^{\mathrm{comp}}(h_i)\le Q_{\mathrm{comp},i},
+    M_i^{\mathrm{mem}}(h_i)\le Q_{\mathrm{mem},i}\}.
+\label{eq:resource_feasible}
+\end{equation}
+
+\subsubsection{Path Level Latency}
+We first define the general link and path latency terms. A representative complete path is then illustrated in \figref{fig:time}.
+Let \(R^t=(R_{u,v}^t)_{u,v\in\mathcal{V}}\) be the cloud-edge-end link rate matrix in round \(t\).
+The communication model is link specific. For an end edge pair \((i,j)\), the rate \(R_{i,j}^{t}\) and the base latency \(T_{i,j}^{0}\) may differ from those of other device edge pairs. These parameters capture heterogeneous physical distance, wireless channel quality, interference, and congestion. Therefore, two end devices connected to the same edge server can have different communication latencies, and the same device connected to different edge servers can also experience different communication latencies~\cite{ZHANG2019111,ZHU2024303}.
+For an interaction link \(\lambda=(u,v,b)\), its raw transmission size is \(S_{\lambda}^t(h_i)\).
+Let \(\psi_{\lambda}(h_i,\pi_i)\) denote the actual mechanism applied on link \(\lambda\) under mode \(h_i\) and privacy policy \(\pi_i\).
+It selects the policy specified mechanism for privacy eligible links and uses \(\mathrm{none}\) for links that only transmit returned models.
+\begin{equation}
+\psi_{\lambda}(h_i,\pi_i)=
+\begin{cases}
+\pi_i(\lambda), & \lambda\in\mathcal{E}_{\mathrm{priv}}^{h_i},\\
+\mathrm{none}, & \lambda\notin\mathcal{E}_{\mathrm{priv}}^{h_i}.
+\end{cases}
+\end{equation}
+Thus, a model return link uses \(\mathrm{none}\) even when its object type is
+\(\mathrm{upd}\). The effective transmission size is
+\(\widetilde{S}_{\lambda}^t(h_i,\pi_i)=
+\alpha(\psi_{\lambda}(h_i,\pi_i))S_{\lambda}^t(h_i)\), where
+\(\alpha(\cdot)\) is the communication inflation factor induced by the
+selected privacy mechanism.
+For \(\mathrm{none}\), \(\alpha(\mathrm{none})=1\).
+For DP, \(\alpha(\mathrm{DP})\approx 1\). For HE, ciphertext encoding and packing increase the transmitted payload, so \(\alpha(\mathrm{HE})>1\)~\cite{PPHFL}.
+In practice, \(\alpha(\mathrm{HE})\) can be obtained by offline profiling as the ratio between the serialized ciphertext payload size and the original plaintext tensor size.
+The communication latency is
+\begin{equation}
+T_{\lambda}^{\mathrm{link},t}(h_i,\pi_i)
+=
+\frac{\widetilde{S}_{\lambda}^t(h_i,\pi_i)}
+{R_{\lambda}^{t}}
++D_{\lambda}^{0}+T_{\lambda}^{\mathrm{priv},t}(\psi_{\lambda}(h_i,\pi_i)),
+\label{eq:comm_latency}
+\end{equation}
+where \(R_{\lambda}^{t}=R_{u,v}^{t}\) for \(\lambda=(u,v,b)\), \(D_{\lambda}^{0}\) is the fixed base delay, and \(T_{\lambda}^{\mathrm{priv},t}\) is the link endpoint privacy processing latency. For \(\mathrm{none}\), \(T_{\lambda}^{\mathrm{priv},t}(\mathrm{none})=0\). Round level network fluctuation is represented by the time varying link rate \(R_{u,v}^{t}\).
+
+Using this link level term, the path level link flow latency of end device \(i\), denoted by \(T_i^t(h_i,\pi_i)\), is decomposed into execution, communication, waiting, aggregation, and switching components.
+
+The transmission indicator matrices build the communication part of the link
+flow as \(\mathcal{E}_{\mathrm{flow}}^{h_i}=
+\{\lambda=(u,v,b)\mid b\in\mathcal{B},\
+\mathbf{I}_{b}^{h_i}(u,v)=1\}\).
+Thus, nonzero entries in \(\mathbf{I}_{b}^{h_i}\) identify the communication links induced by mode \(h_i\).
+The subset \(\mathcal{E}_{\mathrm{priv}}^{h_i}\) contains the links in \(\mathcal{E}_{\mathrm{flow}}^{h_i}\) that require privacy protection.
+Let \(N_{\lambda}(h_i)\) be the number of times link \(\lambda\) is executed in one complete link flow.
+For a link executed inside a local link block, \(N_{\lambda}(h_i)=L_B\).
+If the local link block is nested inside an edge aggregation loop, the count becomes \(N_{\lambda}(h_i)=L_BE_B\).
+For links executed once per edge aggregation loop, \(N_{\lambda}(h_i)=E_B\).
+For final aggregation upload and model return links outside repeated loops, \(N_{\lambda}(h_i)=1\).
+The path level latency is decomposed as
+\begin{equation}
+\begin{aligned}
+T_i^t(h_i,\pi_i)
+&=T_i^{\mathrm{exec},t}(h_i)
++\sum_{\lambda\in\mathcal{E}_{\mathrm{flow}}^{h_i}}
+N_{\lambda}(h_i)T_{\lambda}^{\mathrm{link},t}(h_i,\pi_i)\\
+&\quad +T_i^{\mathrm{wait},t}(h_i)
++T_i^{\mathrm{agg},t}(h_i,\pi_i)
++T_i^{\mathrm{sw},t}.
+\end{aligned}
+\label{eq:latency_model}
+\end{equation}
+Here, \(T_i^{\mathrm{exec},t}\) denotes only the computation latency of the submodels executed at the end, edge, and cloud layers.
+It is coupled with the selected link flow through \(h_i\), but it does not include cross-layer transmission delay. That delay is accounted for separately by the summation of \(T_{\lambda}^{\mathrm{link},t}\) over \(\mathcal{E}_{\mathrm{flow}}^{h_i}\).
+\(T_i^{\mathrm{wait},t}\) denotes the waiting latency before upper layer aggregation is triggered, and \(T_i^{\mathrm{agg},t}\) denotes the aggregation latency assigned to the link flow.
+Changing the collaborative mode may require execution path rescheduling and model state movement, similar to task migration and switching cost modeling in edge computing and wireless FL~\cite{ZHANG2019111,ZHU2024303,CHEN2026112204,10757319,li2026latency}.
+The term \(T_i^{\mathrm{sw},t}\) denotes this mode reconfiguration latency in round \(t\), and we model it as
+\begin{equation}
+T_i^{\mathrm{sw},t}
+=\eta_h \mathbb{I}(h_i^t\neq h_i^{t-1})
++\eta_p
+\frac{\|\mathbf{p}(h_i^t)-\mathbf{p}(h_i^{t-1})\|_1}{2},
+\label{eq:switching_cost}
+\end{equation}
+where \(\eta_h\ge 0\) is the fixed time cost incurred when the selected collaborative mode changes, similar to the unit switching cost used in dynamic FL client selection~\cite{CHEN2026112204}.
+\(\eta_p\ge 0\) is the maximum variable time cost associated with model state placement change, motivated by edge service migration models where migration cost is proportional to the migrated service state size~\cite{li2026latency}.
+Both coefficients are configurable or profile based system parameters.
+To quantify the placement-change term in \(T_i^{\mathrm{sw},t}\), we define the normalized model state placement vector of mode \(h\) as
+\begin{equation}
+\mathbf{p}(h)=
+\frac{1}{Z_h}
+\left[
+\lvert M_L^h\rvert,
+\lvert M_E^h\rvert,
+\lvert M_C^h\rvert
+\right],
+\label{eq:model_placement_vector}
+\end{equation}
+where \(Z_h=\lvert M_L^h\rvert+\lvert M_E^h\rvert+\lvert M_C^h\rvert\). \(M_L^h\), \(M_E^h\), and \(M_C^h\) are the model state portions placed at the end, edge, and cloud layers under mode \(h\), respectively, and \(\lvert\cdot\rvert\) denotes profiled model state size. This normalization gives \(\mathbf{1}^{\top}\mathbf{p}(h)=1\), so \(\|\mathbf{p}(h_i^t)-\mathbf{p}(h_i^{t-1})\|_1/2\in[0,1]\). The normalized distance is used as a proxy for the fraction of model state whose placement changes between two consecutive selected modes.
+
+\subsubsection{Buffered Aggregation Cost}
+This subsection specifies the waiting and aggregation terms used in the path latency model under asynchronous buffered aggregation.
+To mitigate synchronization blocking caused by slow devices, we use an asynchronous buffered aggregation mechanism.
+For edge aggregator \(j\), let \(N_j\) be the number of associated end devices and \(\rho_{\mathrm{buf}}\in(0,1]\) be the buffered aggregation participation threshold.
+The number of clients needed to trigger aggregation is \(K_j=\lceil\rho_{\mathrm{buf}} N_j\rceil\).
+Let \(T_i^{\mathrm{lupd}}\) be the time needed for device \(i\) to complete the collaborative update process before upload.
+Let \(T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)\) denote the communication latency of the update upload from device \(i\) to edge aggregator \(j\), obtained from \(T_{\lambda}^{\mathrm{link},t}\) for the corresponding link \(\lambda=(i,j,\mathrm{upd})\).
+The arrival time at edge \(j\) is
+\(x_{i,j}^t=T_i^{\mathrm{lupd}}(h_i,\pi_i)+
+T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)\).
+Sorting arrival times as \(x_{(1),j}^t\le\cdots\le x_{(N_j),j}^t\), let
+\(S_j^t=\{i_{(1)},\ldots,i_{(K_j)}\}\) be the first \(K_j\) arrived clients
+selected into the buffered aggregation. The edge aggregation starts at
+\(X_j^t=x_{(K_j),j}^t=\max_{i\in S_j^t}x_{i,j}^t\), and client \(i\) waits
+\(W_{i,j}^{\mathrm{agg},t}=\max(0,X_j^t-x_{i,j}^t)\).
+If multiple updates arrive exactly at the trigger time \(X_j^t=x_{(K_j),j}^t\), all tied updates are admitted, so \(\lvert S_j^t\rvert\) may exceed \(K_j\).
+The edge aggregation time is
+\(T_j^{\mathrm{agg},t}=\beta_j\sum_{i\in S_j^t}
+\widetilde{S}_{i,j}^{\mathrm{upd},t}+T_j^{\mathrm{fix}}\), where \(\beta_j\)
+is the aggregation processing coefficient of edge aggregator \(j\). For the
+update upload link \(\lambda=(i,j,\mathrm{upd})\),
+\(\widetilde{S}_{i,j}^{\mathrm{upd},t}=\widetilde{S}_{\lambda}^t(h_i,\pi_i)\),
+i.e., the effective payload size of client \(i\)'s update received by edge
+aggregator \(j\) after the selected privacy mechanism is applied. The
+coefficient \(\beta_j\) can be obtained by offline profiling with varying
+update counts and payload sizes, and \(T_j^{\mathrm{fix}}\) denotes the fixed
+aggregation overhead. Privacy mechanism processing is accounted for in the
+link endpoint term \(T_{\lambda}^{\mathrm{priv},t}\).
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{time.png}
+\caption{Path level link flow latency decomposition for an end device in cloud-edge-end collaborative FL.}
+\label{fig:time}
+\end{figure}
+
+Fig.~\ref{fig:time} illustrates how the general latency decomposition in \equref{eq:latency_model} is instantiated in a representative complete end-edge-cloud link flow.
+The directional communication terms in the figure, such as \(T_{i,j}^{\mathrm{comm},t}\), \(T_{j\rightarrow c}^{\mathrm{comm},t}\), \(T_{c\rightarrow j}^{\mathrm{comm},t}\), and \(T_{j\rightarrow i}^{\mathrm{comm},t}\), are shorthand instances of \(T_{\lambda}^{\mathrm{link},t}\) for the corresponding directed links and transmitted objects.
+Marker \textcircled{1} denotes the local model training time of the end device, corresponding to \(T_i^{\mathrm{lupd}}(h_i,\pi_i)\).
+Marker \textcircled{2} denotes the communication time for uploading the transmission object of the selected link flow to the associated edge server, corresponding to \(T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)\). The transmission object is determined by \(b\in\mathcal{B}\).
+Marker \textcircled{3} denotes the waiting time after the upload is completed and before the edge server starts aggregation, corresponding to \(W_{i,j}^{\mathrm{agg},t}\).
+Marker \textcircled{4} denotes the arrival time \(x_{i,j}^{t}\) at the edge server.
+Marker \textcircled{5} denotes the start time \(X_j^{t}\) of local edge aggregation, which is determined by the latest arrival among the selected buffered aggregation set \(S_j^t\).
+Marker \textcircled{6} denotes the edge aggregation time, corresponding to \(T_j^{\mathrm{agg},t}\).
+Marker \textcircled{7} denotes the communication time for uploading the edge aggregated model to the cloud server, corresponding to \(T_{j\rightarrow c}^{\mathrm{comm},t}\).
+Marker \textcircled{8} denotes the waiting time after the edge server completes uploading and before the cloud server starts global aggregation, corresponding to \(W_{j,c}^{\mathrm{agg},t}\).
+Marker \textcircled{9} denotes the cloud global aggregation and model return stage, including the cloud aggregation time \(T_c^{\mathrm{agg},t}\) and the cloud to edge download time \(T_{c\rightarrow j}^{\mathrm{comm},t}\).
+Marker \textcircled{10} denotes the communication time for returning the updated global model from the edge server to the end device, corresponding to \(T_{j\rightarrow i}^{\mathrm{comm},t}\).
+
+For this representative path, \(T_i^t(h_i,\pi_i)\) can be expanded as
+\begin{equation}
+\begin{aligned}
+T_i^t(h_i,\pi_i)
+=&\;
+T_i^{\mathrm{lupd}}(h_i,\pi_i)
++T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)
++W_{i,j}^{\mathrm{agg},t}
++T_j^{\mathrm{agg},t}\\
+&+T_{j\rightarrow c}^{\mathrm{comm},t}
++W_{j,c}^{\mathrm{agg},t}
++T_c^{\mathrm{agg},t}
++T_{c\rightarrow j}^{\mathrm{comm},t}
++T_{j\rightarrow i}^{\mathrm{comm},t}.
+\end{aligned}
+\label{eq:path_total_latency}
+\end{equation}
+The expanded form is shown only for the representative path in \figref{fig:time}. For any selected mode \(h_i\), \(T_i^t(h_i,\pi_i)\) accumulates the terms on the complete link flow induced by that mode, including the model return required to prepare the device for the next round.
+
+\subsubsection{DP Budget Consumption}
+The DP budget is the \(\epsilon\) budget consumed by interaction links where DP is enabled.
+Privacy sensitive transmissions assigned to HE consume no DP budget and enter the communication latency model in \equref{eq:comm_latency} through ciphertext expansion and encryption or decryption processing overhead.
+
+Let \(\epsilon_i^t\) be the remaining privacy budget of client \(i\) at the beginning of round \(t\).
+By the basic sequential composition property of DP~\cite{dwork2014the}, the single round budget consumption is
+\begin{equation}
+    \epsilon_i^{\mathrm{used}}(h_i,\pi_i)
+    =
+    \sum_{\lambda=(u,v,b)\in\mathcal{E}_{\mathrm{priv}}^{h_i}}
+    N_{\lambda}(h_i)\mathbb{I}\left(\pi_i(\lambda)=\mathrm{DP}\right)\epsilon_b.
+\label{eq:privacy_budget}
+\end{equation}
+Here, \(N_{\lambda}(h_i)\) follows the link execution count defined in the path latency model, so repeated privacy sensitive links consume DP budget each time they are executed.
+Model return links may appear in \(\mathbf{I}_{\mathrm{upd}}^{h_i}\), but they are excluded from \(\mathcal{E}_{\mathrm{priv}}^{h_i}\) in the current setting and therefore do not consume DP budget.
+For Gaussian mechanisms under \((\epsilon,\delta)\)-DP, the slack parameter \(\delta\) is fixed throughout the experiments, and the decision state only includes the composable \(\epsilon\)-budget.
+A candidate is privacy feasible if \(\epsilon_i^{\mathrm{used}}(h_i,\pi_i)\le\epsilon_i^t\), after which the remaining budget is updated as \(\epsilon_i^{t+1}=\epsilon_i^t-\epsilon_i^{\mathrm{used}}(h_i,\pi_i)\).
+
+\subsubsection{Convergence Error}
+We next incorporate the selected privacy mechanisms into the convergence error model.
+Consider a model consisting of an encoder \(f_{\phi}\) and a downstream trainer \(g_{\theta}\).
+For a local sample \(x\), the encoder output is
+\(z=f_{\phi}(x)\in\mathbb{R}^{d_z}\).
+Feature level DP first clips the representation and then injects Gaussian noise, following forward pass output perturbation methods for differentially private intermediate representations~\cite{du2023dpforward}.
+\begin{equation}
+    z^{\mathrm{clip}}
+    =
+    \frac{z}{\max(1,\|z\|_2/C)},
+    \quad
+    \tilde{z}=z^{\mathrm{clip}}+\nu,
+    \quad
+    \nu\sim\mathcal{N}(0,\sigma^2\Delta_z^2I_{d_z}),
+    \quad \Delta_z=2C.
+\label{eq:feature_dp_noise}
+\end{equation}
+Here, \(C>0\) is the feature clipping threshold. By construction,
+\(\|z^{\mathrm{clip}}\|_2\le C\). Therefore, for any two inputs \(x\) and
+\(x'\),
+\(\|z^{\mathrm{clip}}(x)-z^{\mathrm{clip}}(x')\|_2\le 2C\).
+Accordingly, the \(L_2\)-sensitivity under replacement adjacency is bounded by
+\(\Delta_z=2C\), and the Gaussian noise is calibrated to \(\Delta_z\).
+Clipping itself can also distort the optimization signal. Let
+\(z_i^t=f_{\phi^t}(x_i)\) and
+\(J_{\phi,i}^t=\nabla_{\phi}f_{\phi^t}(x_i)\). Assume that
+\(\|J_{\phi,i}^t\|_{\mathrm{op}}
+=\sigma_{\max}(J_{\phi,i}^t)\le\kappa_z\), where
+\(\|\cdot\|_{\mathrm{op}}\) denotes the spectral operator norm induced by the
+Euclidean vector norm \(\|\cdot\|_2\). Assume also that the representation
+gradient is \(L_z\)-Lipschitz, i.e.,
+\(\|\nabla_z\ell(\theta,z')-\nabla_z\ell(\theta,z)\|_2
+\le L_z\|z'-z\|_2\). The resulting conditional mean square parameter-gradient
+distortion is bounded by
+\begin{equation}
+\begin{aligned}
+\mathcal{D}_{\mathrm{fclip},i}^{t}
+&=\mathbb{E}\!\left[
+\|(J_{\phi,i}^t)^\top
+[\nabla_z\ell(\theta^t,z_i^{t,\mathrm{clip}})
+-\nabla_z\ell(\theta^t,z_i^t)]\|_2^2\mid w^t\right]\\
+&\le \underbrace{\kappa_z^2L_z^2\mathbb{E}\!\left[
+(\|z_i^t\|_2-C)_+^2\mid w^t\right]}_{\displaystyle
+\mathcal{B}_{\mathrm{fclip},i}^{t}}.
+\end{aligned}
+\label{eq:feature_clipping_bias}
+\end{equation}
+The bound follows from
+\(\|z_i^{t,\mathrm{clip}}-z_i^t\|_2=(\|z_i^t\|_2-C)_+\). Hence,
+the explicitly defined upper-bound proxy
+\(\mathcal{B}_{\mathrm{fclip},i}^{t}\) is zero when the representation norm
+does not exceed \(C\) almost surely and is positive when clipping is active.
+The complete clipping-distortion derivation is given in
+Appendix~\ref{app:convergence_derivation}.
+For a linear prediction head, let
+\(o=W_{\mathrm{clf}}z^{\mathrm{clip}}+b\) and
+\(\tilde{o}=W_{\mathrm{clf}}\tilde{z}+b=o+W_{\mathrm{clf}}\nu\).
+For the softmax cross entropy loss \(\ell(\theta,\tilde{z})\), we use the
+classical small noise approximation that relates additive noise training to a
+curvature dependent regularization term~\cite{bishop1995training}. Since
+\(\nabla_o^2\ell=\operatorname{diag}(p)-pp^\top\) for
+\(p=\operatorname{softmax}(o)\), a second order Taylor expansion gives
+\begin{equation}
+\begin{aligned}
+\mathbb{E}_{\nu}[\ell(\theta,\tilde{z})]
+&\approx \ell(\theta,z^{\mathrm{clip}})+\Delta_{\mathrm{emb}},\\
+\Delta_{\mathrm{emb}}
+&=\frac{\sigma^2\Delta_z^2}{2}
+\operatorname{Tr}\!\left(W_{\mathrm{clf}}^\top\nabla_o^2\ell W_{\mathrm{clf}}\right)
+=\frac{\sigma^2\Delta_z^2}{4}\sum_{j,k}p_jp_k
+\|W_{\mathrm{clf},j}-W_{\mathrm{clf},k}\|_2^2.
+\end{aligned}
+\label{eq:delta_emb}
+\end{equation}
+This term shows that feature perturbation increases the expected local
+objective even when the injected noise has zero mean. This Taylor term isolates
+the Gaussian perturbation relative to the clipped representation. The separate
+term \(\mathcal{B}_{\mathrm{fclip},i}^{t}\) accounts for the distortion from
+the original representation to the clipped one.
+
+Feature level DP also affects the backward signal.
+Let \(\Delta o=W_{\mathrm{clf}}\nu\) and
+\(\Sigma_o=\mathbb{E}[\Delta o\Delta o^\top]
+=\sigma^2\Delta_z^2W_{\mathrm{clf}}W_{\mathrm{clf}}^\top\).
+Expanding the perturbed softmax probability \(\tilde{p}\) to second order gives
+\(\mathbb{E}_{\nu}[\tilde{p}_r]\approx
+p_r+\tfrac{1}{2}\operatorname{Tr}(H^{(r)}\Sigma_o)\), where \(H^{(r)}\) is
+the Hessian of the \(r\)-th softmax output with respect to logits. Define the
+bias vector by \([\mathbf{b}_{\mathrm{bias}}]_r=
+\tfrac{1}{2}\operatorname{Tr}(H^{(r)}\Sigma_o)\).
+Then the expected gradient with respect to the transmitted representation satisfies
+\begin{equation}
+\mathbb{E}_{\nu}\left[\frac{\partial\ell}{\partial \tilde{z}}\right]
+\approx
+W_{\mathrm{clf}}^\top(p-y)
++W_{\mathrm{clf}}^\top\mathbf{b}_{\mathrm{bias}}.
+\label{eq:feature_dp_bias}
+\end{equation}
+Thus, feature level DP introduces not only variance but also a systematic
+gradient bias with magnitude
+\(\zeta=\|W_{\mathrm{clf}}^\top\mathbf{b}_{\mathrm{bias}}\|_2\) in
+representation space. Under the Jacobian bound above, its squared contribution
+to the encoder parameter gradient is at most \(\kappa_z^2\zeta^2\). Details of
+the loss and backward-bias expansions are provided in
+Appendix~\ref{app:convergence_derivation}.
+
+For update level DP, we follow client level DP-FedAvg mechanisms that clip the client update difference before Gaussian perturbation~\cite{pmlr-v162-zhang22b}.
+The client update vector \(u_i^t=\operatorname{vec}(\theta_i^t-w_s^t)\) is clipped and perturbed.
+\begin{equation}
+    u_i^{t,\mathrm{clip}}
+    =
+    \frac{u_i^t}{\max(1,\|u_i^t\|_2/C_u)},
+    \quad
+    \tilde{u}_i^t=u_i^{t,\mathrm{clip}}+\xi_i^t,
+    \quad
+    \xi_i^t\sim\mathcal{N}(0,\sigma_u^2C_u^2I_d).
+\label{eq:update_dp_noise}
+\end{equation}
+By construction, \(\|u_i^{t,\mathrm{clip}}\|_2\le C_u\).
+Clipping also introduces a deterministic update distortion, which can create a persistent optimization bias when client update magnitudes are heterogeneous~\cite{pmlr-v162-zhang22b}.
+To express this distortion in gradient units, we define the local clipping bias proxy as
+\begin{equation}
+    \mathbf{b}_{\mathrm{clip},i}^{t}
+    =
+    \frac{u_i^{t,\mathrm{clip}}-u_i^t}{\eta_{\mathrm{lr}}L_B},
+    \qquad
+    \mathcal{B}_{\mathrm{clip},i}^{t}
+    =
+    \mathbb{E}\!\left[\|\mathbf{b}_{\mathrm{clip},i}^{t}\|_2^2\mid w^t\right]
+    =
+    \mathbb{E}\!\left[
+    \frac{(\|u_i^t\|_2-C_u)_+^2}{\eta_{\mathrm{lr}}^2L_B^2}
+    \mathrel{\Big|} w^t\right],
+\label{eq:update_clipping_bias}
+\end{equation}
+where \((a)_+=\max(a,0)\).
+The conditional mean square term \(\mathcal{B}_{\mathrm{clip},i}^{t}\) is zero when the update norm does not exceed the clipping threshold almost surely and increases with the amount removed by clipping.
+For normalized aggregation weights \(a_i\), Jensen's inequality gives
+\(\mathbb{E}[\|\sum_i a_i\mathbf{b}_{\mathrm{clip},i}^{t}\|_2^2\mid w^t]
+\le\sum_i a_i\mathcal{B}_{\mathrm{clip},i}^{t}\), so the weighted sum of local terms is a separable upper bound on the aggregate clipping bias.
+Update clipping and Gaussian perturbation affect convergence in different ways.
+The clipping distortion is generally nonzero in expectation and is therefore
+treated as a deterministic gradient error. Its conditional mean square
+\(\mathcal{B}_{\mathrm{clip},i}^{t}\) contributes to the persistent bias term
+in the PL error bound, together with the feature-level gradient biases.
+
+In contrast, the Gaussian update noise \(\xi_i^t\) has zero mean and contributes
+through its variance. Let \(K=|\mathcal{A}_s^{(t)}|\), and define the uniformly
+averaged updates before and after noise addition by
+\begin{equation}
+\begin{aligned}
+\bar u_s^t&=\frac{1}{K}\sum_{i\in\mathcal{A}_s^{(t)}}
+u_i^{t,\mathrm{clip}},\\
+\tilde u_s^t&=\frac{1}{K}\sum_{i\in\mathcal{A}_s^{(t)}}
+\tilde u_i^t
+=\bar u_s^t+\frac{1}{K}\sum_{i\in\mathcal{A}_s^{(t)}}\xi_i^t.
+\end{aligned}
+\label{eq:aggregated_update_noise}
+\end{equation}
+If the client noises are independent and identically distributed, their cross
+terms vanish, and hence
+\begin{equation}
+\mathbb{E}\|\tilde u_s^t-\bar u_s^t\|_2^2
+=\frac{1}{K^2}\sum_{i=1}^{K}\mathbb{E}\|\xi_i^t\|_2^2
+=\frac{\sigma_u^2C_u^2d}{K}.
+\label{eq:aggregated_update_variance}
+\end{equation}
+Thus, one client's marginal variance is weighted by \(1/K^2\), but summing the
+contributions of all \(K\) clients makes the total aggregated variance scale as
+\(1/K\), consistent with DP-FedAvg convergence analysis~\cite{pmlr-v162-zhang22b}.
+The detailed transition from the clipping-bias and noise-variance terms to the
+PL-based convergence error is provided in Appendix~\ref{app:convergence_derivation}.
+
+We assume that the original global objective \(F(w)\) is \(G\)-smooth and satisfies the \(\mu\)-PL condition
+\(\|\nabla F(w)\|_2^2\ge 2\mu(F(w)-F(w^*))\).
+Combining feature clipping bias, feature noise bias, loss inflation, local stochastic variance, update clipping bias, and update DP variance gives a one step recursion
+\begin{equation}
+\mathbb{E}[F(w^{t+1})-F(w^*)]
+\le
+(1-\rho_{\mathrm{PL}})\mathbb{E}[F(w^t)-F(w^*)]
++\mathcal{R}(h_i,\pi_i).
+\label{eq:pl_recursion}
+\end{equation}
+Taking the steady state of this recursion gives
+\(\limsup_{t\to\infty}\mathbb{E}[F(w^t)-F(w^*)]\le \mathcal{R}(h_i,\pi_i)/\rho_{\mathrm{PL}}\), which motivates the following upper-bound-inspired convergence error measure.
+Let \(\mathbb{I}_{\mathrm{emb}}^{i,t}\) and \(\mathbb{I}_{\mathrm{upd}}^{i,t}\) indicate whether client \(i\) enables DP for intermediate features and model updates in round \(t\).
+Consistent with the link level policy, \(\mathbb{I}_{b}^{i,t}=\mathbb{I}(\exists\lambda=(u,v,b)\in\mathcal{E}_{\mathrm{priv}}^{h_i}\text{ such that }\pi_i(\lambda)=\mathrm{DP})\).
+The conditional local convergence error is then defined as
+\begin{equation}
+\begin{aligned}
+    \widehat{\Omega}^{t}(h_i,\pi_i\mid\mathcal{A}_s^{(t)})
+    &= \frac{\mathcal{R}(h_i,\pi_i)}{\rho_{\mathrm{PL}}} \\
+    &= \frac{3}{2\mu}\Bigl[
+    \mathbb{I}_{\mathrm{emb}}^{i,t}\mathcal{B}_{\mathrm{fclip},i}^{t}
+    +\mathbb{I}_{\mathrm{upd}}^{i,t}\mathcal{B}_{\mathrm{clip},i}^{t}\\
+    &\qquad +\mathbb{I}_{\mathrm{emb}}^{i,t}
+    \bigl(\kappa_z^2\|W_{\mathrm{clf}}^\top\mathbf{b}_{\mathrm{bias}}\|_2^2
+    +G\Delta_{\mathrm{emb}}\bigr)\Bigr] \\
+    &\quad + \frac{G\eta_{\mathrm{lr}} L_B}{\mu}\left(\sigma_{\mathrm{local}}^2
+    + \mathbb{I}_{\mathrm{upd}}^{i,t}\frac{\sigma_u^2C_u^2d}{\eta_{\mathrm{lr}}^2L_B^2|\mathcal{A}_s^{(t)}|}\right).
+\end{aligned}
+\label{eq:local_omega}
+\end{equation}
+The conditioning on \(\mathcal{A}_s^{(t)}\) reflects that the update DP variance depends on the aggregation set and is therefore not purely determined by one local decision pair.
+Here, \(\rho_{\mathrm{PL}}\) is the contraction factor associated with the PL-based convergence analysis, and \(\eta_{\mathrm{lr}}\) is the learning rate.
+The two clipping bias terms capture feature and update distortion separately
+from the zero mean DP noise variance. The factor \(3\) conservatively bounds
+the squared norm of the sum of the feature clipping, feature noise, and update
+clipping gradient biases. In particular,
+\(\mathbb{I}_{\mathrm{emb}}^{i,t}\mathcal{B}_{\mathrm{fclip},i}^{t}\) in
+\equref{eq:local_omega} carries the feature clipping upper bound from
+\equref{eq:feature_clipping_bias} into the persistent PL error term. It vanishes
+when feature-level DP is disabled or clipping is inactive.
+The connection from these perturbation terms to the PL recursion is detailed in
+Appendix~\ref{app:convergence_derivation}. This convergence error measures the theoretical
+effects of privacy perturbation, clipping distortion, and local training
+instability, while real test accuracy is evaluated empirically.
+
+\subsection{Global Multi-Objective Collaborative Optimization}
+\label{sec:global_optimization}
+The previous subsection defines the resource feasibility, path level latency, privacy budget, and local convergence error for one device.
+Cloud-edge-end FL ultimately trains a system level global model.
+If each device independently selects the locally fastest and lowest error mode, cross edge information fusion may be insufficient, especially under non-IID data.
+Let \(\mathbf{h}_{\mathcal{N}}=[h_1,\dots,h_N]\) and \(\boldsymbol{\pi}_{\mathcal{N}}=[\pi_1,\dots,\pi_N]\) denote the global mode and privacy policy vectors.
+
+Path level latency \(T_i^t\) describes the time for device \(i\) to complete
+the path specified by its selected mode at decision epoch \(t\). Under the
+asynchronous buffered mechanism, the arrival process first determines the
+admitted set \(\mathcal{A}^{(t)}\) for the current aggregation event. Conditional
+on this set, we define the event-level system latency as the latest completed
+path among the admitted devices.
+\begin{equation}
+T_{\mathrm{sys}}^t(\mathbf{h}_{\mathcal{N}},\boldsymbol{\pi}_{\mathcal{N}})
+= \max_{i\in\mathcal{A}^{(t)}} T_i^t(h_i,\pi_i),
+\label{eq:global_latency}
+\end{equation}
+where \(\mathcal{A}^{(t)}\) is the set of devices admitted by their
+corresponding aggregation endpoints. This maximum is taken only over the
+admitted set. Slower non-admitted devices do not block the current asynchronous
+aggregation event.
+
+Let the set of cloud involved modes be
+\begin{equation}
+\mathcal{H}_C=\{\mathrm{LIC},\mathrm{LIIC},\mathrm{LIEIIC},\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
+\end{equation}
+The cloud fusion ratio is
+\begin{equation}
+r_C(\mathbf{h}_{\mathcal{N}})
+=
+\frac{\sum_{i=1}^{N} n_i\mathbb{I}(h_i\in\mathcal{H}_{C})}{N_{\mathrm{total}}},
+\quad
+N_{\mathrm{total}}=\sum_{i=1}^{N}n_i.
+\end{equation}
+It measures the sample proportion participating in cloud level cross edge
+fusion. To penalize insufficient cloud fusion, define
+\(\Psi_C(\mathbf{h}_{\mathcal{N}})=
+\xi/[r_C(\mathbf{h}_{\mathcal{N}})+\varepsilon]\), where \(\xi\) controls
+penalty strength and \(\varepsilon\) avoids division by zero.
+The system-level convergence error is
+\begin{equation}
+\widehat{\Omega}_{\mathrm{sys}}^t(\mathbf{h}_{\mathcal{N}},\boldsymbol{\pi}_{\mathcal{N}}\mid\mathcal{A}^{(t)})
+=
+\sum_{i=1}^{N}
+\frac{n_i}{N_{\mathrm{total}}}
+\widehat{\Omega}^{t}(h_i,\pi_i\mid\mathcal{A}^{(t)})
++\Psi_C(\mathbf{h}_{\mathcal{N}}).
+\label{eq:global_omega}
+\end{equation}
+When many devices remain in edge only modes including LIE and LIIE, \(r_C\) decreases and the cross edge fusion penalty increases, reflecting the risk of insufficient global information exchange.
+
+Let
+\(\mathbf{x}=(\mathbf{h}_{\mathcal N},\boldsymbol{\pi}_{\mathcal N})\)
+denote a complete system decision. Its global feasible set is
+\begin{equation}
+\mathcal X^t=\bigl\{\mathbf{x}\mid h_i\in\mathcal H_i^{\mathrm{res}},\
+\ \pi_i\in\Pi(h_i),\
+\ \epsilon_i^{\mathrm{used}}(h_i,\pi_i)\le\epsilon_i^t,
+\ \forall i\in\mathcal N\bigr\}.
+\label{eq:global_feasible_set}
+\end{equation}
+The global multi-objective problem minimizes system latency and system-level
+convergence error.
+\begin{equation}
+\underset{\mathbf{x}\in\mathcal X^t}{\operatorname{minimize}}\quad
+\mathbf f^t(\mathbf{x})=
+\begin{bmatrix}
+T_{\mathrm{sys}}^t(\mathbf{x})\\
+\widehat{\Omega}_{\mathrm{sys}}^t
+(\mathbf{x}\mid\mathcal A^{(t)})
+\end{bmatrix}.
+\label{eq:global_multiobjective}
+\end{equation}
+The Pareto-optimal decision set and its objective-space Pareto front are
+\begin{equation}
+\mathcal X_{\mathrm P}^t
+=\{\mathbf{x}\in\mathcal X^t\mid\nexists\mathbf{x}'\in\mathcal X^t,
+\ \mathbf{x}'\prec\mathbf{x}\},
+\qquad
+\mathcal F_{\mathrm P}^t
+=\{\mathbf f^t(\mathbf{x})\mid\mathbf{x}\in\mathcal X_{\mathrm P}^t\}.
+\label{eq:pareto_front}
+\end{equation}
+Here \(\prec\) denotes Pareto dominance.
+Let \(T_{\min}^t,T_{\max}^t\) and
+\(\widehat\Omega_{\min}^t,\widehat\Omega_{\max}^t\) denote the respective
+objective ranges over \(\mathcal X_{\mathrm P}^t\). The normalized objectives
+are
+\begin{equation}
+\begin{aligned}
+\bar T^t(\mathbf{x})&=
+\frac{T_{\mathrm{sys}}^t(\mathbf{x})-T_{\min}^t}
+{T_{\max}^t-T_{\min}^t+\varepsilon_n},\\
+\bar\Omega^t(\mathbf{x})&=
+\frac{\widehat\Omega_{\mathrm{sys}}^t(\mathbf{x}\mid\mathcal A^{(t)})
+-\widehat\Omega_{\min}^t}
+{\widehat\Omega_{\max}^t-\widehat\Omega_{\min}^t+\varepsilon_n}.
+\end{aligned}
+\label{eq:pareto_normalization}
+\end{equation}
+Here \(\varepsilon_n>0\) prevents division by zero. The reference point
+\(\mathbf z^{r,t}=[z_T^{r,t},z_\Omega^{r,t}]^\top\) can be prescribed or set
+to the computed ideal point
+\([T_{\min}^t,\widehat\Omega_{\min}^t]^\top\). Its normalized form is
+\(\bar{\mathbf z}^{r,t}=[\bar z_T^{r,t},\bar z_\Omega^{r,t}]^\top\).
+Using the normalized Tchebycheff distance to the reference or ideal
+point~\cite{steuer1983tchebycheff}, we define
+\begin{equation}
+\begin{aligned}
+D_\infty^t(\mathbf{x})
+&=\max\!\left\{
+\left|\bar T^t(\mathbf{x})-\bar z_T^{r,t}\right|,
+\left|\bar\Omega^t(\mathbf{x})-\bar z_\Omega^{r,t}\right|
+\right\},\\
+\mathbf{x}^\star
+&\in\arg\min_{\mathbf{x}\in\mathcal X_{\mathrm P}^t}
+D_\infty^t(\mathbf{x}).
+\end{aligned}
+\label{eq:selection}
+\end{equation}
+Thus, the selected profile minimizes its largest normalized deviation from
+the reference or ideal point. If several profiles attain the same minimum
+distance, any one of them can be returned because uniqueness is not required.
+Real test accuracy is not included in the objective function and is only used in experiments to evaluate the empirical effect of the convergence-error objective.
+
+\FloatBarrier
+\section{Algorithm}
+\label{sec:algorithm}
+
+Each device first constructs \(\mathcal S_i\) by retaining the pairs
+\((h_i,\pi_i)\) that satisfy the resource and privacy constraints. A complete global profile selects one
+pair from every \(\mathcal S_i\) and is evaluated by
+\((T_{\mathrm{sys}}^t,\widehat\Omega_{\mathrm{sys}}^t)\).
+
+For a small instance, the exact solver evaluates all
+\(M=\prod_{i\in\mathcal N}|\mathcal S_i|\) global profiles. Here,
+\(|\mathcal S_i|\) is the number of feasible candidates for device \(i\), and
+the product over all devices gives the total number of joint profiles. Sorting the
+resulting pairs by increasing latency and scanning the convergence error gives
+the exact Pareto set. Applying \equref{eq:selection} then gives one
+ideal-point Tchebycheff solution over the exact Pareto set. If one global evaluation costs
+\(C_{\mathrm{eval}}\), this procedure costs
+\(O(MC_{\mathrm{eval}}+M\log M)\). Its exponential value of \(M\) limits it
+to small-scale validation.
+
+For full-scale selection, a bounded search initializes a profile archive and
+expands each retained profile by replacing one device decision at a time. It
+maintains a bounded archive containing at most \(K_{\mathrm P}\) profiles that
+are non-dominated among the evaluated candidates. Here,
+\(K_{\mathrm P}\ge 2\) is the prescribed maximum archive size and controls
+the tradeoff between Pareto-front coverage and search complexity. Because only a subset of
+\(\mathcal X^t\) is explored, the resulting archive
+\(\widehat{\mathcal X}_{\mathrm P}^t\) approximates the exact Pareto set
+\(\mathcal X_{\mathrm P}^t\). The exact and approximate solvers use the same
+objective evaluation, normalization, and ideal-point Tchebycheff selection.
+Algorithm~\ref{alg:selection} presents the practical approximate solver.
+
+To describe the search cost, let
+\(K_{\mathrm{cand}}=\max_i|\mathcal S_i|\) be the largest number of
+candidates available to one device. From one retained profile, changing one
+device at a time generates at most \(N(K_{\mathrm{cand}}-1)\) neighboring
+profiles. Since the archive retains at most \(K_{\mathrm P}\) profiles, one
+expansion evaluates at most
+\(L\le K_{\mathrm P}N(K_{\mathrm{cand}}-1)\) neighboring profiles. Evaluating
+them costs \(O(LC_{\mathrm{eval}})\), and sorting them for Pareto filtering
+costs \(O(L\log L)\). Therefore, at most \(I_{\max}\) expansions cost
+\(O(I_{\max}L(C_{\mathrm{eval}}+\log L))\). Direct evaluation of the two
+system objectives aggregates the terms of \(N\) devices, so
+\(C_{\mathrm{eval}}=O(N)\).
+
+The search is performed only at the strategy update points determined by
+\(S_P\). At other rounds, the previous profile is reused. The latency caused
+by changing collaborative modes is included in \(T_i^t\).
+
+\begin{breakablealgorithm}
+\caption{Approximate Pareto-Based Mode and Privacy Selection}
+\label{alg:selection}
+\small
+\begin{algorithmic}[1]
+\REQUIRE Device set \(\mathcal N\), resource-feasible modes \(\mathcal H_i^{\mathrm{res}}\), policy sets \(\Pi(h_i)\), remaining budgets \(\epsilon_i^t\), admitted set \(\mathcal A^{(t)}\), models \(T_i^t\) and \(\widehat\Omega^t\), \(K_{\mathrm P},I_{\max},S_P\), optional \(\mathbf z^{r,t}\), and \(\mathbf x^{t-1}\)
+\ENSURE Selected global profile \(\mathbf x^\star=\{(h_i^\star,\pi_i^\star)\}_{i\in\mathcal N}\)
+\STATE \textbf{Preparation}
+\IF{\(t\) is not a strategy update point}
+    \RETURN \(\mathbf x^{t-1}\).
+\ENDIF
+\STATE For every \(i\in\mathcal N\), construct the candidate set satisfying the resource and privacy constraints
+\STATE \(\displaystyle
+\mathcal S_i=\{(h_i,\pi_i)\mid h_i\in\mathcal H_i^{\mathrm{res}},
+\pi_i\in\Pi(h_i),
+\epsilon_i^{\mathrm{used}}(h_i,\pi_i)\le\epsilon_i^t\}\).
+\STATE \(\displaystyle
+\mathcal X^t=\prod_{i\in\mathcal N}\mathcal S_i,\quad
+\mathbf x=(\mathbf h_{\mathcal N},\boldsymbol\pi_{\mathcal N})\).
+\begin{samepage}
+\STATE \textbf{Objective Evaluation}
+\STATE For every generated profile \(\mathbf x\), compute
+\STATE \(\displaystyle
+T_{\mathrm{sys}}^t(\mathbf x)=
+\max_{i\in\mathcal A^{(t)}}T_i^t(h_i,\pi_i)\).
+\end{samepage}
+\STATE \(\displaystyle
+r_C(\mathbf h_{\mathcal N})=
+\frac{\sum_{i=1}^{N}n_i\mathbb I(h_i\in\mathcal H_C)}
+{N_{\mathrm{total}}},\quad N_{\mathrm{total}}=\sum_{i=1}^{N}n_i\).
+\STATE \(\displaystyle
+\widehat\Omega_{\mathrm{sys}}^t(\mathbf x\mid\mathcal A^{(t)})=
+\sum_{i=1}^{N}\frac{n_i}{N_{\mathrm{total}}}
+\widehat\Omega^t(h_i,\pi_i\mid\mathcal A^{(t)})
++\frac{\xi}{r_C(\mathbf h_{\mathcal N})+\varepsilon}\).
+\STATE \textbf{Approximate Pareto Search}
+\STATE Construct \(\mathbf x_T\) and \(\mathbf x_\Omega\) by combining each device's minimizers of \(T_i^t\) and \(\widehat\Omega^t\) over \(\mathcal S_i\).
+\STATE Evaluate the feasible profiles in \(\{\mathbf x^{t-1},\mathbf x_T,\mathbf x_\Omega\}\) and retain their non-dominated subset as \(\mathcal A_0\).
+\FOR{\(r=1,\ldots,I_{\max}\)}
+    \STATE Generate all feasible profiles \(\mathcal V_r\subseteq\mathcal X^t\) that differ from a profile in \(\mathcal A_{r-1}\) at one device.
+    \STATE Evaluate \((T_{\mathrm{sys}}^t,\widehat\Omega_{\mathrm{sys}}^t)\) for every \(\mathbf x\in\mathcal V_r\).
+    \STATE \(\displaystyle
+    \mathcal A_r=\bigl\{\mathbf x\in\mathcal A_{r-1}\cup\mathcal V_r\mid
+    \nexists\mathbf x'\in\mathcal A_{r-1}\cup\mathcal V_r,\ 
+    \mathbf x'\prec\mathbf x\bigr\}\).
+    \IF{\(|\mathcal A_r|>K_{\mathrm P}\)}
+        \STATE Retain both objective endpoints and \(K_{\mathrm P}-2\) approximately uniform profiles in latency order.
+    \ENDIF
+    \IF{\(\mathcal A_r=\mathcal A_{r-1}\)}
+        \STATE \textbf{break}
+    \ENDIF
+\ENDFOR
+\STATE Set \(\widehat{\mathcal X}_{\mathrm P}^t\leftarrow\mathcal A_r\).
+\STATE \textbf{Ideal-Point Tchebycheff Selection}
+\STATE Compute \(T_{\min}^t,T_{\max}^t,
+\widehat\Omega_{\min}^t,\widehat\Omega_{\max}^t\) over
+\(\widehat{\mathcal X}_{\mathrm P}^t\).
+\STATE \(\displaystyle
+\bar T^t(\mathbf x)=
+\frac{T_{\mathrm{sys}}^t(\mathbf x)-T_{\min}^t}
+{T_{\max}^t-T_{\min}^t+\varepsilon_n},\quad
+\bar\Omega^t(\mathbf x)=
+\frac{\widehat\Omega_{\mathrm{sys}}^t(\mathbf x\mid\mathcal A^{(t)})-
+\widehat\Omega_{\min}^t}
+{\widehat\Omega_{\max}^t-\widehat\Omega_{\min}^t+\varepsilon_n}\).
+\STATE Use the prescribed \(\mathbf z^{r,t}\), or set it to
+\([T_{\min}^t,\widehat\Omega_{\min}^t]^\top\), and apply the same normalization to obtain
+\((\bar z_T^{r,t},\bar z_\Omega^{r,t})\).
+\STATE \(\displaystyle
+D_\infty^t(\mathbf x)=\max\!\left\{
+|\bar T^t(\mathbf x)-\bar z_T^{r,t}|,
+|\bar\Omega^t(\mathbf x)-\bar z_\Omega^{r,t}|
+\right\}\).
+\STATE \(\displaystyle
+\mathbf x^\star\in
+\arg\min_{\mathbf x\in\widehat{\mathcal X}_{\mathrm P}^t}
+D_\infty^t(\mathbf x)\).
+\RETURN \(\mathbf x^\star\).
+\end{algorithmic}
+\end{breakablealgorithm}
+
+\begin{table*}[t]
+\caption{Main Notation}
+\label{tab:notations}
+\centering
+\footnotesize
+\begin{tabular}{p{0.25\textwidth}p{0.69\textwidth}}
+\hline\hline
+\textbf{Symbol} & \textbf{Meaning} \\
+\hline
+\(\mathcal{N}, N\) & End device set and number of end devices \\
+\(\mathcal{H}, \mathcal{H}_i^{\mathrm{res}}\) & Global candidate collaborative mode set and resource feasible mode set of client \(i\) \\
+\(\Pi(h_i), \pi_i\) & Candidate privacy policy set under mode \(h_i\), and the privacy policy selected by client \(i\) \\
+\(\psi_{\lambda}(h_i,\pi_i)\) & Actual privacy mechanism applied on link \(\lambda\), selected from \(\pi_i\) for privacy eligible links and set to \(\mathrm{none}\) otherwise \\
+\(s_i=(h_i,\pi_i),\mathcal{S}_i\) & One decision pair of client \(i\), and the feasible candidate set \\
+\(L_B,E_B\) & Number of local link block loops and number of edge aggregation loops before cloud aggregation \\
+\(Q_{\mathrm{comp},i}, Q_{\mathrm{mem},i}\) & Local computation budget and memory upper bound of client \(i\) \\
+\(\epsilon_i^t\) & Remaining DP budget of client \(i\) at the beginning of round \(t\) \\
+\(W_{i,L}^{\mathrm{comp}}, M_i^{\mathrm{mem}}\) & Computation workload and memory requirement of client \(i\) under a selected mode \\
+\(\chi(h_i),F_i\) & Mode-dependent per-sample computation workload and fixed computing rate of client \(i\) \\
+\(\epsilon_i^{\mathrm{used}}\) & DP budget consumed by one complete link flow \\
+\(T_i, T_{\mathrm{sys}}\) & Path-level link-flow latency of client \(i\), and system latency of one triggered aggregation event \\
+\(C_i^{\mathrm{sw},t}, S_P\) & Mode switching overhead in round \(t\), and strategy update period for limiting reconfiguration frequency \\
+\(S_j^t,\lvert S_j^t\rvert\) & Set of client updates selected into edge aggregator \(j\)'s buffered aggregation in round \(t\), and the number of selected updates \\
+\(S_{\mathrm{agg}}^t\) & Privacy processed update payload size used in aggregation computation \\
+\(\widehat{\Omega}_i, \widehat{\Omega}_{\mathrm{sys}}\) & Local and system-level convergence errors \\
+\(\Psi_C, r_C\) & Cloud fusion insufficiency penalty and cloud fusion ratio \\
+\(\rho_{\mathrm{buf}},\rho_{\mathrm{PL}}\) & Buffered aggregation participation threshold and PL based convergence contraction factor \\
+\(\eta_{\mathrm{lr}},\nu\) & Learning rate and Gaussian noise added to intermediate features by feature level DP \\
+\(\Delta_{\mathrm{emb}},W_{\mathrm{clf}}\) & Feature level DP loss inflation term and local classifier weight matrix \\
+\(C,L_z,\kappa_z,\mathcal{B}_{\mathrm{fclip},i}^{t}\) & Feature clipping threshold, representation-gradient smoothness constant, encoder Jacobian bound, and feature clipping bias upper-bound proxy \\
+\(C_u,\mathcal{B}_{\mathrm{clip},i}^{t}\) & Update clipping threshold and conditional mean square clipping bias proxy \\
+\hline\hline
+\end{tabular}
+\end{table*}
+
+\section{Experiments}
+\label{sec:experiment}
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+We implement the cloud-edge-end FL simulator in Python 3.10 with 100 end
+devices, 10 edge nodes, and one cloud node. Resource constraints apply to the
+submodel executed by each end device, and every device must at least support
+the encoder-side link block. The main simulation parameters are listed in
+\tabref{tab:sim_params}.
+
+\begin{table}[t]
+\centering
+\caption{Default Simulation Parameters}
+\label{tab:sim_params}
+\begin{tabular}{lc}
+\hline
+\textbf{Parameter} & \textbf{Value and Description} \\
+\hline
+End and edge nodes & 100 end devices and 10 edge nodes \\
+Training rounds & \(T=50\) \\
+Device type ratio & weak 40\%, medium 35\%, strong 25\% \\
+Edge and cloud computation rate & 12.0 and 1000.0 \\
+Local link block loops & \(L_B=5\) \\
+Edge aggregation loops & \(E_B=3\) \\
+Initial DP budget & \(\epsilon_0=4.0\) \\
+Single DP event budget & \(\epsilon_{\mathrm{emb}}=0.03\), \(\epsilon_{\mathrm{upd}}=0.05\) \\
+Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=4.0\) MB \\
+HE expansion factor & \(\alpha_{\mathrm{HE}}=6.0\) \\
+Network jitter coefficient & 0.25 \\
+Edge pre aggregation reduction & 0.55 \\
+\hline
+\end{tabular}
+\end{table}
+
+The DP costs in \tabref{tab:sim_params} apply to individual protected
+transmission events. HE is modeled through profiled communication and
+processing overhead and does not consume DP budget. Its results therefore
+represent a simulated encrypted-transmission cost rather than an end-to-end
+cryptographic implementation.
+
+Real training uses Fashion-MNIST with LeNet-5 on 10 devices for 50 rounds and
+CIFAR-10 with pretrained ResNet-18 for 200 rounds. The Fashion-MNIST experiment
+uses 12000 training images, 2000 test images, one local epoch, learning rate
+0.15, and \(10^{-4}\) weight decay. The CIFAR-10 results are averaged over
+three random seeds under extreme edge label skew.
+
+The baselines include fixed hierarchical training, fixed privacy mechanisms,
+unprotected training, individual device optimization, and random feasible
+selection. Their exact semantics are summarized in
+Appendix~\ref{app:baselines}. We report test accuracy, logical time, communication, privacy
+budget, feasibility, and cloud fusion. Logical time accumulates modeled
+computation, communication, waiting, aggregation, and switching costs and is
+not wall-clock runtime. Our method uses the archive-estimated ideal point in
+\equref{eq:selection}.
+\FloatBarrier
+
+\subsection{System Level Simulation Results}
+\label{sec:simulation_results}
+\figref{fig:policy_comparison} shows the system level metric comparison under the default simulation configuration.
+Our method obtains a cloud fusion ratio of 0.456 and a system-level convergence error of 0.132, lower than the latency only policy.
+This indicates that after introducing the system-level convergence error, mode selection considers both end side latency and the risk of insufficient cross edge fusion, rather than simply selecting the fastest path.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig1_policy_comparison.pdf}
+\caption{System level metric comparison between our method and baseline policies.}
+\label{fig:policy_comparison}
+\end{figure}
+
+\subsection{Fashion-MNIST Real Training Results}
+\label{sec:fmnist_results}
+\tabref{tab:real_comparison} reports 50 round LeNet-5 real FedAvg training on Fashion-MNIST.
+Our method maintains an active ratio of 1.0, reaches 63.25\% final accuracy,
+and reduces logical time by 56.7\% relative to Fixed-DP. The unprotected and
+random baselines can obtain higher accuracy, but they do not provide the same
+privacy and system-cost control. This result confirms that the selector seeks
+a feasible efficiency--utility compromise rather than directly maximizing
+test accuracy.
+
+\begin{table}[t]
+\centering
+\caption{Performance Comparison on Fashion-MNIST with 50 Round LeNet-5 Real Training}
+\label{tab:real_comparison}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Policy} & \textbf{Final Acc.} & \textbf{Best Acc.} & \textbf{Logical Time} & \textbf{Comm.} & \textbf{DP Budget} \\
+\hline
+Ours & 0.632 & 0.728 & 355.198 & 3398.232 & 23.510 \\
+Fixed-DP & 0.610 & 0.746 & 819.593 & 2861.712 & 24.220 \\
+Privacy-Only & 0.779 & 0.779 & 144.329 & 3060.000 & 10.000 \\
+No-Protection & 0.744 & 0.762 & 310.413 & 3222.400 & 0.000 \\
+Random & 0.777 & 0.777 & 704.878 & 4181.184 & 22.320 \\
+\hline
+\end{tabular}
+\end{table}
+\FloatBarrier
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fmnist_lenet5_accuracy_convergence_with_random.png}
+\caption{Accuracy convergence on Fashion-MNIST with 50 round LeNet-5 real training. Curves are smoothed by a sliding window, and shaded bands represent rolling standard deviation within the same seed.}
+\label{fig:accuracy_convergence}
+\end{figure}
+
+\subsection{Dynamic Mode and Privacy Budget Analysis}
+\label{sec:mode_privacy}
+\figref{fig:mode_distribution} shows the mode distribution of our method across device categories.
+Across 500 client-round decisions, LIEIIC and LIIC account for 78.4\% and
+15.8\%, respectively, while less frequent modes remain available when device
+conditions change. Together with the active ratio of 1.0, this distribution
+shows that the selector adapts collaborative paths without excluding
+resource-limited devices.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fmnist_lenet5_mode_distribution_with_random.png}
+\caption{Mode distribution under our method across different device categories.}
+\label{fig:mode_distribution}
+\end{figure}
+
+\figref{fig:epsilon_impact} evaluates initial privacy budgets from 0.5 to 8.0.
+Our method preserves feasibility by selecting privacy mechanisms according to
+the remaining budget and their convergence-error contribution. In contrast,
+Fixed-DP is sensitive to tight budgets, with its active ratio increasing from
+10.6\% to 63.4\% as \(\epsilon_0\) increases from 0.5 to 4.0.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig3_epsilon_impact.pdf}
+\caption{Impact of initial privacy budget \(\epsilon_0\) on privacy consumption, active ratio, and local convergence error.}
+\label{fig:epsilon_impact}
+\end{figure}
+
+\subsection{CIFAR-10 Main Results and Core Ablations}
+\label{sec:cifar_results}
+We further evaluate pretrained ResNet-18 on CIFAR-10 for 200 rounds under
+extreme edge label skew. The default setting uses client and edge heterogeneity
+2.0/1.5, \(S_P=1\), three local epochs, and learning rate
+\(5\times10^{-4}\). Fixed-HFL uses the fixed LIIEIIIC three-layer path.
+
+\textbf{Main comparison across random seeds.}
+\tabref{tab:cifar_main} reports the three seed result under extreme edge label skew.
+Our method obtains the highest mean best accuracy among the structured
+baselines and reduces logical time by 24.2\% relative to Fixed-HFL. It also
+maintains zero skipped clients across the three seeds, supporting the
+efficiency and robustness of dynamic collaborative mode selection.
+
+\begin{table}[t]
+\centering
+\caption{CIFAR-10 with ResNet-18 Main Comparison Across Three Random Seeds Under Extreme Edge Label Skew}
+\label{tab:cifar_main}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Policy} & \textbf{Final Acc.} & \textbf{Best Acc.} & \textbf{Avg. Last 10 Acc.} & \textbf{Logical Time} & \textbf{Skip Rate} \\
+\hline
+Ours & \(0.578\pm0.021\) & \(0.622\pm0.003\) & \(0.587\pm0.014\) & 2767.5 & 0.000 \\
+Fixed-HFL & \(0.564\pm0.027\) & \(0.599\pm0.007\) & \(0.564\pm0.027\) & 3652.7 & 0.170 \\
+Fixed-DP & \(0.557\pm0.044\) & \(0.597\pm0.000\) & \(0.563\pm0.019\) & 7193.8 & 0.000 \\
+No-Protection & \(0.563\pm0.020\) & \(0.608\pm0.002\) & \(0.572\pm0.004\) & 7047.4 & 0.000 \\
+Individual-Optimal & \(0.587\pm0.010\) & \(0.620\pm0.011\) & \(0.578\pm0.019\) & 2716.6 & 0.000 \\
+Random & \(0.551\pm0.023\) & \(0.640\pm0.008\) & \(0.560\pm0.011\) & 6107.8 & 0.000 \\
+\hline
+\end{tabular}
+\end{table}
+\FloatBarrier
+
+\textbf{Resource heterogeneity ablation.}
+We compare client and edge heterogeneity levels 1.0/1.0, 2.0/1.5, and
+4.0/3.0 under extreme edge label skew. As shown in
+\figref{fig:resource_heterogeneity_fig}, our method retains full feasibility
+and zero skipped clients across all settings. At the strongest heterogeneity,
+its logical time is 2732.9 compared with 4211.8 for Fixed-HFL. The accompanying
+mode shift confirms that computation and aggregation paths adapt to resource
+variation.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{resource_heterogeneity_ablation.pdf}
+\caption{CIFAR-10 with ResNet-18 resource heterogeneity ablation.}
+\label{fig:resource_heterogeneity_fig}
+\end{figure*}
+
+\textbf{Strategy update period ablation.}
+The period \(S_P\) controls how many rounds reuse one selected profile before
+the search is run again. We vary \(S_P\) from 1 to 20 under strong resource
+heterogeneity. \figref{fig:sp_sensitivity} shows that \(S_P=1\) gives the
+highest best accuracy, while \(S_P=5\) gives the highest average accuracy over
+the last 10 rounds. Larger periods slightly reduce communication but delay
+adaptation, demonstrating the expected responsiveness--stability tradeoff.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{sp_sensitivity.pdf}
+\caption{Sensitivity to strategy update period in the CIFAR-10 with ResNet-18 experiment.}
+\label{fig:sp_sensitivity}
+\end{figure}
+\FloatBarrier
+
+\subsection{Discussion}
+\label{sec:discussion}
+The retained experiments directly support the main modeling claims. Dynamic
+mode selection maintains feasibility and adapts computation placement under
+resource heterogeneity, while privacy-aware selection avoids the budget
+exhaustion caused by uniformly applying DP. Fashion-MNIST confirms that the
+modeled convergence error is not identical to test accuracy, and the
+multi-seed CIFAR-10 results show that the selected compromise remains effective
+with a deeper model and stronger data heterogeneity.
+
+\section{Conclusion}
+\label{sec:conclusion}
+This paper studied collaborative mode selection for federated learning under cloud-edge-end resource and privacy constraints.
+We constructed resource feasible mode sets for heterogeneous end devices, defined a collaborative link block and link flow representation for cloud-edge-end collaborative links, modeled latency, DP budget consumption, and DP induced convergence error effects, and proposed a Pareto-front-based dynamic mode selection algorithm with ideal-point Tchebycheff compromise selection.
+
+In system simulation, the proposed method maintains an active ratio of 1.0 and obtains a cloud fusion ratio of 0.456 under the default setting, showing that weak devices can avoid being skipped through collaborative mode selection.
+In 50 round Fashion-MNIST + LeNet-5 real training, the proposed method reaches 63.25\% final accuracy and 72.80\% best accuracy, while reducing logical time from 819.59 to 355.20 compared with Fixed-DP.
+The CIFAR-10 with ResNet-18 experiment shows that, under extreme edge label skew across three seeds, the proposed method improves average best accuracy over Fixed-HFL from 0.5992 to 0.6217 and reduces logical time from 3652.7 to 2767.5.
+These results indicate that the proposed framework provides a feasible privacy, utility, and efficiency compromise, while multiple-seed real training and additional datasets remain useful directions for further validation.
+
+\appendix
+\section{Derivation of the Convergence Error}
+\label{app:convergence_derivation}
+
+This appendix provides the intermediate steps omitted from the convergence
+error analysis in Section~\ref{sec:cost_utility_model}. It separates the effects
+of feature clipping, Gaussian feature perturbation, update clipping, and update
+noise. Equalities associated with clipping are exact, whereas the feature-noise
+terms use a second-order small-noise approximation~\cite{bishop1995training}.
+
+\subsection{Feature Clipping Distortion}
+
+For
+\begin{equation}
+z^{\mathrm{clip}}=\frac{z}{\max(1,\|z\|_2/C)},
+\label{eq:app_feature_clipping}
+\end{equation}
+if \(\|z\|_2\le C\), then \(z^{\mathrm{clip}}=z\) and the clipping residual is
+zero. If \(\|z\|_2>C\), then
+\begin{equation}
+\begin{aligned}
+\|z^{\mathrm{clip}}-z\|_2
+&=\left\|\left(\frac{C}{\|z\|_2}-1\right)z\right\|_2\\
+&=\left|\frac{C}{\|z\|_2}-1\right|\|z\|_2
+=\|z\|_2-C.
+\end{aligned}
+\label{eq:app_feature_residual_active}
+\end{equation}
+Hence, the two cases can be written compactly as
+\begin{equation}
+\|z^{\mathrm{clip}}-z\|_2=(\|z\|_2-C)_+.
+\label{eq:app_feature_residual}
+\end{equation}
+
+Let \(g_z(\theta,z)=\nabla_z\ell(\theta,z)\). Under the assumptions
+\begin{equation}
+\|g_z(\theta,z')-g_z(\theta,z)\|_2\le L_z\|z'-z\|_2,
+\qquad
+\|J_{\phi,i}^t\|_{\mathrm{op}}\le\kappa_z,
+\label{eq:app_feature_assumptions}
+\end{equation}
+where \(J_{\phi,i}^t=\nabla_\phi f_{\phi^t}(x_i)\), the chain rule and the
+submultiplicative property of the operator norm yield
+\begin{equation}
+\begin{aligned}
+&\left\|(J_{\phi,i}^t)^\top
+\left[g_z(\theta^t,z_i^{t,\mathrm{clip}})
+-g_z(\theta^t,z_i^t)\right]\right\|_2\\
+&\quad\le
+\|J_{\phi,i}^t\|_{\mathrm{op}}
+\|g_z(\theta^t,z_i^{t,\mathrm{clip}})-g_z(\theta^t,z_i^t)\|_2\\
+&\quad\le
+\kappa_zL_z\|z_i^{t,\mathrm{clip}}-z_i^t\|_2
+=\kappa_zL_z(\|z_i^t\|_2-C)_+.
+\end{aligned}
+\label{eq:app_feature_gradient_bound}
+\end{equation}
+Squaring and taking conditional expectation gives
+\begin{equation}
+\mathcal{D}_{\mathrm{fclip},i}^t
+\le
+\kappa_z^2L_z^2
+\mathbb{E}\!\left[(\|z_i^t\|_2-C)_+^2\mid w^t\right]
+=\mathcal{B}_{\mathrm{fclip},i}^t,
+\label{eq:app_feature_bias_proxy}
+\end{equation}
+which establishes \equref{eq:feature_clipping_bias}. This is a parameter-gradient
+distortion bound, rather than a direct loss-difference bound.
+
+\subsection{Expected Loss Inflation Under Gaussian Feature Noise}
+
+Let \(o=W_{\mathrm{clf}}z^{\mathrm{clip}}+b\),
+\(\Delta o=W_{\mathrm{clf}}\nu\), and
+\(\tilde{o}=o+\Delta o\). Since
+\(\nu\sim\mathcal{N}(0,\sigma^2\Delta_z^2I_{d_z})\),
+\begin{equation}
+\mathbb{E}[\Delta o]=0,
+\qquad
+\Sigma_o=\mathbb{E}[\Delta o\Delta o^\top]
+=\sigma^2\Delta_z^2W_{\mathrm{clf}}W_{\mathrm{clf}}^\top.
+\label{eq:app_logit_covariance}
+\end{equation}
+A second-order Taylor expansion of the loss around \(o\) gives
+\begin{equation}
+\ell(\tilde{o})
+\approx
+\ell(o)+\nabla_o\ell(o)^\top\Delta o
++\frac{1}{2}\Delta o^\top\nabla_o^2\ell(o)\Delta o.
+\label{eq:app_loss_taylor}
+\end{equation}
+Taking expectation eliminates the first-order term. Using
+\(\mathbb{E}[x^\top Ax]=\operatorname{Tr}(A\mathbb{E}[xx^\top])\) gives
+\begin{equation}
+\begin{aligned}
+\mathbb{E}_{\nu}[\ell(\tilde{o})]
+&\approx \ell(o)
++\frac{1}{2}\operatorname{Tr}(\nabla_o^2\ell\,\Sigma_o)\\
+&=\ell(o)+\frac{\sigma^2\Delta_z^2}{2}
+\operatorname{Tr}\!\left(
+W_{\mathrm{clf}}^\top\nabla_o^2\ell W_{\mathrm{clf}}
+\right).
+\end{aligned}
+\label{eq:app_expected_loss}
+\end{equation}
+For softmax cross entropy,
+\(\nabla_o^2\ell=\operatorname{diag}(p)-pp^\top\succeq0\). Moreover, for a
+matrix \(W\) whose rows are \(W_j\),
+\begin{equation}
+\operatorname{Tr}\!\left[W^\top(\operatorname{diag}(p)-pp^\top)W\right]
+=\frac{1}{2}\sum_{j,k}p_jp_k\|W_j-W_k\|_2^2.
+\label{eq:app_pairwise_identity}
+\end{equation}
+Substitution into \equref{eq:app_expected_loss} yields
+\begin{equation}
+\Delta_{\mathrm{emb}}
+=\frac{\sigma^2\Delta_z^2}{4}
+\sum_{j,k}p_jp_k\|W_{\mathrm{clf},j}-W_{\mathrm{clf},k}\|_2^2
+\ge0,
+\label{eq:app_loss_inflation}
+\end{equation}
+which recovers \equref{eq:delta_emb}. Thus, zero-mean noise removes the linear
+Taylor term but not the curvature-dependent quadratic term.
+
+\subsection{Backward Gradient Bias Under Gaussian Feature Noise}
+
+For the \(r\)-th softmax output, let
+\(H^{(r)}=\nabla_o^2p_r(o)\). Its second-order expansion is
+\begin{equation}
+\tilde p_r
+\approx
+p_r+\nabla_op_r(o)^\top\Delta o
++\frac{1}{2}\Delta o^\top H^{(r)}\Delta o.
+\label{eq:app_softmax_taylor}
+\end{equation}
+Taking expectation and using \(\mathbb{E}[\Delta o]=0\) gives
+\begin{equation}
+\mathbb{E}_{\nu}[\tilde p_r]
+\approx p_r+\frac{1}{2}\operatorname{Tr}(H^{(r)}\Sigma_o)
+=p_r+[\mathbf b_{\mathrm{bias}}]_r.
+\label{eq:app_probability_bias}
+\end{equation}
+For softmax cross entropy with one-hot label \(y\),
+\(\nabla_{\tilde{o}}\ell=\tilde p-y\). Therefore,
+\begin{equation}
+\begin{aligned}
+\mathbb{E}_{\nu}[\nabla_{\tilde z}\ell]
+&=W_{\mathrm{clf}}^\top
+\left(\mathbb{E}_{\nu}[\tilde p]-y\right)\\
+&\approx W_{\mathrm{clf}}^\top(p-y)
++W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}},
+\end{aligned}
+\label{eq:app_backward_bias}
+\end{equation}
+which proves \equref{eq:feature_dp_bias}. The second term is a systematic
+representation-gradient bias. Mapping it through the encoder Jacobian gives
+\begin{equation}
+\|(J_{\phi,i}^t)^\top W_{\mathrm{clf}}^\top
+\mathbf b_{\mathrm{bias}}\|_2^2
+\le\kappa_z^2\|W_{\mathrm{clf}}^\top
+\mathbf b_{\mathrm{bias}}\|_2^2.
+\label{eq:app_encoder_noise_bias}
+\end{equation}
+
+\subsection{PL-Based Error Recursion}
+
+Let the combined deterministic parameter-gradient perturbation be
+\begin{equation}
+e_i^t=e_{\mathrm{fclip},i}^t+e_{\mathrm{fnoise},i}^t
++e_{\mathrm{uclip},i}^t.
+\label{eq:app_total_bias}
+\end{equation}
+The elementary inequality
+\begin{equation}
+\|a+b+c\|_2^2\le3(\|a\|_2^2+\|b\|_2^2+\|c\|_2^2)
+\label{eq:app_three_term_bound}
+\end{equation}
+and the bounds above imply
+\begin{equation}
+\begin{aligned}
+\mathbb{E}[\|e_i^t\|_2^2\mid w^t]
+\le3\Bigl(&\mathbb{I}_{\mathrm{emb}}^{i,t}
+\mathcal{B}_{\mathrm{fclip},i}^t
++\mathbb{I}_{\mathrm{emb}}^{i,t}\kappa_z^2
+\|W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}}\|_2^2\\
+&+\mathbb{I}_{\mathrm{upd}}^{i,t}
+\mathcal{B}_{\mathrm{clip},i}^t\Bigr).
+\end{aligned}
+\label{eq:app_combined_bias_bound}
+\end{equation}
+To make the coefficients in \equref{eq:local_omega} explicit, define the
+effective round step size
+\begin{equation}
+\alpha=\eta_{\mathrm{lr}}L_B
+\label{eq:app_effective_step}
+\end{equation}
+and write one perturbed update in gradient units as
+\begin{equation}
+w^{t+1}=w^t-\alpha
+\left[\nabla F(w^t)+e_i^t+q_i^t\right],
+\label{eq:app_perturbed_update}
+\end{equation}
+where \(e_i^t\) is the deterministic bias in \equref{eq:app_total_bias} and
+\(q_i^t\) is conditionally zero-mean stochastic error. Let
+\begin{equation}
+\begin{aligned}
+V_i^t
+&=\mathbb{E}[\|q_i^t\|_2^2\mid w^t]\\
+&\le \sigma_{\mathrm{local}}^2
++\mathbb{I}_{\mathrm{upd}}^{i,t}
+\frac{\sigma_u^2C_u^2d}
+{\alpha^2|\mathcal A_s^{(t)}|}.
+\end{aligned}
+\label{eq:app_total_variance}
+\end{equation}
+Indeed, for \(K=|\mathcal A_s^{(t)}|\) independent client noises,
+\(\bar\xi_s^t=K^{-1}\sum_{j=1}^{K}\xi_j^t\) satisfies
+\begin{equation}
+\mathbb{E}\|\bar\xi_s^t\|_2^2
+=\frac{\sigma_u^2C_u^2d}{K}.
+\label{eq:app_aggregated_update_noise}
+\end{equation}
+Dividing the update perturbation by \(\alpha\) converts it to gradient units,
+which explains the factor \(\alpha^{-2}\) in
+\equref{eq:app_total_variance}.
+
+Let \(g^t=\nabla F(w^t)\), and condition on \(w^t\). By \(G\)-smoothness and
+\(\mathbb{E}[q_i^t\mid w^t]=0\),
+\begin{equation}
+\begin{aligned}
+\mathbb{E}_t[F(w^{t+1})]
+&\le F(w^t)-\alpha\langle g^t,g^t+e_i^t\rangle\\
+&\quad+\frac{G\alpha^2}{2}
+\left(\|g^t+e_i^t\|_2^2+V_i^t\right).
+\end{aligned}
+\label{eq:app_smooth_descent}
+\end{equation}
+Using the exact identity
+\begin{equation}
+\langle g,g+e\rangle
+=\frac{1}{2}\|g\|_2^2+\frac{1}{2}\|g+e\|_2^2
+-\frac{1}{2}\|e\|_2^2,
+\label{eq:app_inner_product_identity}
+\end{equation}
+and assuming \(0<\alpha\le1/G\), \equref{eq:app_smooth_descent} becomes
+\begin{equation}
+\begin{aligned}
+\mathbb{E}_t[F(w^{t+1})]
+&\le F(w^t)-\frac{\alpha}{2}\|g^t\|_2^2
+-\frac{\alpha}{2}(1-G\alpha)\|g^t+e_i^t\|_2^2\\
+&\quad+\frac{\alpha}{2}\|e_i^t\|_2^2
++\frac{G\alpha^2}{2}V_i^t\\
+&\le F(w^t)-\frac{\alpha}{2}\|g^t\|_2^2
++\frac{\alpha}{2}\|e_i^t\|_2^2
++\frac{G\alpha^2}{2}V_i^t.
+\end{aligned}
+\label{eq:app_descent_bias_variance}
+\end{equation}
+The PL inequality implies
+\(-\alpha\|g^t\|_2^2/2\le
+-\mu\alpha[F(w^t)-F(w^*)]\). Define
+\begin{equation}
+\rho_{\mathrm{PL}}=\mu\alpha=\mu\eta_{\mathrm{lr}}L_B.
+\label{eq:app_pl_factor}
+\end{equation}
+Substituting \equref{eq:app_combined_bias_bound} into
+\equref{eq:app_descent_bias_variance} therefore gives
+\begin{equation}
+\begin{aligned}
+\mathbb{E}_t[F(w^{t+1})-F(w^*)]
+&\le(1-\rho_{\mathrm{PL}})[F(w^t)-F(w^*)]\\
+&\quad+\frac{3\alpha}{2}S_{\mathrm{bias},i}^t
++\frac{G\alpha^2}{2}V_i^t,
+\end{aligned}
+\label{eq:app_pl_recursion}
+\end{equation}
+where
+\begin{equation}
+\begin{aligned}
+S_{\mathrm{bias},i}^t
+={}&\mathbb{I}_{\mathrm{emb}}^{i,t}\mathcal B_{\mathrm{fclip},i}^t
++\mathbb{I}_{\mathrm{upd}}^{i,t}\mathcal B_{\mathrm{clip},i}^t\\
+&+\mathbb{I}_{\mathrm{emb}}^{i,t}\kappa_z^2
+\|W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}}\|_2^2.
+\end{aligned}
+\label{eq:app_bias_sum}
+\end{equation}
+Because \(\Delta_{\mathrm{emb}}\ge0\) and
+\(G\alpha^2V_i^t/2\le G\alpha^2V_i^t\), we use the conservative residual
+\begin{equation}
+\mathcal R(h_i,\pi_i)
+=\frac{3\alpha}{2}\left(
+S_{\mathrm{bias},i}^t
++\mathbb{I}_{\mathrm{emb}}^{i,t}G\Delta_{\mathrm{emb}}
+\right)+G\alpha^2V_i^t.
+\label{eq:app_residual_definition}
+\end{equation}
+The additional nonnegative \(G\Delta_{\mathrm{emb}}\) term retains the
+curvature-dependent expected loss inflation in the convergence error, while preserving the
+upper-bound direction of \equref{eq:app_pl_recursion}.
+
+For a fixed conditional residual, iterating the recursion gives
+\begin{equation}
+\mathbb{E}[F(w^t)-F(w^*)]
+\le(1-\rho_{\mathrm{PL}})^t[F(w^0)-F(w^*)]
++\frac{1-(1-\rho_{\mathrm{PL}})^t}{\rho_{\mathrm{PL}}}
+\mathcal R(h_i,\pi_i).
+\label{eq:app_recursion_unrolled}
+\end{equation}
+Thus its persistent error is bounded by
+\(\mathcal R(h_i,\pi_i)/\rho_{\mathrm{PL}}\). Finally, substituting
+\(\alpha=\eta_{\mathrm{lr}}L_B\), \equref{eq:app_total_variance}, and
+\equref{eq:app_bias_sum} yields
+\begin{equation}
+\begin{aligned}
+\widehat{\Omega}^{t}(h_i,\pi_i\mid\mathcal{A}_s^{(t)})
+&=\frac{\mathcal R(h_i,\pi_i)}{\rho_{\mathrm{PL}}}\\
+&=\frac{3}{2\mu}\Bigl[
+\mathbb{I}_{\mathrm{emb}}^{i,t}\mathcal B_{\mathrm{fclip},i}^t
++\mathbb{I}_{\mathrm{upd}}^{i,t}\mathcal B_{\mathrm{clip},i}^t\\
+&\qquad+\mathbb{I}_{\mathrm{emb}}^{i,t}\bigl(
+\kappa_z^2\|W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}}\|_2^2
++G\Delta_{\mathrm{emb}}\bigr)\Bigr]\\
+&\quad+\frac{G\eta_{\mathrm{lr}}L_B}{\mu}\left(
+\sigma_{\mathrm{local}}^2
++\mathbb{I}_{\mathrm{upd}}^{i,t}
+\frac{\sigma_u^2C_u^2d}
+{\eta_{\mathrm{lr}}^2L_B^2|\mathcal A_s^{(t)}|}
+\right),
+\end{aligned}
+\label{eq:app_local_omega}
+\end{equation}
+which is exactly \equref{eq:local_omega}. Consequently, the feature clipping
+term is propagated through the smoothness and PL analysis into the final
+persistent convergence error rather than being introduced only as an
+auxiliary definition.
+
+\section{Interpretation of the HE Overhead Model}
+\label{app:he_model}
+HE is included as a candidate privacy mechanism through a system level overhead model.
+For a transmitted object of size \(S\), the effective size under HE is modeled as \(\alpha_{\mathrm{HE}}S\), where \(\alpha_{\mathrm{HE}}>1\) represents ciphertext encoding and packing expansion.
+For an actual HE implementation, \(\alpha_{\mathrm{HE}}\) should be calibrated by serializing the encrypted payload generated from a representative tensor and dividing its byte size by the original plaintext tensor byte size.
+Equivalently, for packed ciphertext schemes, it can be estimated from the number of ciphertexts required to encode the tensor and the serialized byte size of each ciphertext.
+An additional processing latency \(T^P(\mathrm{HE})\) is also added to the communication path.
+This abstraction evaluates whether a dynamic selector avoids high cost encrypted paths when they are not beneficial.
+Thus, the HE related results represent system level overhead analysis rather than end to end encrypted training performance.
+
+\section{Baseline Semantics}
+\label{app:baselines}
+Fixed-DP isolates the effect of applying the same DP mechanism to all eligible transmissions.
+Fixed-HE isolates the effect of high cost encrypted update transmission.
+Fixed-HFL in the CIFAR-10 experiments forces clients to use the LIIEIIIC three layer path.
+Privacy-Only prioritizes low privacy risk and illustrates the gap between privacy preference alone and multi-objective optimization.
+No-Protection provides a utility reference without DP perturbation and should not be treated as privacy preserving.
+Individual-Optimal selects locally strong decisions and illustrates the gap between local utility and system level tradeoff.
+Random represents unconstrained path exploration. Its high instantaneous accuracy in some settings does not imply stable and cost efficient training.
+\bibliographystyle{elsarticle-num}
+\bibliography{refs}
+
+\end{document}
