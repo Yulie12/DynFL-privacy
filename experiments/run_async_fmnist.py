@@ -24,13 +24,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Async version-controlled FedAvg for FMNIST + LeNet5."
     )
-    parser.add_argument("--clients", type=int, default=10)
-    parser.add_argument("--edges", type=int, default=2)
+    parser.add_argument("--clients", type=int, default=100)
+    parser.add_argument("--edges", type=int, default=10)
     parser.add_argument("--train-limit", type=int, default=12000)
     parser.add_argument("--test-limit", type=int, default=2000)
     parser.add_argument("--local-epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--partition-mode",
+        default="client_noniid",
+        choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
+    )
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--data-root", default="E:/YTT/GROUP/DriftRace/data/fmnist/FashionMNIST/raw")
     parser.add_argument("--output-root", default="out/async_fmnist")
@@ -47,7 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-interval", type=int, default=10)
     parser.add_argument("--reselect-interval", type=int, default=3)
     parser.add_argument("--dp-noise", type=float, default=0.001)
-    parser.add_argument("--initial-epsilon", type=float, default=0.5)
+    parser.add_argument("--initial-epsilon", type=float, default=4.0)
+    parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
+    parser.add_argument("--dp-upd-epsilon", type=float, default=8.0)
     parser.add_argument(
         "--viz", action="store_true",
         help="Use visualization-compatible init: 6 ends × 3 edges, per-end budgets & sample ratios"
@@ -81,6 +88,9 @@ def main() -> None:
         output_dir=str(output_root),
         dp_noise_multiplier=args.dp_noise,
         initial_epsilon=args.initial_epsilon,
+        dp_emb_epsilon=args.dp_emb_epsilon,
+        dp_upd_epsilon=args.dp_upd_epsilon,
+        omega_learning_rate=args.lr,
         cloud_cpu_limit=20.0,
         **extra_kwargs,
     )
@@ -107,7 +117,9 @@ def main() -> None:
     client_indices = _partition_clients_lenet5(
         y_train=y_train,
         num_clients=args.clients,
+        num_edges=args.edges,
         iid=False,
+        partition_mode=args.partition_mode,
         seed=args.seed,
     )
     clients, edges = build_profiles(

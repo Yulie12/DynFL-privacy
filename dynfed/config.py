@@ -18,8 +18,10 @@ class RuntimeConfig:
     seed: int = 42
     local_update_base_time: float = 1.0
     edge_train_base_time: float = 0.8
-    edge_aggregation_base_time: float = 0.08
-    cloud_aggregation_base_time: float = 0.12
+    edge_aggregation_beta: float = 0.01
+    edge_aggregation_fixed: float = 0.02
+    cloud_aggregation_beta: float = 0.015
+    cloud_aggregation_fixed: float = 0.04
     client_heterogeneity: float = 2.0
     edge_heterogeneity: float = 1.5
     slow_client_rate: float = 0.15

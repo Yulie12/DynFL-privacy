@@ -10,7 +10,12 @@ from typing import Any
 
 from .config import ExperimentConfig
 from .nodes import ClientProfile, build_profiles, draw_bandwidth, draw_runtime_multiplier
-from .privacy import privacy_processing_time, protected_size, utility_penalty
+from .privacy import OBJECT_SIZES, privacy_processing_time, protected_size, utility_penalty
+
+
+DIRECT_CLOUD_MODES = {"LIC", "LIIC", "LIEIIC"}
+EDGE_ONLY_MODES = {"LIE", "LIIE"}
+MULTILEVEL_MODES = {"LIEIIIC", "LIIEIIIC"}
 
 
 @dataclass(frozen=True)
@@ -27,24 +32,25 @@ class ModeSpec:
     alpha: float = 5.0  # privacy exposure level for mode selection cost
     edge_cpu: float = 0.0  # CPU demand on edge per unit sample_ratio
     cloud_cpu: float = 0.0  # CPU demand on cloud per unit sample_ratio
+    local_memory: float = 1.0  # profiled end-device training-memory units
 
 
 MODE_SPECS = {
     # Edge-only (data lost to global model → highest global penalty)
     # LIE (edge-only, emb+label+grad): SpeedTask-analogue, all stages on edge
-    "LIE": ModeSpec("LIE", "edge", ["emb", "label", "grad"], [], 1.0, 0.35, 0.0, 0.17, alpha=6, edge_cpu=4, cloud_cpu=0),
+    "LIE": ModeSpec("LIE", "edge", ["emb", "label", "grad"], [], 1.0, 0.35, 0.0, 0.17, alpha=6, edge_cpu=4, cloud_cpu=0, local_memory=0.72),
     # LIIE (edge-only, upd): SpeedTask in visualization (α=2)
-    "LIIE": ModeSpec("LIIE", "edge", ["upd"], [], 1.15, 0.25, 0.0, 0.15, alpha=2, edge_cpu=4, cloud_cpu=0),
+    "LIIE": ModeSpec("LIIE", "edge", ["upd"], [], 1.15, 0.25, 0.0, 0.15, alpha=2, edge_cpu=4, cloud_cpu=0, local_memory=1.20),
     # LIC (cloud-direct, emb+label+grad): SuperTask in visualization (α=6)
-    "LIC": ModeSpec("LIC", "cloud", ["emb", "label", "grad"], [], 1.0, 0.0, 0.75, 0.025, alpha=6, edge_cpu=0, cloud_cpu=4),
+    "LIC": ModeSpec("LIC", "cloud", ["emb", "label", "grad"], [], 1.0, 0.0, 0.75, 0.025, alpha=6, edge_cpu=0, cloud_cpu=4, local_memory=0.68),
     # LIIC (cloud-direct, upd): No-Split in visualization (α=4)
-    "LIIC": ModeSpec("LIIC", "cloud", ["upd"], [], 1.15, 0.0, 0.7, 0.02, alpha=4, edge_cpu=1, cloud_cpu=1),
+    "LIIC": ModeSpec("LIIC", "cloud", ["upd"], [], 1.15, 0.0, 0.7, 0.02, alpha=4, edge_cpu=1, cloud_cpu=1, local_memory=1.20),
     # LIEIIC (edge→cloud): Split in visualization (α=5)
-    "LIEIIC": ModeSpec("LIEIIC", "edge", ["emb", "label", "grad"], ["upd"], 0.92, 0.7, 0.45, 0.003, alpha=5, edge_cpu=2, cloud_cpu=2),
+    "LIEIIC": ModeSpec("LIEIIC", "edge", ["emb", "label", "grad"], ["upd"], 0.92, 0.7, 0.45, 0.003, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.74),
     # LIEIIIC (edge→cloud, 2 edge loops): Split with multi-epoch
-    "LIEIIIC": ModeSpec("LIEIIIC", "edge", ["emb", "label", "grad"], ["upd"], 0.9, 1.1, 0.42, 0.001, E_edge_loops=2, alpha=5, edge_cpu=2, cloud_cpu=2),
+    "LIEIIIC": ModeSpec("LIEIIIC", "edge", ["emb", "label", "grad"], ["upd"], 0.9, 1.1, 0.42, 0.001, E_edge_loops=3, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.78),
     # LIIEIIIC (edge→cloud upd, 2 edge loops): No-Split with multi-epoch
-    "LIIEIIIC": ModeSpec("LIIEIIIC", "edge", ["upd"], ["upd"], 1.05, 0.9, 0.42, 0.004, E_edge_loops=2, alpha=3, edge_cpu=1, cloud_cpu=1),
+    "LIIEIIIC": ModeSpec("LIIEIIIC", "edge", ["upd"], ["upd"], 1.05, 0.9, 0.42, 0.004, E_edge_loops=3, alpha=3, edge_cpu=1, cloud_cpu=1, local_memory=1.24),
 }
 
 
@@ -190,6 +196,23 @@ def _simulate_round(
         client_comm_times[client.client_id] = comm_time
         client_arrivals[client.client_id] = start_time + local_time + comm_time
 
+        # LIEIIC sends each client-derived edge update directly to the cloud;
+        # unlike the multi-level modes, it has no edge pre-aggregation.
+        if spec.name == "LIEIIC":
+            edge_time = (
+                config.runtime.edge_train_base_time
+                * spec.edge_work
+                * edge_by_id[client.edge_id].compute_factor
+            )
+            edge_cloud_volume = protected_size(spec.edge_to_cloud_objects, mechanism)
+            edge_cloud_time = edge_cloud_volume / draw_bandwidth(
+                rng, 8.0, config.runtime.network_jitter
+            )
+            edge_compute_total += edge_time
+            communication_volume += edge_cloud_volume
+            communication_total += edge_cloud_time
+            client_arrivals[client.client_id] += edge_time + edge_cloud_time
+
         events.append(
             {
                 "round": round_idx,
@@ -198,21 +221,39 @@ def _simulate_round(
                 "client_id": client.client_id,
                 "edge_id": client.edge_id,
                 "is_slow": is_slow,
-                "duration": local_time + comm_time,
+                "duration": client_arrivals[client.client_id] - start_time,
             }
         )
 
     edge_finish_times: dict[int, float] = {}
-    if spec.client_target == "cloud":
+    if spec.name in DIRECT_CLOUD_MODES:
         k = max(1, math.ceil(len(clients) * agg_fraction))
         selected = sorted(clients, key=lambda item: client_arrivals[item.client_id])[:k]
         selected_clients = [client.client_id for client in selected]
         cloud_start = max(client_arrivals[cid] for cid in selected_clients)
         waiting_total += sum(cloud_start - client_arrivals[cid] for cid in selected_clients)
-        cloud_agg = config.runtime.cloud_aggregation_base_time * spec.cloud_work * len(selected)
+        cloud_payload = sum(
+            _cloud_aggregation_payload(spec.name, mechanism) for _ in selected
+        )
+        cloud_agg = (
+            config.runtime.cloud_aggregation_beta * cloud_payload
+            + config.runtime.cloud_aggregation_fixed
+        )
         aggregation_total += cloud_agg
         round_end_time = cloud_start + cloud_agg
         num_effective_edges = 1
+        events.append(
+            {
+                "round": round_idx,
+                "time": round_end_time,
+                "event_type": "cloud_aggregate_direct",
+                "num_clients": len(selected),
+                "effective_payload": cloud_payload,
+                "aggregation_beta": config.runtime.cloud_aggregation_beta,
+                "aggregation_fixed": config.runtime.cloud_aggregation_fixed,
+                "aggregation_time": cloud_agg,
+            }
+        )
     else:
         for edge_id, edge_clients in clients_by_edge.items():
             k = max(1, math.ceil(len(edge_clients) * agg_fraction))
@@ -223,13 +264,21 @@ def _simulate_round(
             waiting_total += sum(edge_start - client_arrivals[cid] for cid in local_selected)
 
             edge_profile = edge_by_id[edge_id]
+            loop_factor = spec.E_edge_loops if spec.name in MULTILEVEL_MODES else 1
             edge_train = (
                 config.runtime.edge_train_base_time
                 * spec.edge_work
+                * loop_factor
                 * max(1, config.mode.edge_local_cycles)
                 * edge_profile.compute_factor
             )
-            edge_agg = config.runtime.edge_aggregation_base_time * len(local_selected)
+            edge_payload = sum(
+                _edge_aggregation_payload(spec.name, mechanism) for _ in local_selected
+            )
+            edge_agg = loop_factor * (
+                config.runtime.edge_aggregation_beta * edge_payload
+                + config.runtime.edge_aggregation_fixed
+            )
             edge_compute_total += edge_train
             aggregation_total += edge_agg
             edge_ready = edge_start + edge_train + edge_agg
@@ -249,17 +298,47 @@ def _simulate_round(
                     "edge_id": edge_id,
                     "num_clients": len(local_selected),
                     "duration": edge_finish_times[edge_id] - start_time,
+                    "effective_payload": edge_payload,
+                    "aggregation_beta": config.runtime.edge_aggregation_beta,
+                    "aggregation_fixed": config.runtime.edge_aggregation_fixed,
+                    "aggregation_time": edge_agg,
+                    "loop_factor": loop_factor,
                 }
             )
 
-        edge_k = max(1, math.ceil(len(edge_finish_times) * agg_fraction))
-        selected_edges = sorted(edge_finish_times, key=edge_finish_times.get)[:edge_k]
-        cloud_start = max(edge_finish_times[edge_id] for edge_id in selected_edges)
-        waiting_total += sum(cloud_start - edge_finish_times[edge_id] for edge_id in selected_edges)
-        cloud_agg = config.runtime.cloud_aggregation_base_time * spec.cloud_work * len(selected_edges)
-        aggregation_total += cloud_agg
-        round_end_time = cloud_start + cloud_agg
-        num_effective_edges = len(selected_edges)
+        if spec.name in EDGE_ONLY_MODES:
+            round_end_time = max(edge_finish_times.values())
+            num_effective_edges = len(edge_finish_times)
+        else:
+            edge_k = max(1, math.ceil(len(edge_finish_times) * agg_fraction))
+            selected_edges = sorted(edge_finish_times, key=edge_finish_times.get)[:edge_k]
+            cloud_start = max(edge_finish_times[edge_id] for edge_id in selected_edges)
+            waiting_total += sum(
+                cloud_start - edge_finish_times[edge_id] for edge_id in selected_edges
+            )
+            cloud_payload = sum(
+                protected_size(spec.edge_to_cloud_objects, mechanism)
+                for _ in selected_edges
+            )
+            cloud_agg = (
+                config.runtime.cloud_aggregation_beta * cloud_payload
+                + config.runtime.cloud_aggregation_fixed
+            )
+            aggregation_total += cloud_agg
+            round_end_time = cloud_start + cloud_agg
+            num_effective_edges = len(selected_edges)
+            events.append(
+                {
+                    "round": round_idx,
+                    "time": round_end_time,
+                    "event_type": "cloud_aggregate_edge",
+                    "num_edges": len(selected_edges),
+                    "effective_payload": cloud_payload,
+                    "aggregation_beta": config.runtime.cloud_aggregation_beta,
+                    "aggregation_fixed": config.runtime.cloud_aggregation_fixed,
+                    "aggregation_time": cloud_agg,
+                }
+            )
 
     return {
         "round_end_time": round_end_time,
@@ -276,6 +355,22 @@ def _simulate_round(
         "slow_clients": slow_clients,
         "events": events,
     }
+
+
+def _edge_aggregation_payload(mode_name: str, mechanism: str) -> float:
+    if mode_name in {"LIE", "LIEIIIC"}:
+        return float(OBJECT_SIZES["upd"])
+    if mode_name in {"LIIE", "LIIEIIIC"}:
+        return protected_size(["upd"], mechanism)
+    return 0.0
+
+
+def _cloud_aggregation_payload(mode_name: str, mechanism: str) -> float:
+    if mode_name in {"LIC"}:
+        return float(OBJECT_SIZES["upd"])
+    if mode_name in {"LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"}:
+        return protected_size(["upd"], mechanism)
+    return 0.0
 
 
 def _synthetic_accuracy(

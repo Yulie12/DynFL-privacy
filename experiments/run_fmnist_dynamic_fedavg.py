@@ -34,14 +34,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-root", default="E:/YTT/GROUP/DriftRace/data/fmnist/FashionMNIST/raw")
     parser.add_argument("--output-root", default="out/fmnist_dynamic_fedavg")
-    parser.add_argument("--rounds", type=int, default=20)
-    parser.add_argument("--clients", type=int, default=10)
-    parser.add_argument("--edges", type=int, default=2)
+    parser.add_argument("--rounds", type=int, default=100)
+    parser.add_argument("--clients", type=int, default=100)
+    parser.add_argument("--edges", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-limit", type=int, default=12000)
     parser.add_argument("--test-limit", type=int, default=2000)
-    parser.add_argument("--initial-epsilon", type=float, default=4.0)
+    parser.add_argument("--initial-epsilon", type=float, default=8.0)
     parser.add_argument("--dp-event-epsilon", type=float, default=0.05)
+    parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
+    parser.add_argument("--dp-upd-epsilon", type=float, default=8.0)
     parser.add_argument("--resource-limit", type=float, default=1.35)
     parser.add_argument("--time-limit", type=float, default=8.0)
     parser.add_argument("--risk-limit", type=float, default=0.5)
@@ -63,6 +65,9 @@ def main() -> None:
         seed=args.seed,
         initial_epsilon=args.initial_epsilon,
         dp_event_epsilon=args.dp_event_epsilon,
+        dp_emb_epsilon=args.dp_emb_epsilon,
+        dp_upd_epsilon=args.dp_upd_epsilon,
+        omega_learning_rate=args.lr,
         resource_limit=args.resource_limit,
         time_limit=args.time_limit,
         risk_limit=args.risk_limit,

@@ -1,6 +1,8 @@
-# DynFedPrivacy NewTeX
+# Dynamic Cloud-Edge-End Collaboration Reconfiguration
 
-This is the cleaned maintenance copy of the DynFedPrivacy project.
+This repository contains the simulator, real model training path, privacy
+mechanisms, CKKS aggregation, and paper artifacts for the collaboration
+reconfiguration framework.
 
 It keeps only the code and TeX sources needed for the current NewTeX logic:
 
@@ -11,6 +13,9 @@ It keeps only the code and TeX sources needed for the current NewTeX logic:
 Large outputs, datasets, caches, IDE files, previous paper packages, and old
 experiment artifacts are intentionally excluded.
 
+See [`PAPER_CONFORMANCE.md`](PAPER_CONFORMANCE.md) for the maintained mapping
+between paper equations, executable logic, and explicitly declared approximations.
+
 ## Main Entry Points
 
 Start the local web monitor:
@@ -19,11 +24,73 @@ Start the local web monitor:
 python experiments\monitor_lenet5_training.py --port 8765
 ```
 
-Run the current training entry directly:
+Inspect the exact main experiment commands without starting training:
 
 ```powershell
-python experiments\run_fmnist_lenet5.py --rounds 50 --policies ours fixed_dp no_protection random
+python experiments\run_paper_config.py --dry-run
 ```
+
+Run one two round smoke test before the full experiment:
+
+```powershell
+python experiments\run_paper_config.py --seeds 42 --policies ours --rounds 2
+```
+
+Run the complete main experiment:
+
+```powershell
+python experiments\run_paper_config.py
+```
+
+The versioned configuration is
+`configs/paper_v22_cifar10_resnet18.json`. It fixes CIFAR 10, pretrained
+ResNet 18, 100 clients, 10 edge nodes, 200 rounds, seeds 40 through 44,
+separate feature and update privacy targets of 8.0, full update CKKS
+aggregation, and the eight compared policies. The configured seeds are 40, 41,
+42, 43, and 44. The runner accepts `--seeds`,
+`--policies`, and `--rounds` overrides so long experiments can be split into
+separate processes without changing the recorded base configuration.
+
+The default executor is `serial`, which is the paper reproduction path. To
+approximate multiple CPU workers running client local training concurrently,
+use the optional CPU-only worker pool:
+
+```powershell
+python experiments\run_fmnist_lenet5.py --rounds 100 --executor process_pool --executor-workers 4 --device cpu --policies ours individual_optimal no_protection random
+```
+
+Run with real CKKS encrypted aggregation for HE-selected updates:
+
+```powershell
+pip install -r requirements-he.txt
+python experiments\run_fmnist_lenet5.py --rounds 100 --he-backend tenseal --require-real-he --he-aggregation-size 0 --policies ours
+```
+
+To use the Fed3Scale SEAL binding instead of TenSEAL, build and install the
+local PySEAL package from a Visual Studio x64 developer prompt:
+
+```powershell
+cd E:\YTT\GROUP\Fed3Scale_luqiwang\Fed3Scale\SEAL-python
+cmake -S SEAL -B SEAL\build -G Ninja -DSEAL_USE_MSGSL=OFF -DSEAL_USE_ZLIB=OFF -DSEAL_USE_ZSTD=OFF
+cmake --build SEAL\build
+python -m pip install wheel
+python -m pip install . --no-build-isolation
+python E:\YTT\GROUP\DynFL-privacy\experiments\run_fmnist_lenet5.py --rounds 100 --he-backend seal --require-real-he --he-aggregation-size 0 --policies ours
+```
+
+The `seal` backend follows the Fed3Scale style PySEAL and CKKS flow with
+`EncryptionParameters`, `SEALContext`, `KeyGenerator`, `CKKSEncoder`,
+`Encryptor`, `Evaluator`, and `Decryptor`. It encrypts the update payload at the
+selected aggregation link (including edge-preaggregated payloads), aggregates ciphertexts, and decrypts only the aggregate
+before applying FedAvg. Partial update encryption is rejected. A value of zero
+for `--he-aggregation-size` means that every parameter value is encrypted. At
+startup, the backend validates encrypted vector
+addition against its plaintext result. The decoder also handles the zero-stride
+NumPy metadata produced by the Fed3Scale wrapper when built with pybind11 3.x.
+The `tenseal` backend uses the same CKKS encrypted
+aggregation semantics and is easier to install in the current Python
+environment. Without `--he-backend seal` or `--he-backend tenseal`, HE
+candidates are disabled in the real-training selector.
 
 The main code path is:
 
@@ -37,24 +104,70 @@ experiments/monitor_lenet5_training.py
 
 ## NewTeX Logic
 
-The current implementation is aligned with the new TeX logic around:
+The current implementation is aligned with the paper logic around:
 
-- global Pareto profile selection,
+- global collaboration reconfiguration,
+- a unified seven mode collaboration space,
+- self contained event flow evaluation for every candidate profile,
 - system latency `T_sys`,
-- system convergence proxy `Omega_sys`,
+- estimated system convergence error cost `Omega_sys`,
 - cloud fusion ratio penalty,
 - strategy update period,
-- switching cost proxy,
-- mixed edge/cloud flow execution.
+- switching cost estimate,
+- mixed edge and cloud flow execution,
+- separate record and client DP guarantees,
+- complete CKKS aggregation, and
+- measured end to end wall time.
 
-New runs created by `run_fmnist_lenet5.py` include `newtex202608` in the run
-directory name so they can be distinguished from historical outputs.
+Only outputs with `training.execution_revision=paper_flow_v22_wall_raw_nsga` are
+accepted by the current aggregation scripts. Historical checkpoints and
+results are not compatible with the revised DP, HE, timing, and Pareto logic.
+
+Validate the bounded Pareto search against exact enumeration on small cases:
+
+```powershell
+python experiments\validate_pareto_search.py --output-dir out\pareto_validation_v22
+```
+
+Aggregate completed main runs and produce confidence intervals and paired
+comparisons:
+
+```powershell
+python experiments\aggregate_multiseed_results.py --root out\paper_v22_cifar10_resnet18 --seeds 40 41 42 43 44 --output-dir out\paper_v22_cifar10_resnet18_aggregate --paper-figure tex\paper\figures\cifar10_resnet18_200r_wall_time_accuracy_v22.png --paper-reconfiguration-figure tex\paper\figures\cifar10_reconfiguration_trace_v22.png
+```
+
+Calibrate the estimated convergence error cost against the realized post
+update loss and utility changes:
+
+```powershell
+python experiments\calibrate_convergence_cost.py --root out\paper_v22_cifar10_resnet18 --seeds 40 41 42 43 44 --output-dir out\paper_v22_convergence_calibration
+```
+
+Run and aggregate the strategy period, privacy budget, client scale, and
+ablation studies. The first three studies use seeds 40, 42, and 44. The key
+ablation uses seeds 40 through 44:
+
+```powershell
+python experiments\run_controlled_sweeps.py
+python experiments\aggregate_controlled_results.py
+```
+
+Run and aggregate the Fashion MNIST and LeNet 5 setting:
+
+```powershell
+python experiments\run_paper_config.py --config configs\paper_v22_fmnist_lenet5.json
+python experiments\aggregate_multiseed_results.py --root out\paper_v22_fmnist_lenet5 --seeds 40 41 42 43 44 --dataset fmnist --model lenet5 --output-dir out\paper_v22_fmnist_lenet5_aggregate --paper-figure tex\paper\figures\fmnist_lenet5_200r_wall_time_accuracy_v22.png
+```
 
 ## Data
 
 Datasets are not committed. Put data under a local path and pass `--data-root`
 when needed, or use the existing local defaults on the machine where the
 experiments were developed.
+
+Each v22 run writes the exact selected subset partition, generated client and
+edge profiles, model parameter split, runtime package versions, raw decisions,
+link events, and round metrics beside its `config.json` file.
 
 ## TeX
 
@@ -65,4 +178,3 @@ tex/paper/main.tex
 ```
 
 Compile it in TeXstudio from `tex/paper/`.
-

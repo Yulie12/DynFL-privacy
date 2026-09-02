@@ -1,0 +1,3 @@
+# TenSEAL is installable from PyPI. The `seal` backend uses the Fed3Scale
+# SEAL-python binding and must be built from the local source tree; see README.
+tenseal

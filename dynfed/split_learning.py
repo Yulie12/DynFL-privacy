@@ -529,11 +529,49 @@ def build_split_models(
     image_size: int = 28,
     num_classes: int = 10,
 ) -> tuple[nn.Module, nn.Module, nn.Module]:
-    end_cls, edge_cls, full_cls = MODEL_BUILDERS[normalize_model_name(model_name)]
+    end_model, edge_model = build_split_pair(
+        model_name,
+        device,
+        input_channels=input_channels,
+        image_size=image_size,
+        num_classes=num_classes,
+    )
+    full_model = build_full_model(
+        model_name,
+        device,
+        input_channels=input_channels,
+        image_size=image_size,
+        num_classes=num_classes,
+    )
+    return end_model, edge_model, full_model
+
+
+def build_split_pair(
+    model_name: str,
+    device: torch.device,
+    input_channels: int = 1,
+    image_size: int = 28,
+    num_classes: int = 10,
+) -> tuple[nn.Module, nn.Module]:
+    end_cls, edge_cls, _full_cls = MODEL_BUILDERS[normalize_model_name(model_name)]
     end_model = end_cls(input_channels=input_channels, image_size=image_size).to(device)
     edge_model = edge_cls(embedding_dim=getattr(end_model, "embedding_dim", 32), num_classes=num_classes).to(device)
-    full_model = full_cls(input_channels=input_channels, image_size=image_size, num_classes=num_classes).to(device)
-    return end_model, edge_model, full_model
+    return end_model, edge_model
+
+
+def build_full_model(
+    model_name: str,
+    device: torch.device,
+    input_channels: int = 1,
+    image_size: int = 28,
+    num_classes: int = 10,
+) -> nn.Module:
+    _end_cls, _edge_cls, full_cls = MODEL_BUILDERS[normalize_model_name(model_name)]
+    return full_cls(
+        input_channels=input_channels,
+        image_size=image_size,
+        num_classes=num_classes,
+    ).to(device)
 
 
 REAL_OBJECT_SIZES = {
@@ -573,14 +611,41 @@ def _prepare_model_for_training(model: nn.Module, model_name: str) -> None:
                 param.requires_grad_(False)
 
 
-def _make_optimizer(model: nn.Module, lr: float, model_name: str) -> torch.optim.Optimizer | None:
+def _make_optimizer(
+    model: nn.Module,
+    lr: float,
+    model_name: str,
+    weight_decay: float | None = None,
+) -> torch.optim.Optimizer | None:
     trainable = [param for param in model.parameters() if param.requires_grad]
     if not trainable:
         return None
     normalized = normalize_model_name(model_name)
     if normalized in {"resnet18", "resnet50", "resnet18pretrained", "resnet50pretrained"}:
-        return torch.optim.SGD(trainable, lr=lr, momentum=0.9, weight_decay=5e-4)
-    return torch.optim.SGD(trainable, lr=lr, momentum=0.0, weight_decay=0.0)
+        decay = 5e-4 if weight_decay is None else float(weight_decay)
+        return torch.optim.SGD(trainable, lr=lr, momentum=0.9, weight_decay=decay)
+    decay = 0.0 if weight_decay is None else float(weight_decay)
+    return torch.optim.SGD(trainable, lr=lr, momentum=0.0, weight_decay=decay)
+
+
+def _training_batches(
+    loader: torch.utils.data.DataLoader,
+    epochs: int,
+    local_steps: int | None,
+):
+    if local_steps is None:
+        for _ in range(max(0, int(epochs))):
+            yield from loader
+        return
+
+    step_limit = max(0, int(local_steps))
+    completed = 0
+    for _ in range(max(0, int(epochs))):
+        for batch in loader:
+            if completed >= step_limit:
+                return
+            yield batch
+            completed += 1
 
 
 def split_local_train_lenet5(
@@ -595,52 +660,83 @@ def split_local_train_lenet5(
     model_name: str = "lenet5",
     input_shape: tuple[int, int, int] = (1, 28, 28),
     num_classes: int = 10,
+    mechanisms: dict[str, str] | None = None,
+    dp_clip_norm: float = 1.0,
+    dp_noise_multiplier: float = 0.0002,
+    dp_rng: np.random.Generator | None = None,
+    dp_epsilon: float = 1.0,
+    l2: float | None = None,
+    local_steps: int | None = None,
+    training_seed: int | None = None,
+    model_cache: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """Clean split learning training — no per-object DP.
+    """Split learning with optional object-level DP on embeddings and gradients.
 
     Returns:
         {"end": end_state_diff, "edge": edge_state_diff}
         where each is a state_dict of parameter differences.
         For no-split modes, only "end" contains the full model diff.
     """
-    x_t = torch.from_numpy(x).float().to(device).view(-1, *input_shape)
-    y_t = torch.from_numpy(y).long().to(device)
-    dataset = torch.utils.data.TensorDataset(x_t, y_t)
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
         "resnet18",
         "resnet50",
         "resnet18pretrained",
         "resnet50pretrained",
     } else 64
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    if local_steps is not None and len(x) > 0:
+        max_local_samples = max(1, int(local_steps)) * batch_size
+        if len(x) > max_local_samples:
+            sample_rng = np.random.default_rng(training_seed)
+            sample_indices = sample_rng.choice(len(x), size=max_local_samples, replace=False)
+            x = x[sample_indices]
+            y = y[sample_indices]
+    x_t = torch.from_numpy(x).float().to(device).view(-1, *input_shape)
+    y_t = torch.from_numpy(y).long().to(device)
+    dataset = torch.utils.data.TensorDataset(x_t, y_t)
+    loader_generator = None
+    if training_seed is not None:
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(int(training_seed))
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=loader_generator,
+    )
+    mechanisms = mechanisms or {}
+    if dp_rng is None:
+        dp_rng = np.random.default_rng()
 
     # Whether training uses split (end+edge) or full (end only) mode
     is_split = mode in ("LIE", "LIC", "LIEIIC", "LIEIIIC")
 
     if not is_split:
         # Full model: merge end + edge states
-        _end_template, _edge_template, model = build_split_models(
-            model_name,
-            device,
-            input_channels=input_shape[0],
-            image_size=input_shape[1],
-            num_classes=num_classes,
-        )
+        model = None if model_cache is None else model_cache.get("full")
+        if model is None:
+            model = build_full_model(
+                model_name,
+                device,
+                input_channels=input_shape[0],
+                image_size=input_shape[1],
+                num_classes=num_classes,
+            )
+            if model_cache is not None:
+                model_cache["full"] = model
         full_state = {**global_end_state, **global_edge_state}
         model.load_state_dict(full_state)
         model.train()
         _prepare_model_for_training(model, model_name)
-        opt = _make_optimizer(model, lr, model_name)
+        opt = _make_optimizer(model, lr, model_name, weight_decay=l2)
 
-        for _ in range(epochs):
-            for bx, by in loader:
-                if opt is None:
-                    continue
-                opt.zero_grad()
-                loss = F.cross_entropy(model(bx), by)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], max_norm=5.0)
-                opt.step()
+        for bx, by in _training_batches(loader, epochs, local_steps):
+            if opt is None:
+                continue
+            opt.zero_grad()
+            loss = F.cross_entropy(model(bx), by)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], max_norm=5.0)
+            opt.step()
 
         diff = {}
         for name, param in model.named_parameters():
@@ -653,13 +749,19 @@ def split_local_train_lenet5(
         return {"end": end_diff, "edge": edge_diff}
 
     # Split learning: end computes emb, edge continues
-    end, edge, _full = build_split_models(
-        model_name,
-        device,
-        input_channels=input_shape[0],
-        image_size=input_shape[1],
-        num_classes=num_classes,
-    )
+    cached_split = None if model_cache is None else model_cache.get("split")
+    if cached_split is None:
+        end, edge = build_split_pair(
+            model_name,
+            device,
+            input_channels=input_shape[0],
+            image_size=input_shape[1],
+            num_classes=num_classes,
+        )
+        if model_cache is not None:
+            model_cache["split"] = (end, edge)
+    else:
+        end, edge = cached_split
     end.load_state_dict(global_end_state)
     edge.load_state_dict(global_edge_state)
     end.train()
@@ -667,34 +769,50 @@ def split_local_train_lenet5(
     _prepare_model_for_training(end, model_name)
     _prepare_model_for_training(edge, model_name)
 
-    end_opt = _make_optimizer(end, lr, model_name)
-    edge_opt = _make_optimizer(edge, lr, model_name)
+    end_opt = _make_optimizer(end, lr, model_name, weight_decay=l2)
+    edge_opt = _make_optimizer(edge, lr, model_name, weight_decay=l2)
 
-    for _ in range(epochs):
-        for bx, by in loader:
-            if end_opt is not None:
-                end_opt.zero_grad()
-            if edge_opt is not None:
-                edge_opt.zero_grad()
+    for bx, by in _training_batches(loader, epochs, local_steps):
+        if end_opt is not None:
+            end_opt.zero_grad()
+        if edge_opt is not None:
+            edge_opt.zero_grad()
 
-            # End forward, edge forward/backward, then backprop to end
-            emb = end(bx)
-            edge_input = emb.detach().requires_grad_(True)
-            logits = edge(edge_input)
-            loss = F.cross_entropy(logits, by)
-            loss.backward()
-            grad_to_end = edge_input.grad.detach()
+        # End forward, optional feature DP, edge forward/backward, optional gradient DP.
+        emb = end(bx)
+        transmitted_emb = _protect_tensor_dp(
+            emb,
+            mechanisms.get("emb", "none"),
+            dp_clip_norm,
+            dp_noise_multiplier,
+            dp_rng,
+            device,
+            dp_epsilon,
+        )
+        edge_input = transmitted_emb.detach().requires_grad_(True)
+        logits = edge(edge_input)
+        loss = F.cross_entropy(logits, by)
+        loss.backward()
+        grad_to_end = _protect_tensor_dp(
+            edge_input.grad.detach(),
+            mechanisms.get("grad", "none"),
+            dp_clip_norm,
+            dp_noise_multiplier,
+            dp_rng,
+            device,
+            dp_epsilon,
+        )
 
-            edge_trainable = [p for p in edge.parameters() if p.requires_grad]
-            if edge_opt is not None and edge_trainable:
-                torch.nn.utils.clip_grad_norm_(edge_trainable, max_norm=5.0)
-                edge_opt.step()
+        edge_trainable = [p for p in edge.parameters() if p.requires_grad]
+        if edge_opt is not None and edge_trainable:
+            torch.nn.utils.clip_grad_norm_(edge_trainable, max_norm=5.0)
+            edge_opt.step()
 
-            end_trainable = [p for p in end.parameters() if p.requires_grad]
-            if end_opt is not None and end_trainable and emb.requires_grad:
-                emb.backward(grad_to_end)
-                torch.nn.utils.clip_grad_norm_(end_trainable, max_norm=5.0)
-                end_opt.step()
+        end_trainable = [p for p in end.parameters() if p.requires_grad]
+        if end_opt is not None and end_trainable and emb.requires_grad:
+            transmitted_emb.backward(grad_to_end)
+            torch.nn.utils.clip_grad_norm_(end_trainable, max_norm=5.0)
+            end_opt.step()
 
     end_diff = {name: param.data - global_end_state[name] for name, param in end.named_parameters()}
     edge_diff = {name: param.data - global_edge_state[name] for name, param in edge.named_parameters()}
@@ -708,18 +826,27 @@ def split_evaluate(
     y: np.ndarray,
     device: torch.device,
     input_shape: tuple[int, int, int] = (1, 28, 28),
+    batch_size: int = 128,
 ) -> tuple[float, float]:
-    x_t = torch.from_numpy(x).float().to(device).view(-1, *input_shape)
-    y_t = torch.from_numpy(y).long().to(device)
+    if len(x) == 0:
+        return 0.0, 0.0
     end_model.eval()
     edge_model.eval()
+    total_loss = 0.0
+    total_correct = 0
+    total_seen = 0
     with torch.no_grad():
-        emb = end_model(x_t)
-        logits = edge_model(emb)
-        loss = F.cross_entropy(logits, y_t)
-        pred = logits.argmax(dim=1)
-        acc = (pred == y_t).float().mean().item()
-    return float(loss.item()), acc
+        for start in range(0, len(x), max(1, int(batch_size))):
+            stop = min(start + max(1, int(batch_size)), len(x))
+            x_t = torch.from_numpy(x[start:stop]).float().to(device).view(-1, *input_shape)
+            y_t = torch.from_numpy(y[start:stop]).long().to(device)
+            logits = edge_model(end_model(x_t))
+            loss = F.cross_entropy(logits, y_t)
+            count = int(stop - start)
+            total_loss += float(loss.item()) * count
+            total_correct += int((logits.argmax(dim=1) == y_t).sum().item())
+            total_seen += count
+    return total_loss / total_seen, total_correct / total_seen
 
 
 def apply_unified_dp(
@@ -729,56 +856,43 @@ def apply_unified_dp(
     noise_multiplier: float,
     rng: np.random.Generator,
     device: torch.device,
-    adaptive: bool = True,
+    adaptive: bool = False,
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """Unified client-level DP: clip parameters then add noise.
+    """Apply client replacement DP to one model update release.
 
-    Gaussian mechanism: σ = noise_multiplier × clip_norm.
-
-    When adaptive=True: per-tensor clipping — each parameter tensor is clipped
-    to its own norm × clip_norm. Preserves the relative magnitude across layers,
-    avoiding the issue where a single large tensor dominates the global norm
-    and forces all other tensors to be excessively compressed.
+    The complete update is globally clipped to ``clip_norm``. Under
+    replacement adjacency its sensitivity is ``2 * clip_norm``.
     """
     if mechanism not in {"dp"}:
         return diff
-
-    sigma = noise_multiplier * clip_norm
-
     if adaptive:
-        # Per-tensor adaptive clipping: each tensor clipped independently
-        for part_key in diff:
-            for name in diff[part_key]:
-                t = diff[part_key][name]
-                if not (torch.is_floating_point(t) or torch.is_complex(t)):
-                    continue
-                tensor_norm = t.norm().item()
-                scale = min(1.0, clip_norm / max(tensor_norm, 1e-12))
-                diff[part_key][name] = t * scale
-                noise = torch.from_numpy(
-                    rng.normal(0.0, sigma, size=t.shape).astype(np.float32)
-                ).to(device)
-                diff[part_key][name] += noise
-    else:
-        # Original global L2 norm clipping
-        total_norm_sq = 0.0
-        for part_key in diff:
-            for d in diff[part_key].values():
-                if not (torch.is_floating_point(d) or torch.is_complex(d)):
-                    continue
-                total_norm_sq += (d ** 2).sum().item()
-        flat_norm = np.sqrt(max(total_norm_sq, 1e-12))
-        scale = min(1.0, clip_norm / flat_norm)
+        raise ValueError(
+            "Per-tensor clipping has no single global replacement sensitivity."
+        )
 
-        for part_key in diff:
-            for name in diff[part_key]:
-                if not (torch.is_floating_point(diff[part_key][name]) or torch.is_complex(diff[part_key][name])):
-                    continue
-                diff[part_key][name] = diff[part_key][name] * scale
-                noise = torch.from_numpy(
-                    rng.normal(0.0, sigma, size=diff[part_key][name].shape).astype(np.float32)
-                ).to(device)
-                diff[part_key][name] = diff[part_key][name] + noise
+    # Two globally clipped updates can differ by at most 2C under replacement
+    # adjacency. The RDP ledger treats noise_multiplier as sigma / sensitivity.
+    sigma = noise_multiplier * 2.0 * clip_norm
+
+    total_norm_sq = 0.0
+    for part_key in diff:
+        for value in diff[part_key].values():
+            if not (torch.is_floating_point(value) or torch.is_complex(value)):
+                continue
+            total_norm_sq += (value ** 2).sum().item()
+    flat_norm = np.sqrt(max(total_norm_sq, 1e-12))
+    scale = min(1.0, clip_norm / flat_norm)
+
+    for part_key in diff:
+        for name in diff[part_key]:
+            value = diff[part_key][name]
+            if not (torch.is_floating_point(value) or torch.is_complex(value)):
+                continue
+            protected = value * scale
+            noise = torch.from_numpy(
+                rng.normal(0.0, sigma, size=value.shape).astype(np.float32)
+            ).to(device)
+            diff[part_key][name] = protected + noise
 
     return diff
 
@@ -805,7 +919,12 @@ def _protect_tensor_dp(
         norm = torch.linalg.vector_norm(tensor.detach())
         scale = min(1.0, float(clip_norm) / max(float(norm.item()), 1e-12))
         protected = tensor * scale
-    sigma = noise_multiplier * clip_norm / max(float(epsilon), 1e-6)
+    # TeX Eq. (feature_dp_noise) uses replacement adjacency, Delta_z = 2C.
+    # The formal guarantee is determined by this multiplier and the RDP event
+    # ledger. ``epsilon`` remains only for compatibility with older callers and
+    # must not be used as a second noise scaling factor.
+    _ = epsilon
+    sigma = noise_multiplier * 2.0 * clip_norm
     noise = torch.from_numpy(
         rng.normal(0.0, sigma, size=tuple(tensor.shape)).astype(np.float32)
     ).to(device)
@@ -814,7 +933,7 @@ def _protect_tensor_dp(
 
 def fedavg_split(
     state_diffs: list[dict[str, dict[str, torch.Tensor]]],
-    sample_counts: list[int],
+    sample_counts: list[float],
     global_end: EndNet,
     global_edge: EdgeNet,
     device: torch.device,
@@ -835,12 +954,14 @@ def fedavg_split(
         factor = count / total
         for name in end_agg:
             if name in diff.get("end", {}):
-                end_agg[name] += factor * diff["end"][name]
+                update = diff["end"][name].to(device=end_agg[name].device, dtype=end_agg[name].dtype)
+                end_agg[name] += factor * update
         if "edge" in diff:
             has_edge = True
             for name in edge_agg:
                 if name in diff["edge"]:
-                    edge_agg[name] += factor * diff["edge"][name]
+                    update = diff["edge"][name].to(device=edge_agg[name].device, dtype=edge_agg[name].dtype)
+                    edge_agg[name] += factor * update
 
     for name in end_agg:
         global_end.state_dict()[name].data += end_agg[name]

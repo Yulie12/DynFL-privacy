@@ -76,7 +76,7 @@ class EndTrainState:
     cloud_params: dict[str, torch.Tensor] | None = None  # cached cloud state dict
     samples: int = 150
     compute_factor: float = 1.0
-    remaining_epsilon: float = 10.0
+    remaining_epsilon: float = 4.0
     last_reselect_cloud_ver: int = -1  # re-select on first training
     train_cycles_since_reselect: int = 0  # training cycles since last mode re-select
     mode: str | None = None
@@ -137,7 +137,7 @@ class AsyncConfig:
     per_end_epsilon: list[float] | None = None  # per-end initial budgets (matches visualization)
     warmup_events: int = 100  # first N events: DP noise reduced to warmup_factor × σ
     warmup_factor: float = 0.02  # noise multiplier scaling during warmup
-    adaptive_clip: bool = True  # per-tensor adaptive clipping vs global norm
+    adaptive_clip: bool = False  # Eq. (18): one global L2 norm for the update vector
 
 
 class AsyncEvent:
@@ -359,6 +359,7 @@ class AsyncSimulation:
             client_id=client.client_id,
             edge_factor=edge.compute_factor,
             compute_factor=client.compute_factor,
+            memory_capacity_factor=client.memory_capacity_factor,
             samples=client.samples,
             remaining_epsilon=end_state.remaining_epsilon,
             round_idx=self.edge_states[client.edge_id].version,
@@ -389,7 +390,12 @@ class AsyncSimulation:
 
         # When budget is too low for any DP mode, allow "none" mechanism fallback
         # so ends can still participate with HE/none on cloud-contributing modes
-        min_dp_cost = min(s.alpha for s in MODE_SPECS.values()) * self.selection.dp_event_epsilon
+        min_dp_cost = min(
+            _dp_cost_for_mode(self.selection, spec, {obj: "dp"})
+            for spec in MODE_SPECS.values()
+            for obj in spec.client_objects + spec.edge_to_cloud_objects
+            if obj in {"emb", "grad", "upd", "weakemb", "strongemb", "pseudo_label"}
+        )
         allow_none = end_state.remaining_epsilon < min_dp_cost
 
         # Re-evaluate mode periodically based on training cycles.
@@ -416,6 +422,7 @@ class AsyncSimulation:
                 client_id=client.client_id,
                 edge_factor=self.edge_by_id[client.edge_id].compute_factor,
                 compute_factor=client.compute_factor,
+                memory_capacity_factor=client.memory_capacity_factor,
                 samples=client.samples,
                 remaining_epsilon=end_state.remaining_epsilon,
                 round_idx=self.edge_states[client.edge_id].version,
@@ -538,7 +545,11 @@ class AsyncSimulation:
         # Record mode usage for experience tracking
         self.mode_usage_since_eval[mode] = self.mode_usage_since_eval.get(mode, 0) + 1
 
-        # Real training (clean, no per-object DP)
+        effective_noise = self.config.dp_noise_multiplier
+        if self.event_count < self.config.warmup_events:
+            effective_noise *= self.config.warmup_factor
+
+        # Real training with object-level DP on embeddings and gradients.
         t0 = time_module.perf_counter()
         try:
             state_diff = split_local_train_lenet5(
@@ -550,6 +561,16 @@ class AsyncSimulation:
                 epochs=self.config.local_epochs,
                 lr=self.config.learning_rate,
                 device=self.device,
+                mechanisms=mechanisms,
+                dp_clip_norm=self.config.dp_clip_norm,
+                dp_noise_multiplier=effective_noise,
+                dp_rng=self.np_rng,
+                dp_epsilon=max(self.selection.dp_emb_epsilon, 1e-6),
+                training_seed=(
+                    (int(self.selection.seed) + 1) * 1_000_003
+                    + (int(self.event_count) + 1) * 10_007
+                    + (int(end_id) + 1) * 101
+                ) % (2**31 - 1),
             )
         except Exception:
             end_state.training = False
@@ -559,14 +580,11 @@ class AsyncSimulation:
 
         measured = time_module.perf_counter() - t0
 
-        # Unified DP: apply once to entire update if any mechanism uses DP
-        has_dp = any(m == "dp" for m in mechanisms.values())
-        effective_noise = self.config.dp_noise_multiplier
-        if self.event_count < self.config.warmup_events:
-            effective_noise *= self.config.warmup_factor  # reduced noise during warmup
+        # Update-level DP is applied only when the update object selects DP.
+        has_update_dp = mechanisms.get("upd") == "dp"
         state_diff = apply_unified_dp(
             state_diff,
-            mechanism="dp" if has_dp else "none",
+            mechanism="dp" if has_update_dp else "none",
             clip_norm=self.config.dp_clip_norm,
             noise_multiplier=effective_noise,
             rng=self.np_rng,
@@ -576,15 +594,13 @@ class AsyncSimulation:
 
         # RDP accountant: formal (ε,δ)-DP tracking for reporting only
         # Uses the full noise (not warmup-reduced) for conservative accounting
-        if has_dp:
+        if any(m == "dp" for m in mechanisms.values()):
             self.accountants[end_id].add_event(self.config.dp_noise_multiplier)
 
-        # Mode selection budget: mode-dependent cost (not RDP)
-        # This is the budget used by the mode selector to decide DP vs HE
+        # Mode selection budget follows the same event-wise DP composition as selection.py.
         spec = MODE_SPECS[mode]
-        if has_dp:
-            mode_cost = spec.alpha * self.selection.dp_event_epsilon
-            end_state.remaining_epsilon -= mode_cost
+        mode_cost = _dp_cost_for_mode(self.selection, spec, mechanisms)
+        end_state.remaining_epsilon = max(0.0, end_state.remaining_epsilon - mode_cost)
 
         # Version check: if stale, apply decay
         edge_state = self.edge_states[client.edge_id]
@@ -965,3 +981,18 @@ def run_async_training(
           f"cloud_agg={summary['cloud_aggregations']}, edge_agg={summary['edge_aggregations']}")
 
     return summary
+
+
+def _dp_cost_for_mode(selection: SelectionConfig, spec: Any, mechanisms: dict[str, str]) -> float:
+    total = 0.0
+    for obj, mechanism in mechanisms.items():
+        if mechanism != "dp":
+            continue
+        if obj in {"emb", "grad", "weakemb", "strongemb", "pseudo_label"}:
+            total += max(1, selection.L_block_cycles) * selection.dp_emb_epsilon
+        elif obj == "upd":
+            loops = max(1, spec.E_edge_loops) if obj in spec.edge_to_cloud_objects else 1
+            total += loops * selection.dp_upd_epsilon
+        else:
+            total += selection.dp_event_epsilon
+    return total

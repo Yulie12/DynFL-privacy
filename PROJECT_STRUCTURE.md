@@ -19,7 +19,7 @@
 ## TeX
 
 - `tex/paper/main.tex`: current main paper file.
-- `tex/paper/main_with_changes.tex`: changed version.
+- `tex/paper/main_with_changes.tex`: legacy reviewer-marked snapshot; not the normative implementation specification.
 - `tex/paper/refs.bib`: bibliography.
 - `tex/paper/figures/`: paper figures.
 - `tex/paper/figures_en/`: English ablation figures.
@@ -30,4 +30,3 @@
 - `experiments/data/`: local datasets.
 - `__pycache__/`, `.idea/`, `.he_deps/`: local caches and environment files.
 - historical paper packages and zip archives.
-

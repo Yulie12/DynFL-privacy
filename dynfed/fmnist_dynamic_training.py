@@ -23,7 +23,7 @@ from .real_training import (
     _local_train_softmax,
     _partition_clients,
 )
-from .selection import SelectionConfig, choose_candidate, enumerate_candidates
+from .selection import SelectionConfig, choose_candidate, choose_global_pareto_profile, enumerate_candidates
 from .training import MODE_SPECS
 
 
@@ -164,6 +164,7 @@ def _run_policy(
     best_accuracy = 0.0
     logical_time = 0.0
     client_by_id = {c.client_id: c for c in clients}
+    previous_choices = {}
 
     for round_idx in range(config.selection.rounds):
         selected = []
@@ -172,14 +173,17 @@ def _run_policy(
         round_risk = 0.0
         infeasible = 0
 
+        selected_rows = []
         for client in clients:
+            rem = remaining[client.client_id]
             candidates = enumerate_candidates(
                 config=config.selection,
                 client_id=client.client_id,
                 edge_factor=edge_by_id[client.edge_id].compute_factor,
                 compute_factor=client.compute_factor,
+                memory_capacity_factor=client.memory_capacity_factor,
                 samples=client.samples,
-                remaining_epsilon=remaining[client.client_id],
+                remaining_epsilon=rem,
                 round_idx=round_idx,
                 rng=rng,
                 policy=policy,
@@ -189,17 +193,34 @@ def _run_policy(
                 policy=policy,
                 rng=rng,
                 require_feasible=config.selection.require_feasible,
+                remaining_epsilon=rem,
             )
-            remaining[client.client_id] = max(0.0, remaining[client.client_id] - candidate.epsilon_used)
+            selected_rows.append((client.client_id, candidate, candidates, rem))
+
+        if policy == "ours":
+            selected_rows, profile_evaluation = choose_global_pareto_profile(
+                config=config.selection,
+                selected=selected_rows,
+                client_samples={client.client_id: float(client.samples) for client in clients},
+                client_edges={client.client_id: int(client.edge_id) for client in clients},
+                previous_choices=previous_choices,
+            )
+        else:
+            profile_evaluation = None
+        previous_choices = {client_id: candidate for client_id, candidate, _candidates, _rem in selected_rows}
+
+        for client_id, candidate, _candidates, rem in selected_rows:
+            client = client_by_id[client_id]
+            remaining[client_id] = max(0.0, rem - candidate.epsilon_used)
             round_comm += candidate.communication_volume
             round_risk = max(round_risk, candidate.risk)
             infeasible += int(not candidate.feasible)
-            selected.append((client.client_id, candidate))
+            selected.append((client_id, candidate))
             decision_rows.append(
                 {
                     "policy": policy,
                     "round": round_idx,
-                    "client_id": client.client_id,
+                    "client_id": client_id,
                     "edge_id": client.edge_id,
                     "mode": candidate.mode,
                     "mechanisms": _mechanism_label(candidate.mechanisms),
@@ -207,9 +228,13 @@ def _run_policy(
                     "time": candidate.time,
                     "risk": candidate.risk,
                     "epsilon_used": candidate.epsilon_used,
-                    "remaining_epsilon": remaining[client.client_id],
+                    "remaining_epsilon": remaining[client_id],
                     "communication_volume": candidate.communication_volume,
                     "feasible": candidate.feasible,
+                    "system_latency_objective": profile_evaluation.system_latency if profile_evaluation else "",
+                    "system_omega_objective": profile_evaluation.system_omega if profile_evaluation else "",
+                    "cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
+                    "admitted_client_ids_objective": ";".join(str(cid) for cid in profile_evaluation.admitted_client_ids) if profile_evaluation else "",
                 }
             )
 
@@ -243,7 +268,7 @@ def _run_policy(
                 delta_w=delta_w,
                 delta_b=delta_b,
                 mechanism=_update_mechanism(candidate.mechanisms),
-                epsilon=max(config.selection.initial_epsilon, 1e-6),
+                epsilon=max(config.selection.dp_upd_epsilon, 1e-6),
                 clip_norm=config.training.dp_clip_norm,
                 noise_multiplier=config.training.dp_noise_multiplier,
                 rng=np_rng,
@@ -288,6 +313,10 @@ def _run_policy(
                 "infeasible_clients": infeasible,
                 "skipped_clients": skipped_clients,
                 "num_clients": len(clients),
+                "system_latency_objective": profile_evaluation.system_latency if profile_evaluation else "",
+                "system_omega_objective": profile_evaluation.system_omega if profile_evaluation else "",
+                "cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
+                "admitted_client_ids_objective": ";".join(str(cid) for cid in profile_evaluation.admitted_client_ids) if profile_evaluation else "",
             }
         )
 

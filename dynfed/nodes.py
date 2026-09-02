@@ -10,6 +10,7 @@ class ClientProfile:
     edge_id: int
     samples: int
     compute_factor: float
+    memory_capacity_factor: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,10 @@ def build_profiles(
     for client_id in range(num_clients):
         edge_id = client_id % num_edges
         compute_factor = rng.uniform(1.0 / client_heterogeneity, client_heterogeneity)
+        memory_capacity_factor = rng.uniform(
+            1.0 / client_heterogeneity,
+            client_heterogeneity,
+        )
         samples = rng.randint(80, 220)
         clients.append(
             ClientProfile(
@@ -38,6 +43,7 @@ def build_profiles(
                 edge_id=edge_id,
                 samples=samples,
                 compute_factor=compute_factor,
+                memory_capacity_factor=memory_capacity_factor,
             )
         )
 

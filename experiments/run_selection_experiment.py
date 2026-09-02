@@ -32,15 +32,32 @@ def parse_args() -> argparse.Namespace:
         description="Run dynamic hierarchy/privacy mechanism selection experiments."
     )
     parser.add_argument("--output-root", default="out/selection")
-    parser.add_argument("--rounds", type=int, default=20)
-    parser.add_argument("--clients", type=int, default=10)
-    parser.add_argument("--edges", type=int, default=2)
+    parser.add_argument("--rounds", type=int, default=100)
+    parser.add_argument(
+        "--simulate-rounds",
+        type=int,
+        default=None,
+        help="Evaluate only this many rounds while retaining --rounds as the DP horizon.",
+    )
+    parser.add_argument("--clients", type=int, default=100)
+    parser.add_argument("--edges", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--initial-epsilon", type=float, default=4.0)
+    parser.add_argument("--initial-epsilon", type=float, default=8.0)
     parser.add_argument("--dp-event-epsilon", type=float, default=0.05)
+    parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
+    parser.add_argument("--dp-upd-epsilon", type=float, default=8.0)
+    parser.add_argument("--omega-learning-rate", type=float, default=0.15)
     parser.add_argument("--resource-limit", type=float, default=1.35)
+    parser.add_argument("--memory-limit", type=float, default=1.35)
     parser.add_argument("--time-limit", type=float, default=8.0)
     parser.add_argument("--risk-limit", type=float, default=0.5)
+    parser.add_argument("--aggregation-fraction", type=float, default=1.0)
+    parser.add_argument("--update-payload-mb", type=float, default=4.0)
+    parser.add_argument("--omega-update-dimension", type=float, default=61706.0)
+    parser.add_argument("--require-edge-cloud-coverage", action="store_true")
+    parser.add_argument("--min-edge-cloud-fusion-ratio", type=float, default=0.0)
+    parser.add_argument("--enforce-cloud-dp-stability", action="store_true")
+    parser.add_argument("--cloud-dp-stability-threshold", type=float, default=1.0)
     parser.add_argument("--require-feasible", action="store_true")
     parser.add_argument(
         "--policies",
@@ -61,13 +78,28 @@ def main() -> None:
         seed=args.seed,
         initial_epsilon=args.initial_epsilon,
         dp_event_epsilon=args.dp_event_epsilon,
+        dp_emb_epsilon=args.dp_emb_epsilon,
+        dp_upd_epsilon=args.dp_upd_epsilon,
+        omega_learning_rate=args.omega_learning_rate,
         resource_limit=args.resource_limit,
+        memory_limit=args.memory_limit,
         time_limit=args.time_limit,
         risk_limit=args.risk_limit,
+        aggregation_fraction=args.aggregation_fraction,
+        update_payload_mb=args.update_payload_mb,
+        omega_update_dimension=args.omega_update_dimension,
+        require_edge_cloud_coverage=args.require_edge_cloud_coverage,
+        min_edge_cloud_fusion_ratio=args.min_edge_cloud_fusion_ratio,
+        enforce_cloud_dp_stability=args.enforce_cloud_dp_stability,
+        cloud_dp_stability_threshold=args.cloud_dp_stability_threshold,
         require_feasible=args.require_feasible,
         output_dir=str(output_dir),
     )
-    result = run_selection_experiment(config, policies=args.policies)
+    result = run_selection_experiment(
+        config,
+        policies=args.policies,
+        simulation_rounds=args.simulate_rounds,
+    )
     print(f"[OK] wrote selection rows: {result['round_selection']}")
     print(f"[OK] wrote summary table: {result['summary_table']}")
 

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import csv
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,46 +21,80 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parents[1]
 TRAINING_PROCESS: subprocess.Popen | None = None
 ACTIVE_OUTPUT_ROOT: Path | None = None
+LAST_STOP_MESSAGE: str | None = None
+TRAINING_STATE_LOCK = threading.RLock()
 TRAINING_PYTHON_ENV = "DYNFED_TRAINING_PYTHON"
+PRIVACY_SCHEMA_VERSION = "rdp_total_v1"
+
+
+def _json_response(payload: object) -> bytes:
+    return json.dumps(
+        _json_safe(payload),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _serialized_training_state(func):
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        with TRAINING_STATE_LOCK:
+            return func(*args, **kwargs)
+
+    return wrapped
 
 
 BASE_ARGS = [
-    "--clients", "10",
-    "--edges", "2",
+    "--clients", "100",
+    "--edges", "10",
     "--train-limit", "12000",
     "--test-limit", "2000",
     "--lr", "0.15",
     "--seed", "42",
-    "--initial-epsilon", "10.0",
-    "--dp-event-epsilon", "0.01",
-    "--dp-clip-norm", "20.0",
-    "--dp-noise-multiplier", "0.001",
+    "--initial-epsilon", "8.0",
+    "--dp-event-epsilon", "0.05",
+    "--dp-emb-epsilon", "8.0",
+    "--dp-upd-epsilon", "8.0",
+    "--dp-clip-norm", "1.0",
+    "--dp-noise-multiplier", "0.0002",
+    "--dp-accounting-mode", "rdp_auto",
+    "--dp-delta", "1e-5",
     "--resource-limit", "1.35",
     "--time-limit", "8.0",
     "--risk-limit", "0.5",
-    "--aggregation-fraction", "0.5",
+    "--aggregation-fraction", "1.0",
 ]
 
 
 DP_PROFILES = {
     "balanced": {
-        "label": "Balanced DP",
+        "label": "Auto RDP (C=1)",
         "slug": "dpbal",
-        "dp_event_epsilon": "0.01",
-        "dp_clip_norm": "20.0",
-        "dp_noise_multiplier": "0.001",
-        "dp_update_mode": "any_dp",
+        "dp_event_epsilon": "0.05",
+        "dp_clip_norm": "1.0",
+        "dp_noise_multiplier": "0.0002",
+        "dp_update_mode": "upd_only",
     },
     "strong": {
-        "label": "Strong DP",
+        "label": "Auto RDP (C=20)",
         "slug": "dpstrong",
         "dp_event_epsilon": "0.005",
         "dp_clip_norm": "20.0",
         "dp_noise_multiplier": "0.002",
-        "dp_update_mode": "any_dp",
+        "dp_update_mode": "upd_only",
     },
     "cifar_resnet": {
-        "label": "CIFAR-ResNet DP",
+        "label": "CIFAR Auto RDP (C=1)",
         "slug": "dpcifar02",
         "dp_event_epsilon": "0.02",
         "dp_clip_norm": "1.0",
@@ -65,7 +102,7 @@ DP_PROFILES = {
         "dp_update_mode": "upd_only",
     },
     "weak_update": {
-        "label": "Weak Update DP",
+        "label": "Auto RDP (C=0.5)",
         "slug": "dpweak",
         "dp_event_epsilon": "0.1",
         "dp_clip_norm": "0.5",
@@ -76,11 +113,11 @@ DP_PROFILES = {
 
 
 def configured_training_hyperparams(dataset: str, model: str) -> tuple[str, str]:
-    local_epochs = "2"
+    local_epochs = "1"
     lr = "0.15"
     if model in {"resnet18_pretrained", "resnet50_pretrained"} and dataset in {"cifar10", "cifar100"}:
-        local_epochs = "1"
-        lr = "0.0005" if model == "resnet18_pretrained" else "0.00025"
+        local_epochs = "3"
+        lr = "0.01" if model == "resnet18_pretrained" else "0.005"
     elif model in {"resnet18", "resnet50"} and dataset in {"cifar10", "cifar100"}:
         local_epochs = "3"
         lr = "0.03" if model == "resnet18" else "0.02"
@@ -106,25 +143,25 @@ def _dp_profile_config(profile_name: str) -> tuple[str, dict[str, str]]:
 
 
 PRESETS = {
-    "paper50": {
-        "label": "50r paper set",
-        "output_root": "out/fmnist_lenet5_paper_50r",
+    "paper100": {
+        "label": "200r paper set",
+        "output_root": "out/fmnist_lenet5_paper_200r",
         "args": [
             "experiments/run_fmnist_lenet5.py",
-            "--rounds", "50",
-            "--local-epochs", "2",
+            "--rounds", "200",
+            "--local-epochs", "1",
             *BASE_ARGS,
-            "--output-root", "out/fmnist_lenet5_paper_50r",
+            "--output-root", "out/fmnist_lenet5_paper_200r",
             "--policies", "ours", "fixed_dp", "privacy_only", "no_protection", "random",
         ],
     },
-    "paper100": {
-        "label": "100r extension",
+    "paper100_core": {
+        "label": "100r three-policy diagnostic",
         "output_root": "out/fmnist_lenet5_paper_100r_ep3",
         "args": [
             "experiments/run_fmnist_lenet5.py",
             "--rounds", "100",
-            "--local-epochs", "3",
+            "--local-epochs", "1",
             *BASE_ARGS,
             "--output-root", "out/fmnist_lenet5_paper_100r_ep3",
             "--policies", "ours", "privacy_only", "random",
@@ -136,7 +173,7 @@ PRESETS = {
         "args": [
             "experiments/run_fmnist_lenet5.py",
             "--rounds", "100",
-            "--local-epochs", "3",
+            "--local-epochs", "1",
             *BASE_ARGS,
             "--output-root", "out/fmnist_lenet5_tex_100r_ep3_random",
             "--policies", "random",
@@ -154,7 +191,7 @@ def custom_paper_preset(rounds: int) -> dict:
         "args": [
             "experiments/run_fmnist_lenet5.py",
             "--rounds", str(rounds),
-            "--local-epochs", "2",
+            "--local-epochs", "1",
             *BASE_ARGS,
             "--output-root", output_root,
             "--policies", "ours", "fixed_dp", "privacy_only", "no_protection", "random",
@@ -166,17 +203,37 @@ def configured_preset(
     mode: str,
     rounds: int,
     time_limit: float,
+    train_limit: int,
+    test_limit: int,
     policies: list[str],
     figure_axis: str,
     partition_mode: str,
+    clients: int,
     edges: int,
     seed: int,
     client_heterogeneity: float,
     edge_heterogeneity: float,
     selection_period: int,
     aggregation_fraction: float,
+    pareto_archive_size: int,
+    pareto_max_iters: int,
+    pareto_neighbor_top_k: int,
+    pareto_conflict_only: bool,
+    cloud_fusion_xi: float,
+    cloud_fusion_eps: float,
+    min_edge_cloud_fusion_ratio: float,
+    resource_limit: float,
+    risk_limit: float,
+    executor: str,
+    executor_workers: int | None,
     local_epochs: int | None,
     learning_rate: float | None,
+    initial_epsilon: float,
+    dp_emb_epsilon: float,
+    dp_upd_epsilon: float,
+    he_backend: str,
+    require_real_he: bool,
+    he_aggregation_size: int,
     dp_profile: str,
     dataset: str,
     model: str,
@@ -185,10 +242,16 @@ def configured_preset(
 ) -> dict:
     allowed = {
         "ours",
+        "ours_no_omega",
+        "ours_fixed_liieiiic",
         "fixed_dp",
         "privacy_only",
         "no_protection",
         "random",
+        "fixed_fedavg",
+        "fixed_splitfed",
+        "fixed_hfl",
+        "nsga2",
         "fixed_liieiiic",
         "individual_optimal",
         "performance_only",
@@ -199,9 +262,12 @@ def configured_preset(
     if not selected:
         selected = ["ours"]
     rounds = max(1, min(int(rounds), 500))
+    train_limit = max(1, min(int(train_limit), 60000))
+    test_limit = max(1, min(int(test_limit), 10000))
     seed = max(0, min(int(seed), 999999))
     time_limit = max(0.1, min(float(time_limit), 300.0))
-    edges = max(1, min(int(edges), 5))
+    clients = max(1, min(int(clients), 200))
+    edges = max(1, min(int(edges), 20))
     mode = mode if mode in {"rounds", "time"} else "rounds"
     figure_axis = figure_axis if figure_axis in {"round", "time"} else "round"
     partition_mode = partition_mode if partition_mode in {"iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"} else "client_noniid"
@@ -220,6 +286,27 @@ def configured_preset(
     edge_heterogeneity = max(1.0, min(float(edge_heterogeneity), 10.0))
     selection_period = max(1, min(int(selection_period), 100))
     aggregation_fraction = max(0.1, min(float(aggregation_fraction), 1.0))
+    pareto_archive_size = max(2, min(int(pareto_archive_size), 128))
+    pareto_max_iters = max(0, min(int(pareto_max_iters), 200))
+    pareto_neighbor_top_k = max(0, min(int(pareto_neighbor_top_k), 1000))
+    cloud_fusion_xi = max(0.0, min(float(cloud_fusion_xi), 100.0))
+    cloud_fusion_eps = max(0.000001, min(float(cloud_fusion_eps), 10.0))
+    min_edge_cloud_fusion_ratio = max(
+        0.0, min(float(min_edge_cloud_fusion_ratio), 1.0)
+    )
+    resource_limit = max(0.0, min(float(resource_limit), 100.0))
+    risk_limit = max(0.0, min(float(risk_limit), 1.0))
+    executor = executor if executor in {"serial", "process_pool"} else "serial"
+    effective_executor_workers = (
+        max(1, min(int(executor_workers), 64))
+        if executor_workers is not None
+        else None
+    )
+    initial_epsilon = max(0.0, min(float(initial_epsilon), 100.0))
+    dp_emb_epsilon = max(0.001, min(float(dp_emb_epsilon), 100.0))
+    dp_upd_epsilon = max(0.001, min(float(dp_upd_epsilon), 100.0))
+    he_backend = he_backend if he_backend in {"none", "seal", "tenseal"} else "none"
+    he_aggregation_size = max(0, min(int(he_aggregation_size), 2000000))
     default_local_epochs, default_lr = configured_training_hyperparams(dataset, model)
     effective_local_epochs = max(1, min(int(local_epochs), 20)) if local_epochs is not None else int(default_local_epochs)
     effective_lr = _clamped_learning_rate(learning_rate)
@@ -228,11 +315,17 @@ def configured_preset(
     device = device if device in {"cpu", "cuda"} else "cpu"
     policy_abbrev = {
         "ours": "ours",
+        "ours_no_omega": "noomega",
+        "ours_fixed_liieiiic": "fixedmode",
         "individual_optimal": "ind",
         "fixed_dp": "fdp",
         "privacy_only": "priv",
         "no_protection": "nop",
         "random": "rnd",
+        "fixed_fedavg": "fedavg",
+        "fixed_splitfed": "splitfed",
+        "fixed_hfl": "hfl",
+        "nsga2": "nsga2",
         "fixed_liieiiic": "hfl",
         "performance_only": "bal",
         "best_accuracy": "util",
@@ -253,16 +346,33 @@ def configured_preset(
         "client_noniid": "cniid",
         "iid": "iid",
     }.get(partition_mode, partition_mode)
-    output_root = (
-        f"out/{dataset}_{model_slug}_{partition_slug}_{edges}e_{mode}_{rounds}r_"
+    output_descriptor = (
+        f"{dataset}_{model_slug}_{partition_slug}_{clients}c_{edges}e_{mode}_{rounds}r_"
         f"seed{seed}_t{str(time_limit).replace('.', 'p')}_"
+        f"rl{str(resource_limit).replace('.', 'p')}_risk{str(risk_limit).replace('.', 'p')}_"
         f"ch{str(client_heterogeneity).replace('.', 'p')}_eh{str(edge_heterogeneity).replace('.', 'p')}_"
         f"sp{selection_period}_agg{str(aggregation_fraction).replace('.', 'p')}_"
+        f"kp{pareto_archive_size}_im{pareto_max_iters}_"
+        f"nk{pareto_neighbor_top_k}_{'conf' if pareto_conflict_only else 'all'}_"
+        f"xi{str(cloud_fusion_xi).replace('.', 'p')}_ce{str(cloud_fusion_eps).replace('.', 'p')}_"
+        f"rmin{str(min_edge_cloud_fusion_ratio).replace('.', 'p')}_"
         f"ep{effective_local_epochs}_"
         f"lr{effective_lr_text.replace('.', 'p')}_"
+        f"eps{str(initial_epsilon).replace('.', 'p')}_"
+        f"emb{str(dp_emb_epsilon).replace('.', 'p')}_"
+        f"upd{str(dp_upd_epsilon).replace('.', 'p')}_"
+        f"he{'full' if he_aggregation_size == 0 else he_aggregation_size}_"
         f"{dp_config['slug']}_"
+        f"{executor}{effective_executor_workers or ''}_"
         f"{device}_"
         f"{method_slug}"
+    )
+    config_hash = hashlib.sha1(output_descriptor.encode("utf-8")).hexdigest()[:10]
+    executor_slug = "pool" if executor == "process_pool" else "ser"
+    output_root = (
+        f"out/{dataset}_{model_slug}_{partition_slug}_{clients}c_{edges}e_"
+        f"{mode}{rounds}r_s{seed}_sp{selection_period}_{dp_config['slug']}_"
+        f"{executor_slug}_{device}_{method_slug}_{config_hash}"
     )
     args = [
         "experiments/run_fmnist_lenet5.py",
@@ -270,29 +380,71 @@ def configured_preset(
         "--dataset", dataset,
         "--model", model,
         "--local-epochs", str(effective_local_epochs),
-        *BASE_ARGS,
+        "--lr", effective_lr_text,
+        "--clients", str(clients),
         "--edges", str(edges),
+        "--train-limit", str(train_limit),
+        "--test-limit", str(test_limit),
         "--seed", str(seed),
+        "--initial-epsilon", f"{initial_epsilon:g}",
         "--partition-mode", partition_mode,
         "--selection-period", str(selection_period),
         "--aggregation-fraction", str(aggregation_fraction),
-        "--dp-event-epsilon", dp_config["dp_event_epsilon"],
+        "--pareto-archive-size", str(pareto_archive_size),
+        "--pareto-max-iters", str(pareto_max_iters),
+        "--pareto-neighbor-top-k", str(pareto_neighbor_top_k),
+        "--cloud-fusion-xi", f"{cloud_fusion_xi:g}",
+        "--cloud-fusion-eps", f"{cloud_fusion_eps:g}",
+        "--edge-aggregation-beta", "0.01",
+        "--edge-aggregation-fixed", "0.02",
+        "--cloud-aggregation-beta", "0.015",
+        "--cloud-aggregation-fixed", "0.04",
+        "--min-edge-cloud-fusion-ratio", f"{min_edge_cloud_fusion_ratio:g}",
+        "--resource-limit", f"{resource_limit:g}",
+        "--memory-limit", f"{resource_limit:g}",
+        "--time-limit", f"{time_limit:g}",
+        "--risk-limit", f"{risk_limit:g}",
+        "--dp-event-epsilon", "0.05",
+        "--dp-emb-epsilon", f"{dp_emb_epsilon:g}",
+        "--dp-upd-epsilon", f"{dp_upd_epsilon:g}",
+        "--dp-feature-epsilon-budget", f"{dp_emb_epsilon:g}",
+        "--dp-update-epsilon-budget", f"{dp_upd_epsilon:g}",
+        "--dp-accounting-mode", "rdp_auto",
+        "--dp-delta", "1e-5",
         "--dp-clip-norm", dp_config["dp_clip_norm"],
         "--dp-noise-multiplier", dp_config["dp_noise_multiplier"],
         "--dp-update-mode", dp_config["dp_update_mode"],
+        "--he-backend", he_backend,
+        "--he-aggregation-size", str(he_aggregation_size),
+        "--executor", executor,
         "--client-heterogeneity", str(client_heterogeneity),
         "--edge-heterogeneity", str(edge_heterogeneity),
         "--device", device,
+        "--require-feasible",
+        "--require-edge-cloud-coverage",
+        "--enforce-cloud-dp-stability",
+        "--cloud-dp-stability-threshold", "1.0",
         "--output-root", output_root,
         "--policies", *selected,
     ]
-    lr_index = args.index("--lr")
-    args[lr_index + 1] = effective_lr_text
+    duplicate_options = sorted(
+        option
+        for option in set(arg for arg in args if arg.startswith("--"))
+        if args.count(option) > 1
+    )
+    if duplicate_options:
+        raise RuntimeError(
+            "Configured command contains duplicate options: "
+            + ", ".join(duplicate_options)
+        )
     if resume_from_run:
         args.extend(["--resume-from-run", resume_from_run])
-    if mode == "time":
-        idx = args.index("--time-limit")
-        args[idx + 1] = str(time_limit)
+    if require_real_he:
+        args.append("--require-real-he")
+    if effective_executor_workers is not None:
+        args.extend(["--executor-workers", str(effective_executor_workers)])
+    if pareto_conflict_only:
+        args.append("--pareto-conflict-only")
     return {
         "label": f"configured {mode} experiment",
         "output_root": output_root,
@@ -564,7 +716,7 @@ def merge_selected_runs(
     source_ids: list[str],
     name: str = "",
     tail_start_round: int | None = None,
-    smooth_curves: bool = True,
+    smooth_curves: bool = False,
 ) -> dict:
     source_map = {item["id"]: item for item in available_merge_sources(limit=500)}
     selected = sorted(
@@ -665,8 +817,14 @@ def _parameter_suffix(item: dict) -> str:
     device = str(training.get("device") or item.get("device") or "").lower()
     if device and device != "cpu":
         parts.append(device)
+    if selection.get("num_clients") is not None:
+        parts.append(f"{int(selection['num_clients'])}c")
+    if selection.get("num_edges") is not None:
+        parts.append(f"{int(selection['num_edges'])}e")
     if selection.get("rounds") is not None:
         parts.append(f"{int(selection['rounds'])}r")
+    if selection.get("seed") is not None:
+        parts.append(f"s{int(selection['seed'])}")
     if training.get("selection_period") is not None:
         parts.append(f"sp{int(training['selection_period'])}")
     if training.get("learning_rate") is not None:
@@ -675,8 +833,14 @@ def _parameter_suffix(item: dict) -> str:
         parts.append(f"ch{_short_num(selection['client_heterogeneity'])}")
     if selection.get("edge_heterogeneity") is not None:
         parts.append(f"eh{_short_num(selection['edge_heterogeneity'])}")
-    if selection.get("num_edges") is not None:
-        parts.append(f"{int(selection['num_edges'])}e")
+    feature_epsilon = selection.get("dp_feature_epsilon_budget")
+    update_epsilon = selection.get("dp_update_epsilon_budget")
+    if feature_epsilon is not None and update_epsilon is not None:
+        if abs(float(feature_epsilon) - float(update_epsilon)) <= 1e-12:
+            parts.append(f"eps{_short_num(feature_epsilon)}")
+        else:
+            parts.append(f"emb{_short_num(feature_epsilon)}")
+            parts.append(f"upd{_short_num(update_epsilon)}")
     return "_".join(parts)
 
 
@@ -790,7 +954,7 @@ def delete_selected_dirs(target_ids: list[str]) -> dict:
 def save_current_run_for_paper(
     run_dir: Path,
     tail_start_round: int | None = None,
-    smooth_curves: bool = True,
+    smooth_curves: bool = False,
 ) -> dict:
     if not run_dir.exists():
         return {"ok": False, "message": "Current run directory does not exist"}
@@ -831,7 +995,7 @@ def build_current_run_figures(
     run_dir: Path,
     smooth_window: int = 9,
     tail_start_round: int | None = None,
-    smooth_curves: bool = True,
+    smooth_curves: bool = False,
 ) -> list[Path]:
     try:
         import matplotlib
@@ -930,24 +1094,6 @@ def build_current_run_figures(
             columnspacing=0.8,
             borderaxespad=0.35,
         )
-        if smooth_curves:
-            ax.text(
-                0.01,
-                0.02,
-                "Shaded band: EMA residual std within one seed",
-                transform=ax.transAxes,
-                fontsize=8,
-                color="#555555",
-            )
-        else:
-            ax.text(
-                0.01,
-                0.02,
-                "Raw unsmoothed curve",
-                transform=ax.transAxes,
-                fontsize=8,
-                color="#555555",
-            )
         fig.tight_layout()
         output = figure_dir / filename
         fig.savefig(output, dpi=220)
@@ -958,16 +1104,22 @@ def build_current_run_figures(
 
 def _short_policy_label(policy: str) -> str:
     policy_labels = {
-        "ours": "DynFedPrivacy",
-        "individual_optimal": "Individual-Optimal",
-        "fixed_dp": "Fixed-DP",
-        "privacy_only": "Privacy-Only",
-        "no_protection": "No-Protection",
+        "ours": "Ours",
+        "ours_no_omega": "No Error Cost Estimate",
+        "ours_fixed_liieiiic": "Fixed Mode LIIEIIIC",
+        "individual_optimal": "Individual Optimal",
+        "fixed_dp": "Fixed DP",
+        "privacy_only": "Privacy Only",
+        "no_protection": "No Protection",
         "random": "Random",
-        "fixed_liieiiic": "Fixed-HFL (LIIEIIIC)",
-        "performance_only": "Global-Balance Upper",
-        "best_accuracy": "Global-Utility Upper",
-        "accuracy_oracle": "Accuracy-Oracle Upper",
+        "fixed_fedavg": "Fixed FedAvg",
+        "fixed_splitfed": "Fixed SplitFed",
+        "fixed_hfl": "Fixed HFL",
+        "nsga2": "NSGA II",
+        "fixed_liieiiic": "Fixed HFL (LIIEIIIC)",
+        "performance_only": "Global Balance Upper",
+        "best_accuracy": "Global Utility Upper",
+        "accuracy_oracle": "Accuracy Oracle Upper",
     }
     if policy in policy_labels:
         return policy_labels[policy]
@@ -1173,7 +1325,7 @@ def _tail_start_round_from_payload(payload: dict, default: int | None = None) ->
         return default
 
 
-def _smooth_curves_from_payload(payload: dict, default: bool = True) -> bool:
+def _smooth_curves_from_payload(payload: dict, default: bool = False) -> bool:
     raw_value = payload.get("smooth_curves", default)
     if isinstance(raw_value, bool):
         return raw_value
@@ -1198,7 +1350,7 @@ def _le_only_round_count(policy_dir: Path) -> int | None:
 
 def _infer_run_dir(status_path: Path, payload: dict) -> Path:
     parent = status_path.parent
-    known_policies = set(PRESETS["paper50"]["args"][PRESETS["paper50"]["args"].index("--policies") + 1 :])
+    known_policies = set(PRESETS["paper100"]["args"][PRESETS["paper100"]["args"].index("--policies") + 1 :])
     active = payload.get("active_policy") or payload.get("policy")
     if active and (parent / str(active)).is_dir():
         return parent
@@ -1209,8 +1361,10 @@ def _infer_run_dir(status_path: Path, payload: dict) -> Path:
 
 def read_policy_statuses(run_dir: Path, current: dict) -> list[dict]:
     policies = []
+    if isinstance(current.get("policies"), list):
+        policies = [str(item) for item in current.get("policies", []) if item]
     config_path = run_dir / "config.json"
-    if config_path.exists():
+    if not policies and config_path.exists():
         try:
             with config_path.open("r", encoding="utf-8") as file:
                 config = json.load(file)
@@ -1218,7 +1372,9 @@ def read_policy_statuses(run_dir: Path, current: dict) -> list[dict]:
         except json.JSONDecodeError:
             policies = []
     if not policies:
-        policies = ["ours", "individual_optimal", "fixed_dp", "privacy_only", "no_protection", "random", "accuracy_oracle"]
+        policies = _active_training_policies()
+    if not policies:
+        policies = ["ours", "ours_no_omega", "ours_fixed_liieiiic", "individual_optimal", "fixed_dp", "privacy_only", "no_protection", "random", "accuracy_oracle"]
 
     status_rows = []
     active = current.get("active_policy") or current.get("policy")
@@ -1238,7 +1394,15 @@ def read_policy_statuses(run_dir: Path, current: dict) -> list[dict]:
                 item.setdefault("best_test_accuracy", summary.get("best_test_accuracy"))
                 item.setdefault("logical_time", summary.get("total_logical_time"))
                 item.setdefault("cumulative_communication_volume", summary.get("total_communication_volume"))
-                item.setdefault("epsilon_used", summary.get("total_epsilon_used"))
+                item.setdefault(
+                    "larger_channel_epsilon",
+                    summary.get(
+                        "larger_channel_epsilon",
+                        summary.get("total_epsilon_used"),
+                    ),
+                )
+                item.setdefault("feature_epsilon", summary.get("max_feature_epsilon"))
+                item.setdefault("update_epsilon", summary.get("max_update_epsilon"))
                 item.setdefault("mode_distribution", summary.get("mode_distribution"))
                 item.setdefault("mean_global_update_clients", summary.get("mean_global_update_clients"))
                 item.setdefault("per_client_test_mean", summary.get("per_client_test_accuracy_mean"))
@@ -1259,7 +1423,12 @@ def read_policy_statuses(run_dir: Path, current: dict) -> list[dict]:
                 "best_test_accuracy": summary.get("best_test_accuracy"),
                 "logical_time": summary.get("total_logical_time"),
                 "cumulative_communication_volume": summary.get("total_communication_volume"),
-                "epsilon_used": summary.get("total_epsilon_used"),
+                "larger_channel_epsilon": summary.get(
+                    "larger_channel_epsilon",
+                    summary.get("total_epsilon_used"),
+                ),
+                "feature_epsilon": summary.get("max_feature_epsilon"),
+                "update_epsilon": summary.get("max_update_epsilon"),
                 "mode_distribution": summary.get("mode_distribution"),
                 "mean_global_update_clients": summary.get("mean_global_update_clients"),
                 "per_client_test_mean": summary.get("per_client_test_accuracy_mean"),
@@ -1303,6 +1472,24 @@ def read_policy_statuses(run_dir: Path, current: dict) -> list[dict]:
         item["policy"] = policy
         status_rows.append(item)
     return status_rows
+
+
+def _active_training_policies() -> list[str]:
+    if TRAINING_PROCESS is None:
+        return []
+    args = getattr(TRAINING_PROCESS, "args", [])
+    if not isinstance(args, (list, tuple)):
+        return []
+    values = [str(item) for item in args]
+    if "--policies" not in values:
+        return []
+    start = values.index("--policies") + 1
+    policies: list[str] = []
+    for value in values[start:]:
+        if value.startswith("--"):
+            break
+        policies.append(value)
+    return policies
 
 
 def html_page() -> bytes:
@@ -1407,6 +1594,16 @@ def _int_arg(args: dict[str, object], key: str, default: int) -> int:
         return default
 
 
+def _optional_int_arg(args: dict[str, object], key: str) -> int | None:
+    value = args.get(key)
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _float_arg(args: dict[str, object], key: str, default: float) -> float:
     try:
         return float(args.get(key, default))
@@ -1425,35 +1622,75 @@ def _expected_config_from_preset(preset: dict) -> dict:
     partition_mode = "iid" if iid else _str_arg(args, "--partition-mode", "client_noniid")
     return {
         "selection": {
-            "rounds": _int_arg(args, "--rounds", 10),
-            "num_clients": _int_arg(args, "--clients", 10),
-            "num_edges": _int_arg(args, "--edges", 2),
+            "rounds": _int_arg(args, "--rounds", 200),
+            "num_clients": _int_arg(args, "--clients", 100),
+            "num_edges": _int_arg(args, "--edges", 10),
             "seed": _int_arg(args, "--seed", 42),
-            "initial_epsilon": _float_arg(args, "--initial-epsilon", 10.0),
-            "dp_event_epsilon": _float_arg(args, "--dp-event-epsilon", 0.01),
+            "initial_epsilon": _float_arg(args, "--initial-epsilon", 8.0),
+            "dp_event_epsilon": _float_arg(args, "--dp-event-epsilon", 0.05),
+            "dp_emb_epsilon": _float_arg(args, "--dp-emb-epsilon", 8.0),
+            "dp_upd_epsilon": _float_arg(args, "--dp-upd-epsilon", 8.0),
+            "dp_accounting_mode": _str_arg(args, "--dp-accounting-mode", "rdp_auto"),
+            "dp_delta": _float_arg(args, "--dp-delta", 1e-5),
+            "dp_feature_epsilon_budget": _float_arg(
+                args,
+                "--dp-feature-epsilon-budget",
+                _float_arg(args, "--initial-epsilon", 8.0),
+            ),
+            "dp_update_epsilon_budget": _float_arg(
+                args,
+                "--dp-update-epsilon-budget",
+                _float_arg(args, "--initial-epsilon", 8.0),
+            ),
             "resource_limit": _float_arg(args, "--resource-limit", 1.35),
-            "time_limit": _float_arg(args, "--time-limit", 8.0),
+            "memory_limit": _float_arg(args, "--memory-limit", 1.35),
+            "time_limit": _float_arg(args, "--time-limit", 300.0),
             "risk_limit": _float_arg(args, "--risk-limit", 0.5),
-            "aggregation_fraction": _float_arg(args, "--aggregation-fraction", 0.5),
+            "aggregation_fraction": _float_arg(args, "--aggregation-fraction", 1.0),
+            "pareto_archive_size": _int_arg(args, "--pareto-archive-size", 16),
+            "pareto_max_iters": _int_arg(args, "--pareto-max-iters", 50),
+            "pareto_neighbor_top_k": _int_arg(args, "--pareto-neighbor-top-k", 0),
+            "pareto_conflict_only": bool(args.get("--pareto-conflict-only", False)),
+            "cloud_fusion_xi": _float_arg(args, "--cloud-fusion-xi", 0.2),
+            "cloud_fusion_eps": _float_arg(args, "--cloud-fusion-eps", 0.05),
+            "edge_aggregation_beta": _float_arg(args, "--edge-aggregation-beta", 0.01),
+            "edge_aggregation_fixed": _float_arg(args, "--edge-aggregation-fixed", 0.02),
+            "cloud_aggregation_beta": _float_arg(args, "--cloud-aggregation-beta", 0.015),
+            "cloud_aggregation_fixed": _float_arg(args, "--cloud-aggregation-fixed", 0.04),
+            "min_edge_cloud_fusion_ratio": _float_arg(
+                args, "--min-edge-cloud-fusion-ratio", 0.5
+            ),
             "client_heterogeneity": _float_arg(args, "--client-heterogeneity", 2.0),
             "edge_heterogeneity": _float_arg(args, "--edge-heterogeneity", 1.5),
             "require_feasible": bool(args.get("--require-feasible", False)),
             "require_cloud_participation": bool(args.get("--require-cloud", False)),
+            "require_edge_cloud_coverage": bool(
+                args.get("--require-edge-cloud-coverage", False)
+            ),
+            "enforce_cloud_dp_stability": bool(
+                args.get("--enforce-cloud-dp-stability", False)
+            ),
+            "cloud_dp_stability_threshold": _float_arg(
+                args, "--cloud-dp-stability-threshold", 1.0
+            ),
         },
         "training": {
-            "dataset_name": _str_arg(args, "--dataset", "fmnist"),
-            "model_name": _str_arg(args, "--model", "lenet5"),
+            "dataset_name": _str_arg(args, "--dataset", "cifar10"),
+            "model_name": _str_arg(args, "--model", "resnet18_pretrained"),
             "model_revision": "groupnorm_v2",
-            "local_epochs": _int_arg(args, "--local-epochs", 2),
-            "learning_rate": _float_arg(args, "--lr", 0.15),
+            "execution_revision": "paper_flow_v22_wall_raw_nsga",
+            "local_epochs": _int_arg(args, "--local-epochs", 3),
+            "learning_rate": _float_arg(args, "--lr", 0.01),
             "iid": iid,
             "partition_mode": partition_mode,
             "selection_period": _int_arg(args, "--selection-period", 1),
-            "dp_clip_norm": _float_arg(args, "--dp-clip-norm", 20.0),
-            "dp_noise_multiplier": _float_arg(args, "--dp-noise-multiplier", 0.005),
-            "dp_update_mode": _str_arg(args, "--dp-update-mode", "any_dp"),
-            "device": _str_arg(args, "--device", "cpu"),
-            "he_backend": _str_arg(args, "--he-backend", "none"),
+            "dp_clip_norm": _float_arg(args, "--dp-clip-norm", 1.0),
+            "dp_noise_multiplier": _float_arg(args, "--dp-noise-multiplier", 0.0002),
+            "dp_update_mode": _str_arg(args, "--dp-update-mode", "upd_only"),
+            "executor": _str_arg(args, "--executor", "serial"),
+            "executor_workers": _optional_int_arg(args, "--executor-workers"),
+            "device": _str_arg(args, "--device", "cuda"),
+            "he_backend": _str_arg(args, "--he-backend", "seal"),
             "he_local_deps": _str_arg(args, "--he-local-deps", ".he_deps"),
             "require_real_he": bool(args.get("--require-real-he", False)),
         },
@@ -1464,6 +1701,8 @@ def _expected_config_from_preset(preset: dict) -> dict:
 
 
 def _config_value_matches(actual: object, expected: object) -> bool:
+    if expected is None:
+        return actual is None or str(actual).strip() == ""
     if isinstance(expected, bool):
         return bool(actual) == expected
     if isinstance(expected, int) and not isinstance(expected, bool):
@@ -1518,6 +1757,27 @@ def _resume_round_for_policies(run_dir: Path, requested: list[str]) -> int | Non
     return min(rounds) if rounds else None
 
 
+def _resume_he_runtime_is_compatible(
+    run_dir: Path,
+    requested: list[str],
+    expected: dict,
+) -> bool:
+    training = expected.get("training", {})
+    if training.get("he_backend") != "seal" or not training.get("require_real_he"):
+        return True
+    validation_marker = "SEAL CKKS encrypted-vector validation passed"
+    for policy in requested:
+        summary_path = run_dir / policy / "summary.json"
+        try:
+            with summary_path.open("r", encoding="utf-8") as file:
+                summary = json.load(file)
+        except (json.JSONDecodeError, OSError):
+            return False
+        if validation_marker not in str(summary.get("he_status", "")):
+            return False
+    return True
+
+
 def _add_resume_arg(preset: dict, resume_from_run: Path) -> dict:
     updated = {**preset, "args": list(preset.get("args", []))}
     args = updated["args"]
@@ -1563,6 +1823,8 @@ def find_auto_resume_run(preset: dict) -> dict | None:
             continue
         if not _config_matches_resume_target(config, expected):
             continue
+        if not _resume_he_runtime_is_compatible(run_dir, requested, expected):
+            continue
         source_rounds = _resume_round_for_policies(run_dir, requested)
         if source_rounds is None or source_rounds <= 0 or source_rounds >= target_rounds:
             continue
@@ -1582,54 +1844,98 @@ def find_auto_resume_run(preset: dict) -> dict | None:
     return best
 
 
+@_serialized_training_state
 def start_training(
     preset_name: str,
     default_output_root: Path,
     rounds: int | None = None,
     mode: str = "rounds",
-    time_limit: float = 8.0,
+    time_limit: float = 300.0,
+    train_limit: int = 12000,
+    test_limit: int = 2000,
     policies: list[str] | None = None,
     figure_axis: str = "round",
-    partition_mode: str = "client_noniid",
-    edges: int = 2,
+    partition_mode: str = "extreme_edge_label_skew",
+    clients: int = 100,
+    edges: int = 10,
     seed: int = 42,
     client_heterogeneity: float = 2.0,
     edge_heterogeneity: float = 1.5,
     selection_period: int = 1,
-    aggregation_fraction: float = 0.5,
+    aggregation_fraction: float = 1.0,
+    pareto_archive_size: int = 16,
+    pareto_max_iters: int = 50,
+    pareto_neighbor_top_k: int = 0,
+    pareto_conflict_only: bool = False,
+    cloud_fusion_xi: float = 0.2,
+    cloud_fusion_eps: float = 0.05,
+    min_edge_cloud_fusion_ratio: float = 0.5,
+    resource_limit: float = 1.35,
+    risk_limit: float = 0.5,
+    executor: str = "serial",
+    executor_workers: int | None = None,
     local_epochs: int | None = None,
     learning_rate: float | None = None,
-    dp_profile: str = "balanced",
-    dataset: str = "fmnist",
-    model: str = "lenet5",
-    device: str = "cpu",
+    initial_epsilon: float = 8.0,
+    dp_emb_epsilon: float = 8.0,
+    dp_upd_epsilon: float = 8.0,
+    he_backend: str = "seal",
+    require_real_he: bool = True,
+    he_aggregation_size: int = 0,
+    dp_profile: str = "cifar_resnet",
+    dataset: str = "cifar10",
+    model: str = "resnet18_pretrained",
+    device: str = "cuda",
     resume_from_run: str = "",
+    reuse_completed: bool = False,
 ) -> dict:
-    global ACTIVE_OUTPUT_ROOT, TRAINING_PROCESS
-    if preset_name == "configured":
+    global ACTIVE_OUTPUT_ROOT, LAST_STOP_MESSAGE, TRAINING_PROCESS
+    if preset_name == "paper50":
+        preset_name = "paper100"
+    if preset_name in {"configured", "custom"}:
         preset = configured_preset(
             mode,
-            rounds or 50,
+            rounds or 200,
             time_limit,
+            train_limit,
+            test_limit,
             policies or [],
             figure_axis,
             partition_mode,
+            clients,
             edges,
             seed,
             client_heterogeneity,
             edge_heterogeneity,
             selection_period,
             aggregation_fraction,
+            pareto_archive_size,
+            pareto_max_iters,
+            pareto_neighbor_top_k,
+            pareto_conflict_only,
+            cloud_fusion_xi,
+            cloud_fusion_eps,
+            min_edge_cloud_fusion_ratio,
+            resource_limit,
+            risk_limit,
+            executor,
+            executor_workers,
             local_epochs,
             learning_rate,
+            initial_epsilon,
+            dp_emb_epsilon,
+            dp_upd_epsilon,
+            he_backend,
+            require_real_he,
+            he_aggregation_size,
             dp_profile,
             dataset,
             model,
             device,
             resume_from_run,
         )
-    elif preset_name == "custom":
-        preset = custom_paper_preset(rounds or 50)
+        if preset_name == "custom":
+            preset["label"] = f"{rounds or 200}r custom paper set"
     else:
         preset = PRESETS.get(preset_name)
     if preset is None:
@@ -1646,19 +1952,22 @@ def start_training(
     if process_running:
         return {"ok": False, "message": f"Training process is already running, PID {TRAINING_PROCESS.pid}"}
 
-    reusable_run = find_reusable_run(output_root, preset)
-    if reusable_run is not None:
-        ACTIVE_OUTPUT_ROOT = output_root
-        outputs = build_current_run_figures(reusable_run)
-        return {
-            "ok": True,
-            "reused": True,
-            "preset": preset_name,
-            "message": f"Reused completed experiment: {reusable_run}",
-            "output_root": str(output_root),
-            "run_dir": str(reusable_run),
-            "figures": [str(path) for path in outputs],
-        }
+    LAST_STOP_MESSAGE = None
+
+    if reuse_completed:
+        reusable_run = find_reusable_run(output_root, preset)
+        if reusable_run is not None:
+            ACTIVE_OUTPUT_ROOT = output_root
+            outputs = build_current_run_figures(reusable_run)
+            return {
+                "ok": True,
+                "reused": True,
+                "preset": preset_name,
+                "message": f"Reused completed experiment: {reusable_run}",
+                "output_root": str(output_root),
+                "run_dir": str(reusable_run),
+                "figures": [str(path) for path in outputs],
+            }
 
     auto_resume = None
     if not resume_from_run:
@@ -1747,6 +2056,13 @@ def rebuild_figures() -> dict:
     }
 
 
+def _stop_result(message: str, cleanup: dict, stopped: list[str]) -> dict:
+    global LAST_STOP_MESSAGE
+    LAST_STOP_MESSAGE = message
+    return {"ok": True, "message": message, "cleanup": cleanup, "stopped_pids": stopped}
+
+
+@_serialized_training_state
 def stop_training() -> dict:
     global TRAINING_PROCESS, ACTIVE_OUTPUT_ROOT
     cleanup_root = ACTIVE_OUTPUT_ROOT
@@ -1757,7 +2073,7 @@ def stop_training() -> dict:
         ACTIVE_OUTPUT_ROOT = None if cleanup.get("deleted") else ACTIVE_OUTPUT_ROOT
         suffix = f"; {cleanup['message']}" if cleanup.get("message") else ""
         proc_msg = f"Stopped residual training processes: {', '.join(stopped)}" if stopped else "No tracked training process is running"
-        return {"ok": True, "message": proc_msg + suffix, "cleanup": cleanup, "stopped_pids": stopped}
+        return _stop_result(proc_msg + suffix, cleanup, stopped)
     pid = TRAINING_PROCESS.pid
     if TRAINING_PROCESS.poll() is not None:
         TRAINING_PROCESS = None
@@ -1766,22 +2082,38 @@ def stop_training() -> dict:
         ACTIVE_OUTPUT_ROOT = None if cleanup.get("deleted") else ACTIVE_OUTPUT_ROOT
         suffix = f"; {cleanup['message']}" if cleanup.get("message") else ""
         extra = f"; stopped residual training processes: {', '.join(stopped)}" if stopped else ""
-        return {"ok": True, "message": f"Training process {pid} already stopped" + extra + suffix, "cleanup": cleanup, "stopped_pids": stopped}
-    TRAINING_PROCESS.terminate()
-    try:
-        TRAINING_PROCESS.wait(timeout=5)
-        message = f"Stopped training process {pid}"
-    except subprocess.TimeoutExpired:
-        TRAINING_PROCESS.kill()
-        TRAINING_PROCESS.wait(timeout=5)
-        message = f"Killed training process {pid}"
+        return _stop_result(f"Training process {pid} already stopped" + extra + suffix, cleanup, stopped)
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        try:
+            TRAINING_PROCESS.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            TRAINING_PROCESS.kill()
+            TRAINING_PROCESS.wait(timeout=5)
+        message = f"Stopped training process tree {pid}"
+    else:
+        TRAINING_PROCESS.terminate()
+        try:
+            TRAINING_PROCESS.wait(timeout=5)
+            message = f"Stopped training process {pid}"
+        except subprocess.TimeoutExpired:
+            TRAINING_PROCESS.kill()
+            TRAINING_PROCESS.wait(timeout=5)
+            message = f"Killed training process {pid}"
     TRAINING_PROCESS = None
     stopped = stop_all_training_processes()
     cleanup = cleanup_incomplete_active_run(cleanup_root)
     ACTIVE_OUTPUT_ROOT = None if cleanup.get("deleted") else ACTIVE_OUTPUT_ROOT
     suffix = f"; {cleanup['message']}" if cleanup.get("message") else ""
     extra = f"; stopped residual training processes: {', '.join(stopped)}" if stopped else ""
-    return {"ok": True, "message": message + extra + suffix, "cleanup": cleanup, "stopped_pids": stopped}
+    return _stop_result(message + extra + suffix, cleanup, stopped)
 
 
 def stop_all_training_processes(exclude_pids: set[int] | None = None) -> list[str]:
@@ -1918,10 +2250,29 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if route == "/status":
             status = read_status(active_output_root(self.output_root))
-            status["training_process_running"] = bool(TRAINING_PROCESS is not None and TRAINING_PROCESS.poll() is None)
-            status["training_pid"] = TRAINING_PROCESS.pid if TRAINING_PROCESS is not None and TRAINING_PROCESS.poll() is None else None
+            process_running = bool(TRAINING_PROCESS is not None and TRAINING_PROCESS.poll() is None)
+            if process_running and status.get("status") not in {"waiting", "loading", "running"}:
+                status = {
+                    "status": "loading",
+                    "message": f"Training process PID {TRAINING_PROCESS.pid} started; waiting for first status update",
+                    "progress": 0.0,
+                    "output_root": str(active_output_root(self.output_root)),
+                }
+            elif LAST_STOP_MESSAGE and not process_running and status.get("status") in {"waiting", "loading", "running"}:
+                status["status"] = "stopped"
+                status["message"] = LAST_STOP_MESSAGE
+            elif not process_running and status.get("status") == "running":
+                return_code = TRAINING_PROCESS.returncode if TRAINING_PROCESS is not None else None
+                status["status"] = "failed"
+                status["message"] = (
+                    f"Training process exited with code {return_code}. Check out/configured_train.err.log."
+                    if return_code is not None
+                    else "Training status is stale and no training process is running. Check out/configured_train.err.log."
+                )
+            status["training_process_running"] = process_running
+            status["training_pid"] = TRAINING_PROCESS.pid if process_running else None
             status["available_presets"] = {key: {"label": value["label"], "output_root": value["output_root"]} for key, value in PRESETS.items()}
-            payload = json.dumps(status, ensure_ascii=False).encode("utf-8")
+            payload = _json_response(status)
             self._send(200, "application/json; charset=utf-8", payload)
             return
         if route.startswith("/figures/"):
@@ -1964,28 +2315,59 @@ class MonitorHandler(BaseHTTPRequestHandler):
         route = parsed.path
         if route == "/start":
             query = parse_qs(parsed.query)
-            preset = query.get("preset", ["random100"])[0]
+            preset = query.get("preset", ["configured"])[0]
+            if (
+                preset in {"configured", "custom"}
+                and query.get("privacy_schema", [""])[0] != PRIVACY_SCHEMA_VERSION
+            ):
+                payload = json.dumps(
+                    {
+                        "ok": False,
+                        "message": (
+                            "The monitor page is outdated. Refresh the page before "
+                            "starting; DP fields now represent total RDP epsilon targets."
+                        ),
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self._send(409, "application/json; charset=utf-8", payload)
+                return
             try:
-                rounds = int(query.get("rounds", ["50"])[0])
+                rounds = int(query.get("rounds", ["200"])[0])
             except ValueError:
-                rounds = 50
+                rounds = 200
             try:
-                time_limit = float(query.get("time_limit", ["8.0"])[0])
+                time_limit = float(query.get("time_limit", ["300.0"])[0])
             except ValueError:
-                time_limit = 8.0
+                time_limit = 300.0
+            try:
+                train_limit = int(query.get("train_limit", ["12000"])[0])
+            except ValueError:
+                train_limit = 12000
+            try:
+                test_limit = int(query.get("test_limit", ["2000"])[0])
+            except ValueError:
+                test_limit = 2000
             policies = [
                 item
-                for value in query.get("policies", ["ours,individual_optimal,fixed_dp,privacy_only,no_protection,random,accuracy_oracle"])
+                for value in query.get(
+                    "policies",
+                    ["ours,individual_optimal,no_protection,random"],
+                )
                 for item in value.split(",")
                 if item
             ]
             mode = query.get("mode", ["rounds"])[0]
             figure_axis = query.get("figure_axis", ["round"])[0]
-            partition_mode = query.get("partition_mode", ["client_noniid"])[0]
+            partition_mode = query.get("partition_mode", ["extreme_edge_label_skew"])[0]
             try:
-                edges = int(query.get("edges", ["2"])[0])
+                clients = int(query.get("clients", ["100"])[0])
             except ValueError:
-                edges = 2
+                clients = 100
+            try:
+                edges = int(query.get("edges", ["10"])[0])
+            except ValueError:
+                edges = 10
             try:
                 seed = int(query.get("seed", ["42"])[0])
             except ValueError:
@@ -2003,9 +2385,56 @@ class MonitorHandler(BaseHTTPRequestHandler):
             except ValueError:
                 selection_period = 1
             try:
-                aggregation_fraction = float(query.get("aggregation_fraction", ["0.5"])[0])
+                aggregation_fraction = float(query.get("aggregation_fraction", ["1.0"])[0])
             except ValueError:
-                aggregation_fraction = 0.5
+                aggregation_fraction = 1.0
+            try:
+                pareto_archive_size = int(query.get("pareto_archive_size", ["16"])[0])
+            except ValueError:
+                pareto_archive_size = 16
+            try:
+                pareto_max_iters = int(query.get("pareto_max_iters", ["50"])[0])
+            except ValueError:
+                pareto_max_iters = 50
+            try:
+                pareto_neighbor_top_k = int(query.get("pareto_neighbor_top_k", ["0"])[0])
+            except ValueError:
+                pareto_neighbor_top_k = 0
+            pareto_conflict_only = query.get("pareto_conflict_only", ["0"])[0] not in {
+                "0",
+                "false",
+                "False",
+            }
+            try:
+                cloud_fusion_xi = float(query.get("cloud_fusion_xi", ["0.2"])[0])
+            except ValueError:
+                cloud_fusion_xi = 0.2
+            try:
+                cloud_fusion_eps = float(query.get("cloud_fusion_eps", ["0.05"])[0])
+            except ValueError:
+                cloud_fusion_eps = 0.05
+            try:
+                min_edge_cloud_fusion_ratio = float(
+                    query.get("min_edge_cloud_fusion_ratio", ["0.5"])[0]
+                )
+            except ValueError:
+                min_edge_cloud_fusion_ratio = 0.5
+            try:
+                resource_limit = float(query.get("resource_limit", ["1.35"])[0])
+            except ValueError:
+                resource_limit = 1.35
+            try:
+                risk_limit = float(query.get("risk_limit", ["0.5"])[0])
+            except ValueError:
+                risk_limit = 0.5
+            executor = query.get("executor", ["serial"])[0]
+            executor_workers = None
+            executor_workers_text = query.get("executor_workers", [""])[0].strip()
+            if executor_workers_text:
+                try:
+                    executor_workers = int(executor_workers_text)
+                except ValueError:
+                    executor_workers = None
             local_epochs = None
             local_epochs_text = query.get("local_epochs", [""])[0].strip()
             if local_epochs_text:
@@ -2020,11 +2449,30 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     learning_rate = float(learning_rate_text)
                 except ValueError:
                     learning_rate = None
-            dp_profile = query.get("dp_profile", ["balanced"])[0]
-            dataset = query.get("dataset", ["fmnist"])[0]
-            model = query.get("model", ["lenet5"])[0]
-            device = query.get("device", ["cpu"])[0]
+            try:
+                initial_epsilon = float(query.get("initial_epsilon", ["8.0"])[0])
+            except ValueError:
+                initial_epsilon = 8.0
+            try:
+                dp_emb_epsilon = float(query.get("dp_emb_epsilon", ["8.0"])[0])
+            except ValueError:
+                dp_emb_epsilon = 8.0
+            try:
+                dp_upd_epsilon = float(query.get("dp_upd_epsilon", ["8.0"])[0])
+            except ValueError:
+                dp_upd_epsilon = 8.0
+            he_backend = query.get("he_backend", ["seal"])[0]
+            require_real_he = query.get("require_real_he", ["true"])[0].lower() == "true"
+            try:
+                he_aggregation_size = int(query.get("he_aggregation_size", ["0"])[0])
+            except ValueError:
+                he_aggregation_size = 0
+            dp_profile = query.get("dp_profile", ["cifar_resnet"])[0]
+            dataset = query.get("dataset", ["cifar10"])[0]
+            model = query.get("model", ["resnet18_pretrained"])[0]
+            device = query.get("device", ["cuda"])[0]
             resume_from_run = query.get("resume_from_run", [""])[0].strip()
+            reuse_completed = query.get("reuse_completed", ["false"])[0].lower() == "true"
             payload = json.dumps(
                 start_training(
                     preset,
@@ -2032,22 +2480,43 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     rounds,
                     mode,
                     time_limit,
+                    train_limit,
+                    test_limit,
                     policies,
                     figure_axis,
                     partition_mode,
+                    clients,
                     edges,
                     seed,
                     client_heterogeneity,
                     edge_heterogeneity,
                     selection_period,
                     aggregation_fraction,
+                    pareto_archive_size,
+                    pareto_max_iters,
+                    pareto_neighbor_top_k,
+                    pareto_conflict_only,
+                    cloud_fusion_xi,
+                    cloud_fusion_eps,
+                    min_edge_cloud_fusion_ratio,
+                    resource_limit,
+                    risk_limit,
+                    executor,
+                    executor_workers,
                     local_epochs,
                     learning_rate,
+                    initial_epsilon,
+                    dp_emb_epsilon,
+                    dp_upd_epsilon,
+                    he_backend,
+                    require_real_he,
+                    he_aggregation_size,
                     dp_profile,
                     dataset,
                     model,
                     device,
                     resume_from_run,
+                    reuse_completed,
                 ),
                 ensure_ascii=False,
             ).encode("utf-8")
@@ -2308,26 +2777,26 @@ th { color: var(--muted); font-weight: 500; }
       </div>
       <div class="field">
         <label for="roundsInput">Rounds</label>
-        <input class="round-input" id="roundsInput" type="number" min="1" max="500" step="1" value="50">
+        <input class="round-input" id="roundsInput" type="number" min="1" max="500" step="1" value="200">
       </div>
       <div class="field">
         <label for="datasetSelect">Dataset</label>
         <select id="datasetSelect">
-          <option value="fmnist" selected>Fashion-MNIST</option>
-          <option value="cifar10">CIFAR-10</option>
+          <option value="fmnist">Fashion-MNIST</option>
+          <option value="cifar10" selected>CIFAR-10</option>
           <option value="cifar100">CIFAR-100</option>
         </select>
       </div>
       <div class="field">
         <label for="modelSelect">Model</label>
         <select id="modelSelect">
-          <option value="lenet5" selected>LeNet-5</option>
+          <option value="lenet5">LeNet-5</option>
           <option value="smallcnn">Small CNN</option>
           <option value="avgcnn">DriftRace AvgCNN</option>
           <option value="tinyresnet">Tiny ResNet</option>
           <option value="resnet18">ResNet-18</option>
           <option value="resnet50">ResNet-50</option>
-          <option value="resnet18_pretrained">ResNet-18 Pretrained</option>
+          <option value="resnet18_pretrained" selected>ResNet-18 Pretrained</option>
           <option value="resnet50_pretrained">ResNet-50 Pretrained</option>
         </select>
       </div>
@@ -2339,8 +2808,23 @@ th { color: var(--muted); font-weight: 500; }
         </select>
       </div>
       <div class="field">
+        <label for="executorSelect">Executor</label>
+        <select id="executorSelect">
+          <option value="serial" selected>Serial</option>
+          <option value="process_pool">Process pool</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="executorWorkersInput">Executor workers</label>
+        <input class="round-input" id="executorWorkersInput" type="number" min="1" max="64" step="1" placeholder="Auto">
+      </div>
+      <div class="field">
+        <label for="clientsInput">Clients</label>
+        <input class="round-input" id="clientsInput" type="number" min="1" max="200" step="1" value="100">
+      </div>
+      <div class="field">
         <label for="edgesInput">Edges</label>
-        <input class="round-input" id="edgesInput" type="number" min="1" max="5" step="1" value="3">
+        <input class="round-input" id="edgesInput" type="number" min="1" max="20" step="1" value="10">
       </div>
       <div class="field">
         <label for="seedInput">Seed</label>
@@ -2349,6 +2833,14 @@ th { color: var(--muted); font-weight: 500; }
       <div class="field">
         <label for="timeLimitInput">Time limit constraint</label>
         <input class="round-input" id="timeLimitInput" type="number" min="0.1" max="300" step="0.1" value="300">
+      </div>
+      <div class="field">
+        <label for="trainLimitInput">Train sample limit</label>
+        <input class="round-input" id="trainLimitInput" type="number" min="1" max="60000" step="100" value="12000">
+      </div>
+      <div class="field">
+        <label for="testLimitInput">Test sample limit</label>
+        <input class="round-input" id="testLimitInput" type="number" min="1" max="10000" step="100" value="2000">
       </div>
       <div class="field">
         <label for="figureAxis">Figure axis</label>
@@ -2383,6 +2875,34 @@ th { color: var(--muted); font-weight: 500; }
         <input class="round-input" id="aggregationFractionInput" type="number" min="0.1" max="1.0" step="0.05" value="1.0">
       </div>
       <div class="field">
+        <label for="paretoArchiveSizeInput">Pareto archive K_P</label>
+        <input class="round-input" id="paretoArchiveSizeInput" type="number" min="2" max="128" step="1" value="16">
+      </div>
+      <div class="field">
+        <label for="paretoMaxItersInput">Pareto expansions I_max</label>
+        <input class="round-input" id="paretoMaxItersInput" type="number" min="0" max="200" step="1" value="50">
+      </div>
+      <div class="field">
+        <label for="cloudFusionXiInput">Cloud-fusion penalty xi</label>
+        <input class="round-input" id="cloudFusionXiInput" type="number" min="0" max="100" step="0.01" value="0.2">
+      </div>
+      <div class="field">
+        <label for="cloudFusionEpsInput">Cloud-fusion epsilon</label>
+        <input class="round-input" id="cloudFusionEpsInput" type="number" min="0.000001" max="10" step="0.001" value="0.05">
+      </div>
+      <div class="field">
+        <label for="minEdgeCloudFusionInput">Min cloud samples per edge</label>
+        <input class="round-input" id="minEdgeCloudFusionInput" type="number" min="0" max="1" step="0.05" value="0.5">
+      </div>
+      <div class="field">
+        <label for="resourceLimitInput">Resource limit</label>
+        <input class="round-input" id="resourceLimitInput" type="number" min="0" max="100" step="0.05" value="1.35">
+      </div>
+      <div class="field">
+        <label for="riskLimitInput">Risk limit</label>
+        <input class="round-input" id="riskLimitInput" type="number" min="0" max="1" step="0.01" value="0.5">
+      </div>
+      <div class="field">
         <label for="localEpochsInput">Local epochs</label>
         <input class="round-input" id="localEpochsInput" type="number" min="1" max="20" step="1" placeholder="Auto">
       </div>
@@ -2390,13 +2910,37 @@ th { color: var(--muted); font-weight: 500; }
         <label for="learningRateInput">Learning rate</label>
         <input class="round-input" id="learningRateInput" type="number" min="0.000001" max="1.0" step="0.0001" placeholder="Auto">
       </div>
+      <input id="initialEpsilonInput" type="hidden" value="8.0">
+      <div class="field">
+        <label for="dpEmbEpsilonInput">Feature total epsilon target</label>
+        <input class="round-input" id="dpEmbEpsilonInput" type="number" min="0.001" max="100" step="0.1" value="8.0">
+      </div>
+      <div class="field">
+        <label for="dpUpdEpsilonInput">Update total epsilon target</label>
+        <input class="round-input" id="dpUpdEpsilonInput" type="number" min="0.001" max="100" step="0.1" value="8.0">
+      </div>
       <div class="field">
         <label for="dpProfileSelect">DP profile</label>
         <select id="dpProfileSelect">
-          <option value="balanced">Balanced DP</option>
-          <option value="strong">Strong DP</option>
-          <option value="cifar_resnet" selected>CIFAR-ResNet DP</option>
-          <option value="weak_update">Weak Update DP</option>
+          <option value="balanced">Auto RDP (C=1)</option>
+          <option value="strong">Auto RDP (C=20)</option>
+          <option value="cifar_resnet" selected>CIFAR Auto RDP (C=1)</option>
+          <option value="weak_update">Auto RDP (C=0.5)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="heBackendSelect">HE backend</label>
+        <select id="heBackendSelect">
+          <option value="none">None</option>
+          <option value="seal" selected>SEAL</option>
+          <option value="tenseal">TenSEAL</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="requireRealHeInput">Require real HE</label>
+        <select id="requireRealHeInput">
+          <option value="true" selected>True</option>
+          <option value="false">False</option>
         </select>
       </div>
       <div class="field">
@@ -2407,10 +2951,14 @@ th { color: var(--muted); font-weight: 500; }
     <div class="method-list" id="methodList">
       <label><input type="checkbox" value="ours" checked>DynFedPrivacy</label>
       <label><input type="checkbox" value="individual_optimal" checked>Individual-Optimal</label>
-      <label><input type="checkbox" value="fixed_dp" checked>Fixed-DP</label>
+      <label><input type="checkbox" value="fixed_dp">Fixed-DP</label>
       <label><input type="checkbox" value="privacy_only">Privacy-Only</label>
       <label><input type="checkbox" value="no_protection" checked>No-Protection</label>
       <label><input type="checkbox" value="random" checked>Random</label>
+      <label><input type="checkbox" value="fixed_fedavg">Fixed FedAvg</label>
+      <label><input type="checkbox" value="fixed_splitfed">Fixed SplitFed</label>
+      <label><input type="checkbox" value="fixed_hfl">Fixed HFL</label>
+      <label><input type="checkbox" value="nsga2">NSGA II</label>
       <label><input type="checkbox" value="fixed_liieiiic">Fixed-HFL (LIIEIIIC)</label>
       <label><input type="checkbox" value="performance_only">Global-Balance Upper</label>
       <label><input type="checkbox" value="best_accuracy">Global-Utility Upper</label>
@@ -2429,7 +2977,7 @@ th { color: var(--muted); font-weight: 500; }
     <div class="experiment-form">
       <div class="field">
         <label for="ablRoundsInput">Rounds</label>
-        <input class="round-input" id="ablRoundsInput" type="number" min="1" max="500" step="1" value="50">
+        <input class="round-input" id="ablRoundsInput" type="number" min="1" max="500" step="1" value="100">
       </div>
       <div class="field">
         <label for="ablEdgesInput">Edges</label>
@@ -2479,6 +3027,21 @@ th { color: var(--muted); font-weight: 500; }
   </details>
 
   <details class="panel" open>
+    <summary>Algorithm Ablation</summary>
+    <div class="section-kicker">All variants inherit the current main experiment settings.</div>
+    <div class="method-list">
+      <label>Full Method</label>
+      <label>Without Global Coordination</label>
+      <label>No Error Cost Estimate</label>
+      <label>Fixed Mode LIIEIIIC</label>
+    </div>
+    <div class="control-panel">
+      <button type="button" id="runAlgorithmAblationBtn">Run Algorithm Ablation</button>
+    </div>
+    <div class="sub" id="algorithmAblationStatus">Ready. Completed matching runs will be reused.</div>
+  </details>
+
+  <details class="panel" open>
     <summary>Parameter Sweep</summary>
     <div class="section-kicker">Run DynFedPrivacy under multiple strategy update periods using the current main experiment settings.</div>
     <div class="experiment-form">
@@ -2502,6 +3065,29 @@ th { color: var(--muted); font-weight: 500; }
       <button type="button" id="runPeriodSweepBtn">Run Period Sweep</button>
     </div>
     <div class="sub" id="periodSweepStatus">Ready. Results can be combined in Merge Runs after each period finishes.</div>
+  </details>
+
+  <details class="panel" open>
+    <summary>Privacy Budget Sweep</summary>
+    <div class="section-kicker">Vary the feature and update total epsilon targets together while keeping the current main experiment settings.</div>
+    <div class="experiment-form">
+      <div class="field">
+        <label for="privacyBudgetsInput">Total epsilon targets</label>
+        <input class="round-input" id="privacyBudgetsInput" type="text" value="1,2,4,8">
+      </div>
+      <div class="field">
+        <label for="privacySweepMethodSelect">Method</label>
+        <select id="privacySweepMethodSelect">
+          <option value="ours" selected>DynFedPrivacy</option>
+          <option value="individual_optimal">Individual Optimal</option>
+          <option value="random">Random</option>
+        </select>
+      </div>
+    </div>
+    <div class="control-panel">
+      <button type="button" id="runPrivacySweepBtn">Run Privacy Budget Sweep</button>
+    </div>
+    <div class="sub" id="privacySweepStatus">Ready. Each value is applied to both privacy channels.</div>
   </details>
 
   <details class="panel" open>
@@ -2565,7 +3151,7 @@ th { color: var(--muted); font-weight: 500; }
     <div class="experiment-form">
       <div class="field">
         <label for="robustRoundsInput">Rounds</label>
-        <input class="round-input" id="robustRoundsInput" type="number" min="1" max="500" step="1" value="50">
+        <input class="round-input" id="robustRoundsInput" type="number" min="1" max="500" step="1" value="100">
       </div>
       <div class="field">
         <label for="robustSeedInput">Seed</label>
@@ -2641,7 +3227,9 @@ th { color: var(--muted); font-weight: 500; }
     <div class="card"><div class="label">Test Accuracy</div><div class="value" id="acc">-</div></div>
     <div class="card"><div class="label">Best Accuracy</div><div class="value" id="best">-</div></div>
     <div class="card"><div class="label">Logical Time</div><div class="value" id="logical">-</div></div>
-    <div class="card"><div class="label">Epsilon Used</div><div class="value" id="eps">-</div></div>
+    <div class="card"><div class="label">Larger Channel Epsilon</div><div class="value" id="eps">-</div></div>
+    <div class="card"><div class="label">Feature Epsilon</div><div class="value" id="featureEps">-</div></div>
+    <div class="card"><div class="label">Update Epsilon</div><div class="value" id="updateEps">-</div></div>
     <div class="card"><div class="label">Effective Clients</div><div class="value" id="clients">-</div></div>
     <div class="card"><div class="label">Communication</div><div class="value" id="comm">-</div></div>
     <div class="card"><div class="label">Per‑Client Test Acc</div><div class="value" id="perClientAcc" style="font-size:18px">-</div></div>
@@ -2666,7 +3254,7 @@ th { color: var(--muted); font-weight: 500; }
       </div>
       <div class="field">
         <label for="smoothCurvesToggle">Curve smoothing</label>
-        <label class="pill"><input id="smoothCurvesToggle" type="checkbox" checked> Smooth curves</label>
+        <label class="pill"><input id="smoothCurvesToggle" type="checkbox"> Smooth curves</label>
       </div>
     </div>
     <div class="merge-list" id="mergeSourceList"></div>
@@ -2705,7 +3293,7 @@ th { color: var(--muted); font-weight: 500; }
     <h2>Live Accuracy Curves</h2>
     <div class="live-chart-controls">
       <div class="sub">Round-accuracy and time-accuracy are drawn together. The time axis is clipped to the shortest valid max time among visible curves.</div>
-      <label class="pill"><input id="liveSmoothCurvesToggle" type="checkbox" checked> Smooth live curves</label>
+      <label class="pill"><input id="liveSmoothCurvesToggle" type="checkbox"> Smooth live curves</label>
     </div>
     <div class="live-svg-grid">
       <svg class="live-svg" id="liveRoundSvg" viewBox="0 0 760 340" role="img" aria-label="Live round accuracy chart"></svg>
@@ -2750,6 +3338,7 @@ th { color: var(--muted); font-weight: 500; }
 const $ = id => document.getElementById(id);
 const fmt = (v, n=3) => Number.isFinite(Number(v)) ? Number(v).toFixed(n) : "-";
 let latestStatus = {};
+let refreshInFlight = null;
 let autoBuiltRunFiguresFor = "";
 let runFigureSignature = "";
 
@@ -2776,8 +3365,8 @@ let latestMergeFigures = [];
 const clientX = {0: 8, 2: 18, 4: 28, 6: 38, 8: 48, 1: 52, 3: 62, 5: 72, 7: 82, 9: 92};
 const paperFigures = [
   ["fmnist_lenet5_100r_ep3_accuracy.png", "100r / 3 local epochs accuracy"],
-  ["fmnist_lenet5_accuracy_convergence_with_random.png", "50r accuracy convergence"],
-  ["fmnist_lenet5_time_accuracy_with_random.png", "50r logical time vs accuracy"],
+  ["fmnist_lenet5_accuracy_convergence_with_random.png", "100r main accuracy convergence"],
+  ["fmnist_lenet5_time_accuracy_with_random.png", "100r main logical time vs accuracy"],
   ["fmnist_lenet5_privacy_timeline_with_random.png", "Privacy budget timeline"],
   ["fmnist_lenet5_mode_distribution_with_random.png", "DynFedPrivacy mode distribution"]
 ];
@@ -2903,11 +3492,17 @@ function renderPackets(selected) {
 function policyLabel(policy) {
   return {
     ours: "DynFedPrivacy",
+    ours_no_omega: "No Error Cost Estimate",
+    ours_fixed_liieiiic: "Fixed Mode LIIEIIIC",
     individual_optimal: "Individual-Optimal",
     fixed_dp: "Fixed-DP",
     privacy_only: "Privacy-Only",
     no_protection: "No-Protection",
     random: "Random",
+    fixed_fedavg: "Fixed FedAvg",
+    fixed_splitfed: "Fixed SplitFed",
+    fixed_hfl: "Fixed HFL",
+    nsga2: "NSGA II",
     fixed_liieiiic: "Fixed-HFL (LIIEIIIC)",
     performance_only: "Global-Balance Upper",
     best_accuracy: "Global-Utility Upper",
@@ -2936,14 +3531,14 @@ function renderPolicyRuns(items) {
       <td>${fmt(item.best_test_accuracy, 4)}</td>
       <td>${fmt(item.logical_time, 1)}</td>
       <td>${fmt(item.cumulative_communication_volume, 1)}</td>
-      <td>${fmt(item.epsilon_used, 3)}</td>
+      <td>${fmt(item.larger_channel_epsilon, 3)}</td>
       <td>${fmt(item.mean_global_update_clients, 2)}</td>
       <td>${perC}</td>
     </tr>`;
   }).join("");
   target.innerHTML = `<div class="policy-table-wrap">
     <table class="policy-table">
-      <thead><tr><th>Method</th><th>Status</th><th>Round</th><th>Progress</th><th>Acc</th><th>Best</th><th>Time</th><th>Comm</th><th>Eps</th><th>Global Clients</th><th>PerC Acc</th></tr></thead>
+      <thead><tr><th>Method</th><th>Status</th><th>Round</th><th>Progress</th><th>Acc</th><th>Best</th><th>Time</th><th>Comm</th><th>Larger channel eps</th><th>Global Clients</th><th>PerC Acc</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </div>`;
@@ -3252,7 +3847,7 @@ async function deleteDirs() {
     $("deleteStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    btn.disabled = latestStatus.status === "running";
+    btn.disabled = latestStatus.status === "running" || Boolean(latestStatus.training_process_running);
   }
 }
 
@@ -3287,7 +3882,7 @@ async function mergeRuns() {
     $("mergeStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    btn.disabled = latestStatus.status === "running";
+    btn.disabled = latestStatus.status === "running" || Boolean(latestStatus.training_process_running);
   }
 }
 
@@ -3312,16 +3907,16 @@ async function buildRunFigures() {
     $("controlStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    btn.disabled = latestStatus.status === "running";
+    btn.disabled = latestStatus.status === "running" || Boolean(latestStatus.training_process_running);
   }
 }
 
 function setControlsDisabled(disabled) {
-  document.querySelectorAll("[data-start-preset], #startBtn, #runConfiguredBtn, #runPeriodSweepBtn, #runHetPeriodSweepBtn, .ablation-run, .robust-seed-run, #runRobustLatencyBtn, #runRobustStrongHetBtn, #mergeRunsBtn, #deleteDirsBtn, #savePaperRunBtn, #buildRunFiguresBtn, #rebuildBtn").forEach(btn => {
+  document.querySelectorAll("[data-start-preset], #startBtn, #runConfiguredBtn, #runAlgorithmAblationBtn, #runPeriodSweepBtn, #runPrivacySweepBtn, #runHetPeriodSweepBtn, .ablation-run, .robust-seed-run, #runRobustLatencyBtn, #runRobustStrongHetBtn, #mergeRunsBtn, #deleteDirsBtn, #savePaperRunBtn, #buildRunFiguresBtn, #rebuildBtn").forEach(btn => {
     btn.disabled = disabled;
   });
   document.querySelectorAll("#stopRunStatusBtn").forEach(btn => {
-    btn.disabled = !disabled;
+    btn.disabled = false;
   });
 }
 
@@ -3347,13 +3942,24 @@ async function savePaperRun() {
     $("paperArchiveStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    btn.disabled = latestStatus.status === "running";
+    btn.disabled = latestStatus.status === "running" || Boolean(latestStatus.training_process_running);
   }
 }
 
 
 async function refresh() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = refreshOnce();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
+}
+
+async function refreshOnce() {
   const res = await fetch("/status", {cache: "no-store"});
+  if (!res.ok) throw new Error(`Status request failed: HTTP ${res.status}`);
   const s = await res.json();
   latestStatus = s;
   const progress = Math.max(0, Math.min(100, Number(s.progress || 0) * 100));
@@ -3367,7 +3973,9 @@ async function refresh() {
   $("acc").textContent = fmt(s.test_accuracy, 4);
   $("best").textContent = fmt(s.best_test_accuracy, 4);
   $("logical").textContent = `${fmt(s.logical_time, 1)}s`;
-  $("eps").textContent = fmt(s.epsilon_used, 3);
+  $("eps").textContent = fmt(s.larger_channel_epsilon ?? s.epsilon_used, 3);
+  $("featureEps").textContent = fmt(s.feature_epsilon, 3);
+  $("updateEps").textContent = fmt(s.update_epsilon, 3);
   $("clients").textContent = s.effective_clients ?? "-";
   $("comm").textContent = fmt(s.cumulative_communication_volume, 1);
   const activePol = s.active_policy || s.policy;
@@ -3375,7 +3983,7 @@ async function refresh() {
   const pcMean = pcStatus?.per_client_test_mean;
   const pcStd = pcStatus?.per_client_test_std;
   $("perClientAcc").textContent = pcMean != null ? `${fmt(pcMean, 4)} ±${fmt(pcStd, 4)}` : "-";
-  setControlsDisabled(s.status === "running");
+  setControlsDisabled(s.status === "running" || Boolean(s.training_process_running));
   const rows = s.recent_rounds || [];
   renderActiveClients(s.selected_client_ids, s.selected_clients);
   renderPolicyRuns(s.policy_statuses);
@@ -3391,6 +3999,15 @@ async function refresh() {
   ).join("");
 }
 
+async function pollStatus() {
+  try {
+    await refresh();
+  } catch (err) {
+    $("message").textContent = `Monitor connection error: ${String(err)}`;
+  }
+  window.setTimeout(pollStatus, document.hidden ? 10000 : 2500);
+}
+
 function selectedMethods() {
   return Array.from(document.querySelectorAll("#methodList input:checked")).map(input => input.value);
 }
@@ -3403,15 +4020,57 @@ function selectedRobustMethods() {
   return Array.from(document.querySelectorAll("#robustMethodList input:checked")).map(input => input.value);
 }
 
+function currentPrivacyParams() {
+  return {
+    privacy_schema: "rdp_total_v1",
+    initial_epsilon: $("initialEpsilonInput")?.value || "8.0",
+    dp_emb_epsilon: $("dpEmbEpsilonInput")?.value || "8.0",
+    dp_upd_epsilon: $("dpUpdEpsilonInput")?.value || "8.0",
+    dp_profile: $("dpProfileSelect")?.value || "cifar_resnet"
+  };
+}
+
+function currentExecutorParams() {
+  return {
+    executor: $("executorSelect")?.value || "serial",
+    executor_workers: $("executorWorkersInput")?.value.trim() || ""
+  };
+}
+
+function currentConstraintParams() {
+  return {
+    train_limit: $("trainLimitInput")?.value || "12000",
+    test_limit: $("testLimitInput")?.value || "2000",
+    resource_limit: $("resourceLimitInput")?.value || "1.35",
+    risk_limit: $("riskLimitInput")?.value || "0.5",
+    min_edge_cloud_fusion_ratio: $("minEdgeCloudFusionInput")?.value || "0.5",
+    he_backend: $("heBackendSelect")?.value || "seal",
+    require_real_he: $("requireRealHeInput")?.value || "true"
+  };
+}
+
 function mainExperimentParams(overrides={}) {
-  const rounds = Math.max(1, Math.min(500, Number($("roundsInput").value || 50)));
-  const edges = Math.max(1, Math.min(5, Number($("edgesInput").value || 3)));
+  const rounds = Math.max(1, Math.min(500, Number($("roundsInput").value || 200)));
+  const clients = Math.max(1, Math.min(200, Number($("clientsInput").value || 100)));
+  const edges = Math.max(1, Math.min(20, Number($("edgesInput").value || 10)));
   const seed = Math.max(0, Math.min(999999, Number($("seedInput").value || 42)));
   const timeLimit = Math.max(0.1, Math.min(300, Number($("timeLimitInput").value || 300)));
+  const trainLimit = Math.max(1, Math.min(60000, Number($("trainLimitInput").value || 12000)));
+  const testLimit = Math.max(1, Math.min(10000, Number($("testLimitInput").value || 2000)));
   const clientHet = Math.max(1.0, Math.min(10.0, Number($("clientHetInput").value || 2.0)));
   const edgeHet = Math.max(1.0, Math.min(10.0, Number($("edgeHetInput").value || 1.5)));
   const selectionPeriod = Math.max(1, Math.min(100, Number($("selectionPeriodInput").value || 1)));
   const aggregationFraction = Math.max(0.1, Math.min(1.0, Number($("aggregationFractionInput").value || 1.0)));
+  const paretoArchiveSize = Math.max(2, Math.min(128, Number($("paretoArchiveSizeInput").value || 16)));
+  const paretoMaxIters = Math.max(0, Math.min(200, Number($("paretoMaxItersInput").value || 50)));
+  const cloudFusionXi = Math.max(0.0, Math.min(100.0, Number($("cloudFusionXiInput").value || 0.2)));
+  const cloudFusionEps = Math.max(0.000001, Math.min(10.0, Number($("cloudFusionEpsInput").value || 0.05)));
+  const minEdgeCloudFusion = Math.max(0.0, Math.min(1.0, Number($("minEdgeCloudFusionInput").value || 0.5)));
+  const resourceLimit = Math.max(0.0, Math.min(100.0, Number($("resourceLimitInput").value || 1.35)));
+  const riskLimit = Math.max(0.0, Math.min(1.0, Number($("riskLimitInput").value || 0.5)));
+  const initialEpsilon = Math.max(0.0, Math.min(100.0, Number($("initialEpsilonInput").value || 8.0)));
+  const dpEmbEpsilon = Math.max(0.001, Math.min(100.0, Number($("dpEmbEpsilonInput").value || 8.0)));
+  const dpUpdEpsilon = Math.max(0.001, Math.min(100.0, Number($("dpUpdEpsilonInput").value || 8.0)));
   let localEpochs = "";
   const localEpochsRaw = $("localEpochsInput")?.value.trim() || "";
   if (localEpochsRaw) {
@@ -3422,34 +4081,72 @@ function mainExperimentParams(overrides={}) {
   if (learningRateRaw) {
     learningRate = String(Math.max(0.000001, Math.min(1.0, Number(learningRateRaw) || 0.000001)));
   }
+  let executorWorkers = "";
+  const executorWorkersRaw = $("executorWorkersInput")?.value.trim() || "";
+  if (executorWorkersRaw) {
+    executorWorkers = String(Math.max(1, Math.min(64, Number(executorWorkersRaw) || 1)));
+  }
   $("roundsInput").value = String(rounds);
+  $("clientsInput").value = String(clients);
   $("edgesInput").value = String(edges);
   $("seedInput").value = String(seed);
   $("timeLimitInput").value = String(timeLimit);
+  $("trainLimitInput").value = String(trainLimit);
+  $("testLimitInput").value = String(testLimit);
   $("clientHetInput").value = String(clientHet);
   $("edgeHetInput").value = String(edgeHet);
   $("selectionPeriodInput").value = String(selectionPeriod);
   $("aggregationFractionInput").value = String(aggregationFraction);
+  $("paretoArchiveSizeInput").value = String(paretoArchiveSize);
+  $("paretoMaxItersInput").value = String(paretoMaxIters);
+  $("cloudFusionXiInput").value = String(cloudFusionXi);
+  $("cloudFusionEpsInput").value = String(cloudFusionEps);
+  $("minEdgeCloudFusionInput").value = String(minEdgeCloudFusion);
+  $("resourceLimitInput").value = String(resourceLimit);
+  $("riskLimitInput").value = String(riskLimit);
+  $("initialEpsilonInput").value = String(initialEpsilon);
+  $("dpEmbEpsilonInput").value = String(dpEmbEpsilon);
+  $("dpUpdEpsilonInput").value = String(dpUpdEpsilon);
   if ($("localEpochsInput") && localEpochs) $("localEpochsInput").value = localEpochs;
   if ($("learningRateInput") && learningRate) $("learningRateInput").value = learningRate;
+  if ($("executorWorkersInput") && executorWorkers) $("executorWorkersInput").value = executorWorkers;
   return {
     mode: $("runMode").value,
     rounds: String(rounds),
     time_limit: String(timeLimit),
+    train_limit: String(trainLimit),
+    test_limit: String(testLimit),
     dataset: $("datasetSelect").value,
     model: $("modelSelect").value,
     device: $("deviceSelect").value,
+    executor: $("executorSelect")?.value || "serial",
+    executor_workers: executorWorkers,
     figure_axis: $("figureAxis").value,
     partition_mode: $("partitionMode").value,
+    clients: String(clients),
     edges: String(edges),
     seed: String(seed),
     client_heterogeneity: String(clientHet),
     edge_heterogeneity: String(edgeHet),
     selection_period: String(selectionPeriod),
     aggregation_fraction: String(aggregationFraction),
+    pareto_archive_size: String(paretoArchiveSize),
+    pareto_max_iters: String(paretoMaxIters),
+    pareto_neighbor_top_k: "0",
+    pareto_conflict_only: "0",
+    cloud_fusion_xi: String(cloudFusionXi),
+    cloud_fusion_eps: String(cloudFusionEps),
+    min_edge_cloud_fusion_ratio: String(minEdgeCloudFusion),
+    resource_limit: String(resourceLimit),
+    risk_limit: String(riskLimit),
     local_epochs: localEpochs,
     learning_rate: learningRate,
-    dp_profile: $("dpProfileSelect")?.value || "balanced",
+    initial_epsilon: String(initialEpsilon),
+    dp_emb_epsilon: String(dpEmbEpsilon),
+    dp_upd_epsilon: String(dpUpdEpsilon),
+    he_backend: $("heBackendSelect")?.value || "seal",
+    require_real_he: $("requireRealHeInput")?.value || "true",
+    ...currentPrivacyParams(),
     resume_from_run: $("resumeFromRunInput")?.value.trim() || "",
     ...overrides
   };
@@ -3476,7 +4173,7 @@ async function startTraining(preset, btn, params={}) {
     $("controlStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    setControlsDisabled(latestStatus.status === "running");
+    setControlsDisabled(latestStatus.status === "running" || Boolean(latestStatus.training_process_running));
   }
 }
 
@@ -3515,7 +4212,8 @@ async function runPeriodSweep() {
       $("periodSweepStatus").textContent = `Starting period ${period} (${index + 1}/${uniquePeriods.length})`;
       const result = await startTrainingRequest("configured", mainExperimentParams({
         policies: $("sweepMethodSelect").value,
-        selection_period: String(period)
+        selection_period: String(period),
+        reuse_completed: "true"
       }));
       $("controlStatus").textContent = result.message || `Period ${period} start request finished`;
       $("message").textContent = result.message || `Period ${period} start request finished`;
@@ -3539,7 +4237,107 @@ async function runPeriodSweep() {
     $("periodSweepStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    setControlsDisabled(latestStatus.status === "running");
+    setControlsDisabled(latestStatus.status === "running" || Boolean(latestStatus.training_process_running));
+  }
+}
+
+function parsePrivacyBudgetList() {
+  return Array.from(new Set($("privacyBudgetsInput").value
+    .split(",")
+    .map(value => Number(value.trim()))
+    .filter(value => Number.isFinite(value) && value >= 0.001 && value <= 100)))
+    .sort((left, right) => left - right);
+}
+
+async function runPrivacyBudgetSweep() {
+  const btn = $("runPrivacySweepBtn");
+  const oldText = btn.textContent;
+  const budgets = parsePrivacyBudgetList();
+  if (!budgets.length) {
+    $("privacySweepStatus").textContent = "Enter at least one valid epsilon target, for example 1,2,4,8.";
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "Running Sweep...";
+  try {
+    for (let index = 0; index < budgets.length; index += 1) {
+      const budget = budgets[index];
+      $("privacySweepStatus").textContent = `Starting epsilon ${budget} (${index + 1}/${budgets.length})`;
+      const result = await startTrainingRequest("configured", mainExperimentParams({
+        policies: $("privacySweepMethodSelect").value,
+        initial_epsilon: String(budget),
+        dp_emb_epsilon: String(budget),
+        dp_upd_epsilon: String(budget),
+        reuse_completed: "true"
+      }));
+      $("controlStatus").textContent = result.message || `Epsilon ${budget} start request finished`;
+      $("message").textContent = result.message || `Epsilon ${budget} start request finished`;
+      await refresh();
+      if (!result.ok) {
+        $("privacySweepStatus").textContent = `Stopped sweep at epsilon ${budget}: ${result.message || "start failed"}`;
+        break;
+      }
+      if (!result.reused) {
+        $("privacySweepStatus").textContent = `Running epsilon ${budget} (${index + 1}/${budgets.length})`;
+        const finalStatus = await waitForTrainingToFinish(result);
+        if (finalStatus.status === "failed") {
+          $("privacySweepStatus").textContent = `Stopped sweep at epsilon ${budget}: ${finalStatus.message || "training failed"}`;
+          break;
+        }
+      }
+      $("privacySweepStatus").textContent = `Finished epsilon ${budget} (${index + 1}/${budgets.length})`;
+    }
+    $("privacySweepStatus").textContent += ". Completed runs are ready for privacy sensitivity aggregation.";
+  } catch (err) {
+    $("privacySweepStatus").textContent = String(err);
+  } finally {
+    btn.textContent = oldText;
+    setControlsDisabled(latestStatus.status === "running" || Boolean(latestStatus.training_process_running));
+  }
+}
+
+async function runAlgorithmAblation() {
+  const btn = $("runAlgorithmAblationBtn");
+  const oldText = btn.textContent;
+  const variants = [
+    {policy: "ours", label: "Full Method"},
+    {policy: "individual_optimal", label: "Without Global Coordination"},
+    {policy: "ours_no_omega", label: "No Error Cost Estimate"},
+    {policy: "ours_fixed_liieiiic", label: "Fixed Mode LIIEIIIC"}
+  ];
+  btn.disabled = true;
+  btn.textContent = "Running Ablation...";
+  try {
+    for (let index = 0; index < variants.length; index += 1) {
+      const variant = variants[index];
+      $("algorithmAblationStatus").textContent = `Starting ${variant.label} (${index + 1}/${variants.length})`;
+      const result = await startTrainingRequest("configured", mainExperimentParams({
+        policies: variant.policy,
+        reuse_completed: "true"
+      }));
+      $("controlStatus").textContent = result.message || `${variant.label} start request finished`;
+      $("message").textContent = result.message || `${variant.label} start request finished`;
+      await refresh();
+      if (!result.ok) {
+        $("algorithmAblationStatus").textContent = `Stopped at ${variant.label}. ${result.message || "Start failed"}`;
+        return;
+      }
+      if (!result.reused) {
+        $("algorithmAblationStatus").textContent = `Running ${variant.label} (${index + 1}/${variants.length})`;
+        const finalStatus = await waitForTrainingToFinish(result);
+        if (finalStatus.status === "failed") {
+          $("algorithmAblationStatus").textContent = `Stopped at ${variant.label}. ${finalStatus.message || "Training failed"}`;
+          return;
+        }
+      }
+      $("algorithmAblationStatus").textContent = `Finished ${variant.label} (${index + 1}/${variants.length})`;
+    }
+    $("algorithmAblationStatus").textContent = "Finished 4/4. Select the four completed runs in Merge Runs.";
+  } catch (err) {
+    $("algorithmAblationStatus").textContent = String(err);
+  } finally {
+    btn.textContent = oldText;
+    setControlsDisabled(latestStatus.status === "running" || Boolean(latestStatus.training_process_running));
   }
 }
 
@@ -3609,8 +4407,11 @@ async function runHeterogeneityPeriodSweep() {
           edges: String(edges),
           client_heterogeneity: String(scenario.client),
           edge_heterogeneity: String(scenario.edge),
-          dp_profile: $("dpProfileSelect")?.value || "balanced",
-          selection_period: String(period)
+          ...currentConstraintParams(),
+          ...currentExecutorParams(),
+          ...currentPrivacyParams(),
+          selection_period: String(period),
+          reuse_completed: "true"
         });
         $("controlStatus").textContent = result.message || `${label} start request finished`;
         $("message").textContent = result.message || `${label} start request finished`;
@@ -3632,7 +4433,7 @@ async function runHeterogeneityPeriodSweep() {
     $("hetPeriodSweepStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    setControlsDisabled(latestStatus.status === "running");
+    setControlsDisabled(latestStatus.status === "running" || Boolean(latestStatus.training_process_running));
   }
 }
 
@@ -3651,7 +4452,7 @@ async function stopRun(btn) {
     $("controlStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    setControlsDisabled(latestStatus.status === "running");
+    setControlsDisabled(latestStatus.status === "running" || Boolean(latestStatus.training_process_running));
   }
 }
 
@@ -3670,7 +4471,7 @@ async function rebuildFigures() {
     $("controlStatus").textContent = String(err);
   } finally {
     btn.textContent = oldText;
-    setControlsDisabled(latestStatus.status === "running");
+    setControlsDisabled(latestStatus.status === "running" || Boolean(latestStatus.training_process_running));
   }
 }
 
@@ -3683,10 +4484,12 @@ $("runConfiguredBtn").addEventListener("click", () => {
   }));
 });
 $("runPeriodSweepBtn")?.addEventListener("click", runPeriodSweep);
+$("runPrivacySweepBtn")?.addEventListener("click", runPrivacyBudgetSweep);
+$("runAlgorithmAblationBtn")?.addEventListener("click", runAlgorithmAblation);
 $("runHetPeriodSweepBtn")?.addEventListener("click", runHeterogeneityPeriodSweep);
 document.querySelectorAll(".ablation-run").forEach(btn => {
   btn.addEventListener("click", () => {
-    const rounds = Math.max(1, Math.min(500, Number($("ablRoundsInput").value || 50)));
+    const rounds = Math.max(1, Math.min(500, Number($("ablRoundsInput").value || 100)));
     const edges = Math.max(1, Math.min(5, Number($("ablEdgesInput").value || 3)));
     const timeLimit = Math.max(0.1, Math.min(300, Number($("ablTimeLimitInput").value || 8)));
     const clientHet = Math.max(1.0, Math.min(10.0, Number($("ablClientHetInput").value || 2.0)));
@@ -3710,7 +4513,9 @@ document.querySelectorAll(".ablation-run").forEach(btn => {
       edges: String(edges),
       client_heterogeneity: String(clientHet),
       edge_heterogeneity: String(edgeHet),
-      dp_profile: $("dpProfileSelect")?.value || "balanced",
+      ...currentConstraintParams(),
+      ...currentExecutorParams(),
+      ...currentPrivacyParams(),
       selection_period: String(selectionPeriod)
     }).then(() => {
       $("ablationStatus").textContent = $("controlStatus").textContent;
@@ -3719,7 +4524,7 @@ document.querySelectorAll(".ablation-run").forEach(btn => {
 });
 
 function robustParams(overrides={}) {
-  const rounds = Math.max(1, Math.min(500, Number($("robustRoundsInput").value || 50)));
+  const rounds = Math.max(1, Math.min(500, Number($("robustRoundsInput").value || 100)));
   const seed = Math.max(0, Math.min(999999, Number($("robustSeedInput").value || 43)));
   const edges = Math.max(1, Math.min(5, Number($("robustEdgesInput").value || 3)));
   const timeLimit = Math.max(0.1, Math.min(300, Number($("robustTimeLimitInput").value || 8)));
@@ -3744,7 +4549,9 @@ function robustParams(overrides={}) {
     edges: String(edges),
     client_heterogeneity: String(clientHet),
     edge_heterogeneity: String(edgeHet),
-    dp_profile: $("dpProfileSelect")?.value || "balanced",
+    ...currentConstraintParams(),
+    ...currentExecutorParams(),
+    ...currentPrivacyParams(),
     selection_period: String(selectionPeriod),
     ...overrides
   };
@@ -3783,14 +4590,21 @@ $("deleteDirsBtn")?.addEventListener("click", deleteDirs);
 $("figureAxis").addEventListener("change", () => {
   renderLiveSvg(latestStatus.policy_statuses);
 });
+$("datasetSelect").addEventListener("change", () => {
+  $("dpProfileSelect").value = $("datasetSelect").value === "fmnist"
+    ? "balanced"
+    : "cifar_resnet";
+});
 $("liveSmoothCurvesToggle")?.addEventListener("change", () => {
   renderLiveSvg(latestStatus.policy_statuses);
 });
 $("view100Btn")?.addEventListener("click", () => {
   window.location.href = "/figures/fmnist_lenet5_100r_ep3_accuracy.png";
 });
-refresh();
-setInterval(refresh, 1500);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh().catch(() => {});
+});
+pollStatus();
 </script>
 </body>
 </html>
