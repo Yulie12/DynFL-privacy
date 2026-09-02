@@ -98,6 +98,7 @@ def build_command(
         "cloud_dp_stability_threshold": privacy["cloud_dp_stability_threshold"],
         "he_backend": he["backend"],
         "he_aggregation_size": he["aggregation_size"],
+        "he_workers": he.get("workers", 1),
         "pareto_archive_size": optimization["pareto_archive_size"],
         "pareto_beam_size": optimization["pareto_beam_size"],
         "pareto_max_iters": optimization["pareto_max_iters"],
@@ -162,6 +163,8 @@ def validate_config(config: dict) -> None:
         )
     if int(config["system"]["clients"]) < int(config["system"]["edges"]):
         raise ValueError("The number of clients must be at least the number of edges")
+    if int(he.get("workers", 1)) < 1:
+        raise ValueError("The number of HE workers must be positive")
     privacy = config["privacy"]
     if not bool(privacy.get("enforce_cloud_dp_stability")):
         raise ValueError(

@@ -129,6 +129,49 @@ class SealFedAvgTests(unittest.TestCase):
                 he_aggregation_size=1,
             )
 
+    def test_process_parallel_encrypted_fedavg_matches_plaintext(self) -> None:
+        torch.manual_seed(31)
+        device = torch.device("cpu")
+        base_end = torch.nn.Linear(9, 4, bias=True)
+        base_edge = torch.nn.Linear(4, 3, bias=True)
+        plain_end, plain_edge = copy.deepcopy(base_end), copy.deepcopy(base_edge)
+        seal_end, seal_edge = copy.deepcopy(base_end), copy.deepcopy(base_edge)
+        state_diffs = [
+            {
+                "end": {
+                    name: torch.randn_like(param) * scale
+                    for name, param in base_end.named_parameters()
+                },
+                "edge": {
+                    name: torch.randn_like(param) * scale
+                    for name, param in base_edge.named_parameters()
+                },
+            }
+            for scale in (0.01, -0.03, 0.025)
+        ]
+        sample_counts = [3, 7, 12]
+        metrics = HEOperationMetrics(backend="seal")
+
+        fedavg_split(state_diffs, sample_counts, plain_end, plain_edge, device)
+        fedavg_split_seal(
+            state_diffs,
+            sample_counts,
+            seal_end,
+            seal_edge,
+            device,
+            encrypted_mask=[True, False, True],
+            he_workers=2,
+            he_metrics=metrics,
+        )
+
+        for plain_param, seal_param in zip(plain_end.parameters(), seal_end.parameters()):
+            torch.testing.assert_close(seal_param, plain_param, rtol=0.0, atol=2e-6)
+        for plain_param, seal_param in zip(plain_edge.parameters(), seal_edge.parameters()):
+            torch.testing.assert_close(seal_param, plain_param, rtol=0.0, atol=2e-6)
+        self.assertEqual(metrics.encrypted_updates, 2)
+        self.assertGreater(metrics.ciphertext_bytes, 0)
+        self.assertLess(metrics.max_abs_error, 2e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

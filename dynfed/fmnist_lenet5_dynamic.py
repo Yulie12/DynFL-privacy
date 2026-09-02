@@ -11,9 +11,11 @@ import pickle
 import platform
 import random
 import sys
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any, Callable
 
@@ -101,6 +103,7 @@ class Lenet5Config:
     he_local_deps: str | None = ".he_deps"
     require_real_he: bool = False
     he_aggregation_size: int = 0
+    he_workers: int = 1
     executor: str = "serial"
     executor_workers: int | None = None
 
@@ -1571,6 +1574,7 @@ def _run_lenet5_policy(
                         device,
                         encrypted_mask=global_he_mask,
                         he_aggregation_size=train_config.he_aggregation_size,
+                        he_workers=train_config.he_workers,
                         he_metrics=round_he_metrics,
                     )
                 else:
@@ -3268,6 +3272,7 @@ def _split_evaluate_indexed(
 
 _SEAL_CKKS_RUNTIME: dict[str, Any] | None = None
 _TENSEAL_CKKS_RUNTIME: dict[str, Any] | None = None
+_SEAL_PROCESS_RUNTIME: dict[str, Any] | None = None
 
 
 def _reset_ckks_runtime() -> None:
@@ -3299,12 +3304,126 @@ def _seal_ckks_runtime() -> tuple[dict[str, Any], float]:
     _SEAL_CKKS_RUNTIME = {
         "context": context,
         "public_key": public_key,
+        "secret_key": secret_key,
         "encoder": seal.CKKSEncoder(context),
         "encryptor": seal.Encryptor(context, public_key),
         "decryptor": seal.Decryptor(context, secret_key),
         "evaluator": seal.Evaluator(context),
     }
     return _SEAL_CKKS_RUNTIME, time.perf_counter() - started_at
+
+
+def _init_seal_process_runtime(
+    public_key_path: str,
+    secret_key_path: str,
+    shared_memory_name: str,
+    update_count: int,
+    parameter_count: int,
+    factors: tuple[float, ...],
+    encrypted_mask: tuple[bool, ...],
+) -> None:
+    global _SEAL_PROCESS_RUNTIME
+
+    import seal
+
+    parms = seal.EncryptionParameters(seal.scheme_type.ckks)
+    parms.set_poly_modulus_degree(CKKS_POLY_MODULUS_DEGREE)
+    parms.set_coeff_modulus(
+        seal.CoeffModulus.Create(
+            CKKS_POLY_MODULUS_DEGREE,
+            list(CKKS_COEFF_MOD_BIT_SIZES),
+        )
+    )
+    context = seal.SEALContext(parms)
+    public_key = seal.PublicKey()
+    public_key.load(context, public_key_path)
+    secret_key = seal.SecretKey()
+    secret_key.load(context, secret_key_path)
+    shared_block = shared_memory.SharedMemory(name=shared_memory_name)
+    updates = np.ndarray(
+        (update_count, parameter_count),
+        dtype=np.float32,
+        buffer=shared_block.buf,
+    )
+    _SEAL_PROCESS_RUNTIME = {
+        "shared_block": shared_block,
+        "updates": updates,
+        "factors": factors,
+        "encrypted_mask": encrypted_mask,
+        "encoder": seal.CKKSEncoder(context),
+        "encryptor": seal.Encryptor(context, public_key),
+        "decryptor": seal.Decryptor(context, secret_key),
+        "evaluator": seal.Evaluator(context),
+    }
+
+
+def _seal_process_aggregate_chunk(
+    bounds: tuple[int, int],
+) -> tuple[int, np.ndarray, int, int, float, float, float, float]:
+    if _SEAL_PROCESS_RUNTIME is None:
+        raise RuntimeError("SEAL process runtime was not initialized")
+
+    start, stop = bounds
+    runtime = _SEAL_PROCESS_RUNTIME
+    encoder = runtime["encoder"]
+    encryptor = runtime["encryptor"]
+    decryptor = runtime["decryptor"]
+    evaluator = runtime["evaluator"]
+    encrypted_sum = None
+    plaintext_sum = np.zeros(stop - start, dtype=np.float64)
+    expected_chunk = np.zeros(stop - start, dtype=np.float64)
+    ciphertext_count = 0
+    ciphertext_bytes = 0
+    encryption_time = 0.0
+    addition_time = 0.0
+
+    for update, factor, encrypted in zip(
+        runtime["updates"],
+        runtime["factors"],
+        runtime["encrypted_mask"],
+    ):
+        values = np.ascontiguousarray(
+            update[start:stop].astype(np.float64) * factor,
+            dtype=np.float64,
+        )
+        expected_chunk += values
+        if not encrypted:
+            plaintext_sum += values
+            continue
+        encryption_started_at = time.perf_counter()
+        ciphertext = encryptor.encrypt(encoder.encode(values, CKKS_SCALE))
+        encryption_time += time.perf_counter() - encryption_started_at
+        ciphertext_count += 1
+        ciphertext_bytes += int(ciphertext.save_size())
+        if encrypted_sum is None:
+            encrypted_sum = ciphertext
+        else:
+            addition_started_at = time.perf_counter()
+            encrypted_sum = evaluator.add(encrypted_sum, ciphertext)
+            addition_time += time.perf_counter() - addition_started_at
+
+    if encrypted_sum is None:
+        raise ValueError("Encrypted aggregation requires at least one HE protected update")
+    addition_started_at = time.perf_counter()
+    encrypted_sum = evaluator.add_plain(
+        encrypted_sum,
+        encoder.encode(np.ascontiguousarray(plaintext_sum), CKKS_SCALE),
+    )
+    addition_time += time.perf_counter() - addition_started_at
+    decryption_started_at = time.perf_counter()
+    decoded = decode_seal_vector(encoder, decryptor.decrypt(encrypted_sum))[: stop - start]
+    decryption_time = time.perf_counter() - decryption_started_at
+    max_abs_error = float(np.max(np.abs(decoded - expected_chunk)))
+    return (
+        start,
+        np.ascontiguousarray(decoded, dtype=np.float32),
+        ciphertext_count,
+        ciphertext_bytes,
+        encryption_time,
+        addition_time,
+        decryption_time,
+        max_abs_error,
+    )
 
 
 def _tenseal_ckks_runtime() -> tuple[dict[str, Any], float]:
@@ -3450,6 +3569,7 @@ def fedavg_split_seal(
     chunk_size: int = 4096,
     encrypted_mask: list[bool] | None = None,
     he_aggregation_size: int | None = None,
+    he_workers: int = 1,
     he_metrics: HEOperationMetrics | None = None,
 ) -> tuple[torch.nn.Module, torch.nn.Module]:
     total = max(1, sum(sample_counts))
@@ -3472,6 +3592,19 @@ def fedavg_split_seal(
             he_aggregation_size=he_size,
             he_metrics=he_metrics,
         )
+    mask = _validated_encrypted_mask(encrypted_mask, len(state_diffs))
+    if int(he_workers) > 1 and any(mask):
+        return _fedavg_split_seal_processes(
+            state_diffs,
+            sample_counts,
+            global_end,
+            global_edge,
+            device,
+            chunk_size=chunk_size,
+            encrypted_mask=mask,
+            he_workers=he_workers,
+            he_metrics=he_metrics,
+        )
     work_device = torch.device("cpu")
     flat_updates = [
         _flatten_state_diff(diff, global_end, global_edge, work_device)
@@ -3479,7 +3612,7 @@ def fedavg_split_seal(
     ]
     if not flat_updates:
         return global_end, global_edge
-    mask = _validated_encrypted_mask(encrypted_mask, len(flat_updates))
+    mask = _validated_encrypted_mask(mask, len(flat_updates))
 
     runtime, key_setup_time_sec = _seal_ckks_runtime()
     encoder = runtime["encoder"]
@@ -3547,6 +3680,115 @@ def fedavg_split_seal(
                 float(np.max(np.abs(decoded - expected_chunk))),
             )
         aggregated_array[start:stop] = decoded
+    aggregated_tensor = torch.from_numpy(aggregated_array)
+    _apply_flat_update(aggregated_tensor, global_end, global_edge)
+    return global_end, global_edge
+
+
+def _fedavg_split_seal_processes(
+    state_diffs: list[dict[str, dict[str, torch.Tensor]]],
+    sample_counts: list[float],
+    global_end: torch.nn.Module,
+    global_edge: torch.nn.Module,
+    device: torch.device,
+    *,
+    chunk_size: int,
+    encrypted_mask: list[bool],
+    he_workers: int,
+    he_metrics: HEOperationMetrics | None,
+) -> tuple[torch.nn.Module, torch.nn.Module]:
+    update_count = len(state_diffs)
+    parameter_count = sum(
+        int(param.numel())
+        for model in (global_end, global_edge)
+        for param in model.parameters()
+    )
+    if update_count == 0:
+        return global_end, global_edge
+
+    runtime, key_setup_time_sec = _seal_ckks_runtime()
+    total = max(1.0, float(sum(sample_counts)))
+    factors = tuple(float(count) / total for count in sample_counts)
+    mask = tuple(_validated_encrypted_mask(encrypted_mask, update_count))
+    worker_count = max(1, min(int(he_workers), os.cpu_count() or 1))
+    shared_block = shared_memory.SharedMemory(
+        create=True,
+        size=update_count * parameter_count * np.dtype(np.float32).itemsize,
+    )
+    updates = np.ndarray(
+        (update_count, parameter_count),
+        dtype=np.float32,
+        buffer=shared_block.buf,
+    )
+    try:
+        for row_index, state_diff in enumerate(state_diffs):
+            flattened = _flatten_state_diff(
+                state_diff,
+                global_end,
+                global_edge,
+                torch.device("cpu"),
+            )
+            updates[row_index] = flattened.numpy()
+
+        aggregated_array = np.empty(parameter_count, dtype=np.float32)
+        chunk_bounds = [
+            (start, min(start + chunk_size, parameter_count))
+            for start in range(0, parameter_count, chunk_size)
+        ]
+        with tempfile.TemporaryDirectory(prefix="dynfl_seal_keys_") as temp_dir:
+            public_key_path = str(Path(temp_dir) / "public_key.bin")
+            secret_key_path = str(Path(temp_dir) / "secret_key.bin")
+            runtime["public_key"].save(public_key_path)
+            runtime["secret_key"].save(secret_key_path)
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                initializer=_init_seal_process_runtime,
+                initargs=(
+                    public_key_path,
+                    secret_key_path,
+                    shared_block.name,
+                    update_count,
+                    parameter_count,
+                    factors,
+                    mask,
+                ),
+            ) as executor:
+                results = executor.map(
+                    _seal_process_aggregate_chunk,
+                    chunk_bounds,
+                    chunksize=1,
+                )
+                for (
+                    start,
+                    decoded,
+                    ciphertext_count,
+                    ciphertext_bytes,
+                    encryption_time,
+                    addition_time,
+                    decryption_time,
+                    max_abs_error,
+                ) in results:
+                    stop = start + int(decoded.size)
+                    aggregated_array[start:stop] = decoded
+                    if he_metrics is not None:
+                        he_metrics.ciphertext_count += ciphertext_count
+                        he_metrics.ciphertext_bytes += ciphertext_bytes
+                        he_metrics.encryption_time_sec += encryption_time
+                        he_metrics.addition_time_sec += addition_time
+                        he_metrics.decryption_time_sec += decryption_time
+                        he_metrics.max_abs_error = max(
+                            he_metrics.max_abs_error,
+                            max_abs_error,
+                        )
+    finally:
+        shared_block.close()
+        shared_block.unlink()
+
+    if he_metrics is not None:
+        he_metrics.key_setup_time_sec += key_setup_time_sec
+        he_metrics.aggregation_calls += 1
+        he_metrics.encrypted_updates += sum(mask)
+        he_metrics.encrypted_parameter_values += parameter_count * sum(mask)
     aggregated_tensor = torch.from_numpy(aggregated_array)
     _apply_flat_update(aggregated_tensor, global_end, global_edge)
     return global_end, global_edge

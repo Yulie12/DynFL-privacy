@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Use 0 for complete update encryption. Partial CKKS aggregation is rejected.",
     )
+    parser.add_argument(
+        "--he-workers",
+        type=int,
+        default=1,
+        help="Number of CPU processes used for full SEAL CKKS parameter chunks.",
+    )
     parser.add_argument("--resource-limit", type=float, default=1.35)
     parser.add_argument("--memory-limit", type=float, default=1.35)
     parser.add_argument("--time-limit", type=float, default=8.0)
@@ -222,6 +228,7 @@ def main() -> None:
         he_local_deps=args.he_local_deps,
         require_real_he=args.require_real_he,
         he_aggregation_size=args.he_aggregation_size,
+        he_workers=max(1, args.he_workers),
         executor=args.executor,
         executor_workers=args.executor_workers,
     )

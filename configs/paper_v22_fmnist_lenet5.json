@@ -66,6 +66,7 @@
     "backend": "seal",
     "require_real_he": true,
     "aggregation_size": 0,
+    "workers": 4,
     "poly_modulus_degree": 8192,
     "coeff_modulus_bits": [40, 40, 40, 40],
     "scale_bits": 40
