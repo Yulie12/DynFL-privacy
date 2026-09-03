@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--policies", nargs="+")
     parser.add_argument("--rounds", type=int)
+    parser.add_argument(
+        "--resume-from-run",
+        type=Path,
+        help="Resume one seed from an existing run directory containing policy checkpoints.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -45,6 +50,7 @@ def build_command(
     seed: int,
     policies: list[str],
     rounds: int | None,
+    resume_from_run: Path | None = None,
 ) -> list[str]:
     training = config["training"]
     system = config["system"]
@@ -110,6 +116,8 @@ def build_command(
     }
     for name, value in values.items():
         _append_value(command, name, value)
+    if resume_from_run is not None:
+        _append_value(command, "resume_from_run", resume_from_run.resolve())
 
     for name in (
         "require_feasible",
@@ -132,6 +140,8 @@ def main() -> None:
     validate_config(config)
     seeds = args.seeds or [int(seed) for seed in config["seeds"]]
     policies = args.policies or list(config["policies"])
+    if args.resume_from_run is not None and len(seeds) != 1:
+        raise ValueError("--resume-from-run requires exactly one seed")
 
     for seed in seeds:
         command = build_command(
@@ -139,6 +149,7 @@ def main() -> None:
             seed=seed,
             policies=policies,
             rounds=args.rounds,
+            resume_from_run=args.resume_from_run,
         )
         print(subprocess.list2cmdline(command), flush=True)
         if not args.dry_run:

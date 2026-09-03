@@ -51,6 +51,15 @@ aggregation, and the eight compared policies. The configured seeds are 40, 41,
 `--policies`, and `--rounds` overrides so long experiments can be split into
 separate processes without changing the recorded base configuration.
 
+Resume one interrupted seed into a new output directory while retaining its
+model, privacy ledger, random state, and completed round history:
+
+```powershell
+python experiments\run_paper_config.py --seeds 42 --policies ours --resume-from-run out\paper_v22_cifar10_resnet18\EXISTING_RUN_DIRECTORY
+```
+
+`--resume-from-run` deliberately accepts exactly one seed at a time.
+
 The default executor is `serial`, which is the paper reproduction path. To
 approximate multiple CPU workers running client local training concurrently,
 use the optional CPU-only worker pool:
@@ -91,6 +100,29 @@ The `tenseal` backend uses the same CKKS encrypted
 aggregation semantics and is easier to install in the current Python
 environment. Without `--he-backend seal` or `--he-backend tenseal`, HE
 candidates are disabled in the real-training selector.
+
+Before a full ResNet 18 run, benchmark the complete encrypted aggregation path
+on the target machine. Start with a bounded validation case:
+
+```powershell
+python experiments\benchmark_seal_parallelism.py --workers 4 --aggregate-parameter-count 1000000 --aggregate-updates 4 --output out\seal_validation_benchmark.json
+```
+
+If it succeeds, test one actual ResNet 18 aggregation size before expanding the
+worker and participant sweep:
+
+```powershell
+python experiments\benchmark_seal_parallelism.py --workers 4 --aggregate-parameter-count 11181642 --aggregate-updates 10 --output out\seal_resnet18_benchmark.json
+```
+
+The full aggregation rows include process startup, shared-memory population,
+encryption, ciphertext addition, decryption, and result application. If
+`psutil` is installed, they also include peak RSS across the parent and worker
+processes. `he_wall_time_sec` is elapsed time observed by the caller, whereas
+`he_worker_cpu_time_sec` is the sum of encryption, addition, and decryption work
+reported by all workers. For SEAL, `he_ciphertext_bytes` retains the
+`save_size()` upper-bound semantics; the benchmark separately writes one
+representative ciphertext and reports its actual serialized file size.
 
 The main code path is:
 
