@@ -10,10 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dynfed.fmnist_lenet5_dynamic import Lenet5Config, run_fmnist_lenet5_training
-from dynfed.selection import SelectionConfig
-from dynfed.utils import timestamped_dir
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -139,6 +135,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    # Imported here (not at module top) so Windows spawn children -- which re-run
+    # this file as __mp_main__ -- never load torch: they only need the torch-free
+    # SEAL workers, and importing torch in each child exceeds the commit limit.
+    from dynfed.fmnist_lenet5_dynamic import Lenet5Config, run_fmnist_lenet5_training
+    from dynfed.selection import SelectionConfig
+    from dynfed.utils import timestamped_dir
+
     args = parse_args()
     output_root = timestamped_dir(args.output_root, "lenet5_dynamic_newtex202608")
     output_root.mkdir(parents=True, exist_ok=True)

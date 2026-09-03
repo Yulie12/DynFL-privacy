@@ -231,6 +231,29 @@ def candidate_has_he(candidate: Candidate) -> bool:
     return any(str(mechanism).startswith("he") for mechanism in mechanisms)
 
 
+# Cloud-reaching update links, keyed by the collaboration mode that transmits a
+# full-model update to the cloud. Only EDGE_CLOUD_MODES pre-aggregate per edge in
+# the runtime flow, so an HE-protected cloud update in any other mode would mean
+# encrypting every participating client's update individually at the cloud.
+_CLOUD_UPDATE_LINK_BY_MODE = {
+    "LIIC": "L_C_upd",
+    "LIEIIC": "E_C_upd",
+    "LIEIIIC": "E_C_upd",
+    "LIIEIIIC": "E_C_upd",
+}
+
+
+def _cloud_he_granularity_ok(candidate: Candidate) -> bool:
+    """HE-protected cloud updates are only admissible through edge-fused modes."""
+    link_id = _CLOUD_UPDATE_LINK_BY_MODE.get(candidate.mode)
+    if link_id is None:
+        return True
+    mechanism = candidate_link_mechanism(candidate, link_id)
+    if not str(mechanism).startswith("he"):
+        return True
+    return candidate.mode in EDGE_CLOUD_MODES
+
+
 def candidate_mechanism_label(candidate: Candidate) -> str:
     mechanisms = candidate.link_mechanisms or candidate.mechanisms
     return ";".join(f"{key}:{value}" for key, value in sorted(mechanisms.items()))
@@ -646,6 +669,7 @@ def enumerate_candidates(
                     privacy_ledger=privacy_ledger,
                 )
             )
+    candidates = [candidate for candidate in candidates if _cloud_he_granularity_ok(candidate)]
     return _apply_policy_candidate_filters(config, policy, candidates)
 
 

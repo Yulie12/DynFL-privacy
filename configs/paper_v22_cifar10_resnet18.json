@@ -31,7 +31,7 @@
     "edges": 10,
     "resource_limit": 1.35,
     "memory_limit": 1.35,
-    "time_limit": 8.0,
+    "time_limit": 300.0,
     "risk_limit": 0.5,
     "aggregation_fraction": 1.0,
     "client_heterogeneity": 2.0,

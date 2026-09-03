@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import csv
 import copy
 import gc
@@ -11,11 +10,11 @@ import pickle
 import platform
 import random
 import sys
+import multiprocessing
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +33,7 @@ from .he_backend import (
     check_he_backend,
     decode_seal_vector,
 )
+from .seal_workers import _init_seal_process_runtime, _seal_process_aggregate_chunk
 from .lenet5_training import (
     count_params,
 )
@@ -1342,11 +1342,13 @@ def _run_lenet5_policy(
                     input_shape=input_shape,
                     num_classes=num_classes,
                     he_aggregation_size=train_config.he_aggregation_size,
-                    he_backend=(
-                        he_status.backend
-                        if real_he_available and mode == "LIIEIIIC"
-                        else "none"
-                    ),
+                    # Edge-side cycles fuse this edge's clients in plaintext; real HE
+                    # is applied only to the <=num_edges fused aggregates on the cloud
+                    # leg (see the cloud aggregation below). Routing LIIEIIIC's
+                    # per-client edge cycles through real HE here multiplied encrypted
+                    # full-model objects by ~num_clients and made rounds impractically
+                    # slow, while the cost model only charges the cloud object count.
+                    he_backend="none",
                     he_metrics=round_he_metrics,
                 )
                 shared_returned_state = _state_dict_to_device_nested(
@@ -3272,7 +3274,6 @@ def _split_evaluate_indexed(
 
 _SEAL_CKKS_RUNTIME: dict[str, Any] | None = None
 _TENSEAL_CKKS_RUNTIME: dict[str, Any] | None = None
-_SEAL_PROCESS_RUNTIME: dict[str, Any] | None = None
 
 
 def _reset_ckks_runtime() -> None:
@@ -3313,117 +3314,33 @@ def _seal_ckks_runtime() -> tuple[dict[str, Any], float]:
     return _SEAL_CKKS_RUNTIME, time.perf_counter() - started_at
 
 
-def _init_seal_process_runtime(
-    public_key_path: str,
-    secret_key_path: str,
-    shared_memory_name: str,
-    update_count: int,
-    parameter_count: int,
-    factors: tuple[float, ...],
-    encrypted_mask: tuple[bool, ...],
+def _record_seal_chunk_result(
+    aggregated_array: np.ndarray,
+    he_metrics: HEOperationMetrics | None,
+    result: tuple[int, np.ndarray, int, int, float, float, float, float],
 ) -> None:
-    global _SEAL_PROCESS_RUNTIME
-
-    import seal
-
-    parms = seal.EncryptionParameters(seal.scheme_type.ckks)
-    parms.set_poly_modulus_degree(CKKS_POLY_MODULUS_DEGREE)
-    parms.set_coeff_modulus(
-        seal.CoeffModulus.Create(
-            CKKS_POLY_MODULUS_DEGREE,
-            list(CKKS_COEFF_MOD_BIT_SIZES),
-        )
-    )
-    context = seal.SEALContext(parms)
-    public_key = seal.PublicKey()
-    public_key.load(context, public_key_path)
-    secret_key = seal.SecretKey()
-    secret_key.load(context, secret_key_path)
-    shared_block = shared_memory.SharedMemory(name=shared_memory_name)
-    updates = np.ndarray(
-        (update_count, parameter_count),
-        dtype=np.float32,
-        buffer=shared_block.buf,
-    )
-    _SEAL_PROCESS_RUNTIME = {
-        "shared_block": shared_block,
-        "updates": updates,
-        "factors": factors,
-        "encrypted_mask": encrypted_mask,
-        "encoder": seal.CKKSEncoder(context),
-        "encryptor": seal.Encryptor(context, public_key),
-        "decryptor": seal.Decryptor(context, secret_key),
-        "evaluator": seal.Evaluator(context),
-    }
-
-
-def _seal_process_aggregate_chunk(
-    bounds: tuple[int, int],
-) -> tuple[int, np.ndarray, int, int, float, float, float, float]:
-    if _SEAL_PROCESS_RUNTIME is None:
-        raise RuntimeError("SEAL process runtime was not initialized")
-
-    start, stop = bounds
-    runtime = _SEAL_PROCESS_RUNTIME
-    encoder = runtime["encoder"]
-    encryptor = runtime["encryptor"]
-    decryptor = runtime["decryptor"]
-    evaluator = runtime["evaluator"]
-    encrypted_sum = None
-    plaintext_sum = np.zeros(stop - start, dtype=np.float64)
-    expected_chunk = np.zeros(stop - start, dtype=np.float64)
-    ciphertext_count = 0
-    ciphertext_bytes = 0
-    encryption_time = 0.0
-    addition_time = 0.0
-
-    for update, factor, encrypted in zip(
-        runtime["updates"],
-        runtime["factors"],
-        runtime["encrypted_mask"],
-    ):
-        values = np.ascontiguousarray(
-            update[start:stop].astype(np.float64) * factor,
-            dtype=np.float64,
-        )
-        expected_chunk += values
-        if not encrypted:
-            plaintext_sum += values
-            continue
-        encryption_started_at = time.perf_counter()
-        ciphertext = encryptor.encrypt(encoder.encode(values, CKKS_SCALE))
-        encryption_time += time.perf_counter() - encryption_started_at
-        ciphertext_count += 1
-        ciphertext_bytes += int(ciphertext.save_size())
-        if encrypted_sum is None:
-            encrypted_sum = ciphertext
-        else:
-            addition_started_at = time.perf_counter()
-            encrypted_sum = evaluator.add(encrypted_sum, ciphertext)
-            addition_time += time.perf_counter() - addition_started_at
-
-    if encrypted_sum is None:
-        raise ValueError("Encrypted aggregation requires at least one HE protected update")
-    addition_started_at = time.perf_counter()
-    encrypted_sum = evaluator.add_plain(
-        encrypted_sum,
-        encoder.encode(np.ascontiguousarray(plaintext_sum), CKKS_SCALE),
-    )
-    addition_time += time.perf_counter() - addition_started_at
-    decryption_started_at = time.perf_counter()
-    decoded = decode_seal_vector(encoder, decryptor.decrypt(encrypted_sum))[: stop - start]
-    decryption_time = time.perf_counter() - decryption_started_at
-    max_abs_error = float(np.max(np.abs(decoded - expected_chunk)))
-    return (
+    (
         start,
-        np.ascontiguousarray(decoded, dtype=np.float32),
+        decoded,
         ciphertext_count,
         ciphertext_bytes,
         encryption_time,
         addition_time,
         decryption_time,
         max_abs_error,
-    )
+    ) = result
+    stop = start + int(decoded.size)
+    aggregated_array[start:stop] = decoded
+    if he_metrics is not None:
+        he_metrics.ciphertext_count += ciphertext_count
+        he_metrics.ciphertext_bytes += ciphertext_bytes
+        he_metrics.encryption_time_sec += encryption_time
+        he_metrics.addition_time_sec += addition_time
+        he_metrics.decryption_time_sec += decryption_time
+        he_metrics.max_abs_error = max(
+            he_metrics.max_abs_error,
+            max_abs_error,
+        )
 
 
 def _tenseal_ckks_runtime() -> tuple[dict[str, Any], float]:
@@ -3711,78 +3628,53 @@ def _fedavg_split_seal_processes(
     factors = tuple(float(count) / total for count in sample_counts)
     mask = tuple(_validated_encrypted_mask(encrypted_mask, update_count))
     worker_count = max(1, min(int(he_workers), os.cpu_count() or 1))
-    shared_block = shared_memory.SharedMemory(
-        create=True,
-        size=update_count * parameter_count * np.dtype(np.float32).itemsize,
-    )
-    updates = np.ndarray(
-        (update_count, parameter_count),
-        dtype=np.float32,
-        buffer=shared_block.buf,
-    )
-    try:
-        for row_index, state_diff in enumerate(state_diffs):
-            flattened = _flatten_state_diff(
-                state_diff,
-                global_end,
-                global_edge,
-                torch.device("cpu"),
-            )
-            updates[row_index] = flattened.numpy()
+    aggregated_array = np.empty(parameter_count, dtype=np.float32)
+    flat_updates = [
+        _flatten_state_diff(
+            state_diff,
+            global_end,
+            global_edge,
+            torch.device("cpu"),
+        )
+        for state_diff in state_diffs
+    ]
 
-        aggregated_array = np.empty(parameter_count, dtype=np.float32)
-        chunk_bounds = [
-            (start, min(start + chunk_size, parameter_count))
-            for start in range(0, parameter_count, chunk_size)
-        ]
-        with tempfile.TemporaryDirectory(prefix="dynfl_seal_keys_") as temp_dir:
-            public_key_path = str(Path(temp_dir) / "public_key.bin")
-            secret_key_path = str(Path(temp_dir) / "secret_key.bin")
-            runtime["public_key"].save(public_key_path)
-            runtime["secret_key"].save(secret_key_path)
-            with ProcessPoolExecutor(
-                max_workers=worker_count,
-                initializer=_init_seal_process_runtime,
-                initargs=(
-                    public_key_path,
-                    secret_key_path,
-                    shared_block.name,
-                    update_count,
-                    parameter_count,
-                    factors,
-                    mask,
-                ),
-            ) as executor:
-                results = executor.map(
-                    _seal_process_aggregate_chunk,
-                    chunk_bounds,
-                    chunksize=1,
-                )
-                for (
-                    start,
-                    decoded,
-                    ciphertext_count,
-                    ciphertext_bytes,
-                    encryption_time,
-                    addition_time,
-                    decryption_time,
-                    max_abs_error,
-                ) in results:
-                    stop = start + int(decoded.size)
-                    aggregated_array[start:stop] = decoded
-                    if he_metrics is not None:
-                        he_metrics.ciphertext_count += ciphertext_count
-                        he_metrics.ciphertext_bytes += ciphertext_bytes
-                        he_metrics.encryption_time_sec += encryption_time
-                        he_metrics.addition_time_sec += addition_time
-                        he_metrics.decryption_time_sec += decryption_time
-                        he_metrics.max_abs_error = max(
-                            he_metrics.max_abs_error,
-                            max_abs_error,
-                        )
-    finally:
-        shared_block.close()
-        shared_block.unlink()
+    def chunk_stream():
+        # Yield each chunk's (update_count x chunk_size) column slice lazily rather
+        # than materialising one update_count x parameter_count block, so peak IPC
+        # memory scales with O(workers * chunk_size), not O(update_count * model_size).
+        for start in range(0, parameter_count, chunk_size):
+            stop = min(start + chunk_size, parameter_count)
+            columns = np.stack(
+                [update.detach().numpy()[start:stop] for update in flat_updates]
+            )
+            yield start, np.ascontiguousarray(columns, dtype=np.float32)
+
+    # Teardown deliberately uses pool.terminate() instead of the pool's graceful
+    # shutdown: on Windows, ProcessPoolExecutor's graceful path deadlocks when a
+    # worker exits after the task queue drains (feeder blocks writing to a pipe with
+    # no reader), so the run hangs after all chunks are already aggregated.
+    with tempfile.TemporaryDirectory(prefix="dynfl_seal_keys_") as temp_dir:
+        public_key_path = str(Path(temp_dir) / "public_key.bin")
+        secret_key_path = str(Path(temp_dir) / "secret_key.bin")
+        runtime["public_key"].save(public_key_path)
+        runtime["secret_key"].save(secret_key_path)
+        ctx = multiprocessing.get_context("spawn")
+        pool = ctx.Pool(
+            processes=worker_count,
+            initializer=_init_seal_process_runtime,
+            initargs=(public_key_path, secret_key_path, factors, mask),
+        )
+        try:
+            for result in pool.imap_unordered(
+                _seal_process_aggregate_chunk,
+                chunk_stream(),
+                chunksize=1,
+            ):
+                _record_seal_chunk_result(aggregated_array, he_metrics, result)
+        finally:
+            pool.terminate()
+            pool.join()
 
     if he_metrics is not None:
         he_metrics.key_setup_time_sec += key_setup_time_sec

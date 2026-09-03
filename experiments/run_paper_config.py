@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--policies", nargs="+")
     parser.add_argument("--rounds", type=int)
+    parser.add_argument(
+        "--he-workers",
+        type=int,
+        default=None,
+        help="Override the config he.workers value. Use 1 for serial HE (Windows spawn safety).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -45,6 +51,7 @@ def build_command(
     seed: int,
     policies: list[str],
     rounds: int | None,
+    he_workers: int | None = None,
 ) -> list[str]:
     training = config["training"]
     system = config["system"]
@@ -98,7 +105,7 @@ def build_command(
         "cloud_dp_stability_threshold": privacy["cloud_dp_stability_threshold"],
         "he_backend": he["backend"],
         "he_aggregation_size": he["aggregation_size"],
-        "he_workers": he.get("workers", 1),
+        "he_workers": he_workers if he_workers is not None else he.get("workers", 1),
         "pareto_archive_size": optimization["pareto_archive_size"],
         "pareto_beam_size": optimization["pareto_beam_size"],
         "pareto_max_iters": optimization["pareto_max_iters"],
@@ -132,6 +139,8 @@ def main() -> None:
     validate_config(config)
     seeds = args.seeds or [int(seed) for seed in config["seeds"]]
     policies = args.policies or list(config["policies"])
+    if not 1 <= args.he_workers <= 4:
+        raise ValueError("--he-workers must be in [1, 4] for the formal battery")
 
     for seed in seeds:
         command = build_command(
@@ -139,6 +148,7 @@ def main() -> None:
             seed=seed,
             policies=policies,
             rounds=args.rounds,
+            he_workers=args.he_workers,
         )
         print(subprocess.list2cmdline(command), flush=True)
         if not args.dry_run:
