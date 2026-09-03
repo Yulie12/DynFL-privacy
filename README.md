@@ -115,7 +115,7 @@ worker and participant sweep:
 python experiments\benchmark_seal_parallelism.py --workers 4 --aggregate-parameter-count 11181642 --aggregate-updates 10 --output out\seal_resnet18_benchmark.json
 ```
 
-The full aggregation rows include process startup, shared-memory population,
+The full aggregation rows include process startup, file-backed update-store population,
 encryption, ciphertext addition, decryption, and result application. If
 `psutil` is installed, they also include peak RSS across the parent and worker
 processes. `he_wall_time_sec` is elapsed time observed by the caller, whereas
@@ -123,6 +123,10 @@ processes. `he_wall_time_sec` is elapsed time observed by the caller, whereas
 reported by all workers. For SEAL, `he_ciphertext_bytes` retains the
 `save_size()` upper-bound semantics; the benchmark separately writes one
 representative ciphertext and reports its actual serialized file size.
+Parallel SEAL aggregation stores its temporary update matrix under
+`out/.he_tmp` instead of Windows page-file-backed shared memory. Set
+`DYNFL_HE_TMPDIR` to a directory on another drive when more temporary disk
+space is available there.
 
 The main code path is:
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -55,6 +57,27 @@ from dynfed.split_learning import (
     split_local_train_lenet5,
 )
 from dynfed.privacy import OBJECT_SIZES, PRIVACY_ALPHA
+from experiments.run_paper_config import build_command
+
+
+def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "paper_v22_cifar10_resnet18.json"
+    )
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    command = build_command(
+        config,
+        seed=42,
+        policies=["ours"],
+        rounds=None,
+        max_new_rounds=2,
+    )
+
+    assert command[command.index("--rounds") + 1] == "200"
+    assert command[command.index("--max-new-rounds") + 1] == "2"
 
 
 def _flow_client(client_id: int) -> ClientFlowInput:

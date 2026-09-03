@@ -28,6 +28,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policies", nargs="+")
     parser.add_argument("--rounds", type=int)
     parser.add_argument(
+        "--max-new-rounds",
+        type=int,
+        help=(
+            "Run at most this many new rounds while preserving the configured --rounds "
+            "as the RDP accounting horizon. The resulting checkpoint can be resumed."
+        ),
+    )
+    parser.add_argument(
         "--resume-from-run",
         type=Path,
         help="Resume one seed from an existing run directory containing policy checkpoints.",
@@ -50,6 +58,7 @@ def build_command(
     seed: int,
     policies: list[str],
     rounds: int | None,
+    max_new_rounds: int | None = None,
     resume_from_run: Path | None = None,
 ) -> list[str]:
     training = config["training"]
@@ -116,6 +125,8 @@ def build_command(
     }
     for name, value in values.items():
         _append_value(command, name, value)
+    if max_new_rounds is not None:
+        _append_value(command, "max_new_rounds", max_new_rounds)
     if resume_from_run is not None:
         _append_value(command, "resume_from_run", resume_from_run.resolve())
 
@@ -142,6 +153,8 @@ def main() -> None:
     policies = args.policies or list(config["policies"])
     if args.resume_from_run is not None and len(seeds) != 1:
         raise ValueError("--resume-from-run requires exactly one seed")
+    if args.max_new_rounds is not None and args.max_new_rounds < 1:
+        raise ValueError("--max-new-rounds must be positive")
 
     for seed in seeds:
         command = build_command(
@@ -149,6 +162,7 @@ def main() -> None:
             seed=seed,
             policies=policies,
             rounds=args.rounds,
+            max_new_rounds=args.max_new_rounds,
             resume_from_run=args.resume_from_run,
         )
         print(subprocess.list2cmdline(command), flush=True)

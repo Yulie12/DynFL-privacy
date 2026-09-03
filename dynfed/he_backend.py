@@ -36,8 +36,10 @@ class HEOperationMetrics:
     wall_time_sec: float = 0.0
     process_workers: int = 0
     process_tasks: int = 0
+    process_fallbacks: int = 0
     process_chunks_per_task: int = 0
     shared_memory_bytes: int = 0
+    mapped_update_bytes: int = 0
     key_setup_time_sec: float = 0.0
     encryption_time_sec: float = 0.0
     addition_time_sec: float = 0.0
@@ -73,8 +75,10 @@ class HEOperationMetrics:
             ),
             "he_process_workers": self.process_workers,
             "he_process_tasks": self.process_tasks,
+            "he_process_fallbacks": self.process_fallbacks,
             "he_process_chunks_per_task": self.process_chunks_per_task,
             "he_shared_memory_bytes": self.shared_memory_bytes,
+            "he_mapped_update_bytes": self.mapped_update_bytes,
             "he_key_setup_time_sec": self.key_setup_time_sec,
             "he_encryption_time_sec": self.encryption_time_sec,
             "he_addition_time_sec": self.addition_time_sec,

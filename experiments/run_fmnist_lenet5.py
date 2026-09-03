@@ -21,6 +21,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rounds", type=int, default=200)
     parser.add_argument(
+        "--max-new-rounds",
+        type=int,
+        default=None,
+        help=(
+            "Stop after this many newly executed rounds without changing the --rounds "
+            "privacy-accounting horizon; writes a resumable paused checkpoint."
+        ),
+    )
+    parser.add_argument(
         "--execution-revision",
         default="paper_flow_v22_wall_raw_nsga",
     )
@@ -140,6 +149,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.max_new_rounds is not None and args.max_new_rounds < 1:
+        raise ValueError("--max-new-rounds must be positive")
     output_root = timestamped_dir(args.output_root, "lenet5_dynamic_newtex202608")
     output_root.mkdir(parents=True, exist_ok=True)
     status_payload = {
@@ -148,6 +159,7 @@ def main() -> None:
         "run_dir": str(output_root),
         "round": 0,
         "rounds": int(args.rounds),
+        "max_new_rounds": args.max_new_rounds,
         "dataset": args.dataset,
         "model": args.model,
         "policies": list(args.policies),
@@ -240,9 +252,10 @@ def main() -> None:
         train_limit=args.train_limit,
         test_limit=args.test_limit,
         resume_from_run=args.resume_from_run,
+        max_new_rounds=args.max_new_rounds,
         policies=tuple(args.policies),
     )
-    print(f"[OK] summary table: {result['summary_table']}")
+    print(f"[{result['status'].upper()}] summary table: {result['summary_table']}")
 
 
 if __name__ == "__main__":

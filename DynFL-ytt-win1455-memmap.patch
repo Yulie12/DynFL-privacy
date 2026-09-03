@@ -1,0 +1,602 @@
+diff --git a/README.md b/README.md
+index 78f5455..a5f7f4d 100644
+--- a/README.md
++++ b/README.md
+@@ -115,7 +115,7 @@ worker and participant sweep:
+ python experiments\benchmark_seal_parallelism.py --workers 4 --aggregate-parameter-count 11181642 --aggregate-updates 10 --output out\seal_resnet18_benchmark.json
+ ```
+ 
+-The full aggregation rows include process startup, shared-memory population,
++The full aggregation rows include process startup, file-backed update-store population,
+ encryption, ciphertext addition, decryption, and result application. If
+ `psutil` is installed, they also include peak RSS across the parent and worker
+ processes. `he_wall_time_sec` is elapsed time observed by the caller, whereas
+@@ -123,6 +123,10 @@ processes. `he_wall_time_sec` is elapsed time observed by the caller, whereas
+ reported by all workers. For SEAL, `he_ciphertext_bytes` retains the
+ `save_size()` upper-bound semantics; the benchmark separately writes one
+ representative ciphertext and reports its actual serialized file size.
++Parallel SEAL aggregation stores its temporary update matrix under
++`out/.he_tmp` instead of Windows page-file-backed shared memory. Set
++`DYNFL_HE_TMPDIR` to a directory on another drive when more temporary disk
++space is available there.
+ 
+ The main code path is:
+ 
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index 553c5cb..5eef741 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -10,12 +10,16 @@ import os
+ import pickle
+ import platform
+ import random
++import shutil
++import subprocess
+ import sys
+ import tempfile
+ import time
++import warnings
+ from concurrent.futures import ProcessPoolExecutor, as_completed
++from concurrent.futures.process import BrokenProcessPool
+ from dataclasses import dataclass, replace
+-from multiprocessing import shared_memory
++from functools import wraps
+ from pathlib import Path
+ from typing import Any, Callable
+ 
+@@ -1787,6 +1791,13 @@ def _run_lenet5_policy(
+             "real_he_used": round_real_he_used,
+             "he_aggregation_calls": current_round["he_aggregation_calls"],
+             "he_ciphertext_count": current_round["he_ciphertext_count"],
++            "he_ciphertext_bytes": current_round["he_ciphertext_bytes"],
++            "he_ciphertext_bytes_semantics": current_round[
++                "he_ciphertext_bytes_semantics"
++            ],
++            "he_wall_time_sec": current_round["he_wall_time_sec"],
++            "he_worker_cpu_time_sec": current_round["he_worker_cpu_time_sec"],
++            "he_process_fallbacks": current_round["he_process_fallbacks"],
+             "he_operation_time_sec": sum(
+                 float(current_round[field])
+                 for field in (
+@@ -1915,16 +1926,40 @@ def _run_lenet5_policy(
+         "he_encrypted_parameter_values",
+         "he_ciphertext_count",
+         "he_ciphertext_bytes",
++        "he_process_tasks",
++        "he_process_fallbacks",
+         "he_failures",
+     ):
+         summary[field] = int(sum(int(row.get(field, 0)) for row in round_rows))
+     for field in (
++        "he_process_workers",
++        "he_process_chunks_per_task",
++        "he_shared_memory_bytes",
++        "he_mapped_update_bytes",
++    ):
++        summary[field] = int(
++            max((int(row.get(field, 0)) for row in round_rows), default=0)
++        )
++    for field in (
++        "he_wall_time_sec",
+         "he_key_setup_time_sec",
+         "he_encryption_time_sec",
+         "he_addition_time_sec",
+         "he_decryption_time_sec",
+     ):
+         summary[field] = float(sum(float(row.get(field, 0.0)) for row in round_rows))
++    summary["he_worker_cpu_time_sec"] = float(
++        summary["he_encryption_time_sec"]
++        + summary["he_addition_time_sec"]
++        + summary["he_decryption_time_sec"]
++    )
++    summary["he_ciphertext_bytes_semantics"] = (
++        "serialized_bytes"
++        if he_status.backend == "tenseal"
++        else "seal_save_size_upper_bound"
++        if he_status.backend == "seal"
++        else "not_applicable"
++    )
+     summary["he_max_abs_error"] = max(
+         (float(row.get("he_max_abs_error", 0.0)) for row in round_rows),
+         default=0.0,
+@@ -3275,6 +3310,22 @@ _TENSEAL_CKKS_RUNTIME: dict[str, Any] | None = None
+ _SEAL_PROCESS_RUNTIME: dict[str, Any] | None = None
+ 
+ 
++def _measure_he_wall_time(function: Callable[..., Any]) -> Callable[..., Any]:
++    """Record elapsed HE aggregation time separately from summed worker work."""
++
++    @wraps(function)
++    def measured(*args: Any, **kwargs: Any) -> Any:
++        metrics = kwargs.get("he_metrics")
++        started_at = time.perf_counter()
++        try:
++            return function(*args, **kwargs)
++        finally:
++            if metrics is not None:
++                metrics.wall_time_sec += time.perf_counter() - started_at
++
++    return measured
++
++
+ def _reset_ckks_runtime() -> None:
+     global _SEAL_CKKS_RUNTIME, _TENSEAL_CKKS_RUNTIME
+     _SEAL_CKKS_RUNTIME = None
+@@ -3316,7 +3367,7 @@ def _seal_ckks_runtime() -> tuple[dict[str, Any], float]:
+ def _init_seal_process_runtime(
+     public_key_path: str,
+     secret_key_path: str,
+-    shared_memory_name: str,
++    update_store_path: str,
+     update_count: int,
+     parameter_count: int,
+     factors: tuple[float, ...],
+@@ -3339,14 +3390,13 @@ def _init_seal_process_runtime(
+     public_key.load(context, public_key_path)
+     secret_key = seal.SecretKey()
+     secret_key.load(context, secret_key_path)
+-    shared_block = shared_memory.SharedMemory(name=shared_memory_name)
+-    updates = np.ndarray(
+-        (update_count, parameter_count),
++    updates = np.memmap(
++        update_store_path,
++        mode="r",
+         dtype=np.float32,
+-        buffer=shared_block.buf,
++        shape=(update_count, parameter_count),
+     )
+     _SEAL_PROCESS_RUNTIME = {
+-        "shared_block": shared_block,
+         "updates": updates,
+         "factors": factors,
+         "encrypted_mask": encrypted_mask,
+@@ -3426,6 +3476,14 @@ def _seal_process_aggregate_chunk(
+     )
+ 
+ 
++def _seal_process_aggregate_chunk_batch(
++    bounds_batch: tuple[tuple[int, int], ...],
++) -> list[tuple[int, np.ndarray, int, int, float, float, float, float]]:
++    """Process adjacent parameter chunks in one executor task."""
++
++    return [_seal_process_aggregate_chunk(bounds) for bounds in bounds_batch]
++
++
+ def _tenseal_ckks_runtime() -> tuple[dict[str, Any], float]:
+     global _TENSEAL_CKKS_RUNTIME
+     if _TENSEAL_CKKS_RUNTIME is not None:
+@@ -3451,6 +3509,7 @@ def _tenseal_ckks_runtime() -> tuple[dict[str, Any], float]:
+     return _TENSEAL_CKKS_RUNTIME, time.perf_counter() - started_at
+ 
+ 
++@_measure_he_wall_time
+ def fedavg_split_tenseal(
+     state_diffs: list[dict[str, dict[str, torch.Tensor]]],
+     sample_counts: list[float],
+@@ -3559,6 +3618,7 @@ def fedavg_split_tenseal(
+     return global_end, global_edge
+ 
+ 
++@_measure_he_wall_time
+ def fedavg_split_seal(
+     state_diffs: list[dict[str, dict[str, torch.Tensor]]],
+     sample_counts: list[float],
+@@ -3594,17 +3654,29 @@ def fedavg_split_seal(
+         )
+     mask = _validated_encrypted_mask(encrypted_mask, len(state_diffs))
+     if int(he_workers) > 1 and any(mask):
+-        return _fedavg_split_seal_processes(
+-            state_diffs,
+-            sample_counts,
+-            global_end,
+-            global_edge,
+-            device,
+-            chunk_size=chunk_size,
+-            encrypted_mask=mask,
+-            he_workers=he_workers,
+-            he_metrics=he_metrics,
+-        )
++        metrics_snapshot = copy.deepcopy(he_metrics)
++        try:
++            return _fedavg_split_seal_processes(
++                state_diffs,
++                sample_counts,
++                global_end,
++                global_edge,
++                device,
++                chunk_size=chunk_size,
++                encrypted_mask=mask,
++                he_workers=he_workers,
++                he_metrics=he_metrics,
++            )
++        except (BrokenProcessPool, MemoryError, OSError) as exc:
++            if he_metrics is not None and metrics_snapshot is not None:
++                he_metrics.__dict__.update(metrics_snapshot.__dict__)
++                he_metrics.process_fallbacks += 1
++            warnings.warn(
++                "Parallel SEAL aggregation failed; retrying the same full update "
++                f"in one process. Cause: {exc}",
++                RuntimeWarning,
++                stacklevel=2,
++            )
+     work_device = torch.device("cpu")
+     flat_updates = [
+         _flatten_state_diff(diff, global_end, global_edge, work_device)
+@@ -3706,21 +3778,43 @@ def _fedavg_split_seal_processes(
+     if update_count == 0:
+         return global_end, global_edge
+ 
+-    runtime, key_setup_time_sec = _seal_ckks_runtime()
+     total = max(1.0, float(sum(sample_counts)))
+     factors = tuple(float(count) / total for count in sample_counts)
+     mask = tuple(_validated_encrypted_mask(encrypted_mask, update_count))
+     worker_count = max(1, min(int(he_workers), os.cpu_count() or 1))
+-    shared_block = shared_memory.SharedMemory(
+-        create=True,
+-        size=update_count * parameter_count * np.dtype(np.float32).itemsize,
++    mapped_update_bytes = (
++        update_count * parameter_count * np.dtype(np.float32).itemsize
+     )
+-    updates = np.ndarray(
+-        (update_count, parameter_count),
+-        dtype=np.float32,
+-        buffer=shared_block.buf,
++    runtime, key_setup_time_sec = _seal_ckks_runtime()
++    aggregated_array = np.empty(parameter_count, dtype=np.float32)
++    configured_temp_root = os.environ.get("DYNFL_HE_TMPDIR")
++    he_temp_root = (
++        Path(configured_temp_root).resolve()
++        if configured_temp_root
++        else ROOT / "out" / ".he_tmp"
+     )
+-    try:
++    he_temp_root.mkdir(parents=True, exist_ok=True)
++
++    with tempfile.TemporaryDirectory(
++        prefix="dynfl_seal_process_",
++        dir=he_temp_root,
++    ) as temp_dir:
++        free_bytes = shutil.disk_usage(temp_dir).free
++        required_free_bytes = mapped_update_bytes + 512 * 1024 ** 2
++        if free_bytes < required_free_bytes:
++            raise OSError(
++                "SEAL process aggregation needs a file-backed update store of "
++                f"{mapped_update_bytes / (1024 ** 3):.2f} GiB, but the temporary "
++                f"drive has only {free_bytes / (1024 ** 3):.2f} GiB free."
++            )
++
++        update_store_path = str(Path(temp_dir) / "weighted_updates.float32")
++        updates = np.memmap(
++            update_store_path,
++            mode="w+",
++            dtype=np.float32,
++            shape=(update_count, parameter_count),
++        )
+         for row_index, state_diff in enumerate(state_diffs):
+             flattened = _flatten_state_diff(
+                 state_diff,
+@@ -3729,24 +3823,35 @@ def _fedavg_split_seal_processes(
+                 torch.device("cpu"),
+             )
+             updates[row_index] = flattened.numpy()
++        updates.flush()
+ 
+-        aggregated_array = np.empty(parameter_count, dtype=np.float32)
+         chunk_bounds = [
+             (start, min(start + chunk_size, parameter_count))
+             for start in range(0, parameter_count, chunk_size)
+         ]
+-        with tempfile.TemporaryDirectory(prefix="dynfl_seal_keys_") as temp_dir:
+-            public_key_path = str(Path(temp_dir) / "public_key.bin")
+-            secret_key_path = str(Path(temp_dir) / "secret_key.bin")
+-            runtime["public_key"].save(public_key_path)
+-            runtime["secret_key"].save(secret_key_path)
++        chunks_per_task = max(
++            1,
++            min(
++                32,
++                int(np.ceil(len(chunk_bounds) / max(1, worker_count * 8))),
++            ),
++        )
++        chunk_batches = [
++            tuple(chunk_bounds[index:index + chunks_per_task])
++            for index in range(0, len(chunk_bounds), chunks_per_task)
++        ]
++        public_key_path = str(Path(temp_dir) / "public_key.bin")
++        secret_key_path = str(Path(temp_dir) / "secret_key.bin")
++        runtime["public_key"].save(public_key_path)
++        runtime["secret_key"].save(secret_key_path)
++        try:
+             with ProcessPoolExecutor(
+                 max_workers=worker_count,
+                 initializer=_init_seal_process_runtime,
+                 initargs=(
+                     public_key_path,
+                     secret_key_path,
+-                    shared_block.name,
++                    update_store_path,
+                     update_count,
+                     parameter_count,
+                     factors,
+@@ -3754,41 +3859,51 @@ def _fedavg_split_seal_processes(
+                 ),
+             ) as executor:
+                 results = executor.map(
+-                    _seal_process_aggregate_chunk,
+-                    chunk_bounds,
++                    _seal_process_aggregate_chunk_batch,
++                    chunk_batches,
+                     chunksize=1,
+                 )
+-                for (
+-                    start,
+-                    decoded,
+-                    ciphertext_count,
+-                    ciphertext_bytes,
+-                    encryption_time,
+-                    addition_time,
+-                    decryption_time,
+-                    max_abs_error,
+-                ) in results:
+-                    stop = start + int(decoded.size)
+-                    aggregated_array[start:stop] = decoded
+-                    if he_metrics is not None:
+-                        he_metrics.ciphertext_count += ciphertext_count
+-                        he_metrics.ciphertext_bytes += ciphertext_bytes
+-                        he_metrics.encryption_time_sec += encryption_time
+-                        he_metrics.addition_time_sec += addition_time
+-                        he_metrics.decryption_time_sec += decryption_time
+-                        he_metrics.max_abs_error = max(
+-                            he_metrics.max_abs_error,
+-                            max_abs_error,
+-                        )
+-    finally:
+-        shared_block.close()
+-        shared_block.unlink()
++                for batch_results in results:
++                    for (
++                        start,
++                        decoded,
++                        ciphertext_count,
++                        ciphertext_bytes,
++                        encryption_time,
++                        addition_time,
++                        decryption_time,
++                        max_abs_error,
++                    ) in batch_results:
++                        stop = start + int(decoded.size)
++                        aggregated_array[start:stop] = decoded
++                        if he_metrics is not None:
++                            he_metrics.ciphertext_count += ciphertext_count
++                            he_metrics.ciphertext_bytes += ciphertext_bytes
++                            he_metrics.encryption_time_sec += encryption_time
++                            he_metrics.addition_time_sec += addition_time
++                            he_metrics.decryption_time_sec += decryption_time
++                            he_metrics.max_abs_error = max(
++                                he_metrics.max_abs_error,
++                                max_abs_error,
++                            )
++        finally:
++            del updates
+ 
+     if he_metrics is not None:
+         he_metrics.key_setup_time_sec += key_setup_time_sec
+         he_metrics.aggregation_calls += 1
+         he_metrics.encrypted_updates += sum(mask)
+         he_metrics.encrypted_parameter_values += parameter_count * sum(mask)
++        he_metrics.process_workers = max(he_metrics.process_workers, worker_count)
++        he_metrics.process_tasks += len(chunk_batches)
++        he_metrics.process_chunks_per_task = max(
++            he_metrics.process_chunks_per_task,
++            chunks_per_task,
++        )
++        he_metrics.mapped_update_bytes = max(
++            he_metrics.mapped_update_bytes,
++            mapped_update_bytes,
++        )
+     aggregated_tensor = torch.from_numpy(aggregated_array)
+     _apply_flat_update(aggregated_tensor, global_end, global_edge)
+     return global_end, global_edge
+@@ -3880,6 +3995,7 @@ def _fedavg_split_bounded_he_streaming(
+     return global_end, global_edge
+ 
+ 
++@_measure_he_wall_time
+ def _fedavg_prefix_seal(
+     prefix_updates: list[torch.Tensor],
+     sample_counts: list[int],
+@@ -3970,6 +4086,7 @@ def _fedavg_prefix_seal(
+     return torch.tensor(decoded, dtype=torch.float32)
+ 
+ 
++@_measure_he_wall_time
+ def _fedavg_prefix_tenseal(
+     prefix_updates: list[torch.Tensor],
+     sample_counts: list[int],
+@@ -4206,6 +4323,27 @@ def _runtime_environment(device: torch.device) -> dict[str, Any]:
+     cuda_device_name = None
+     if cuda_available:
+         cuda_device_name = torch.cuda.get_device_name(device if device.type == "cuda" else 0)
++    git_commit = None
++    git_dirty = None
++    try:
++        git_commit_result = subprocess.run(
++            ["git", "rev-parse", "HEAD"],
++            cwd=ROOT,
++            check=True,
++            capture_output=True,
++            text=True,
++        )
++        git_status_result = subprocess.run(
++            ["git", "status", "--porcelain"],
++            cwd=ROOT,
++            check=True,
++            capture_output=True,
++            text=True,
++        )
++        git_commit = git_commit_result.stdout.strip() or None
++        git_dirty = bool(git_status_result.stdout.strip())
++    except (OSError, subprocess.SubprocessError):
++        pass
+     return {
+         "python_version": sys.version,
+         "platform": platform.platform(),
+@@ -4215,6 +4353,8 @@ def _runtime_environment(device: torch.device) -> dict[str, Any]:
+         "cuda_available": cuda_available,
+         "cuda_version": torch.version.cuda,
+         "cuda_device_name": cuda_device_name,
++        "git_commit": git_commit,
++        "git_dirty": git_dirty,
+         "package_versions": package_versions,
+     }
+ 
+diff --git a/dynfed/he_backend.py b/dynfed/he_backend.py
+index dff79ca..fccdab1 100644
+--- a/dynfed/he_backend.py
++++ b/dynfed/he_backend.py
+@@ -36,8 +36,10 @@ class HEOperationMetrics:
+     wall_time_sec: float = 0.0
+     process_workers: int = 0
+     process_tasks: int = 0
++    process_fallbacks: int = 0
+     process_chunks_per_task: int = 0
+     shared_memory_bytes: int = 0
++    mapped_update_bytes: int = 0
+     key_setup_time_sec: float = 0.0
+     encryption_time_sec: float = 0.0
+     addition_time_sec: float = 0.0
+@@ -73,8 +75,10 @@ class HEOperationMetrics:
+             ),
+             "he_process_workers": self.process_workers,
+             "he_process_tasks": self.process_tasks,
++            "he_process_fallbacks": self.process_fallbacks,
+             "he_process_chunks_per_task": self.process_chunks_per_task,
+             "he_shared_memory_bytes": self.shared_memory_bytes,
++            "he_mapped_update_bytes": self.mapped_update_bytes,
+             "he_key_setup_time_sec": self.key_setup_time_sec,
+             "he_encryption_time_sec": self.encryption_time_sec,
+             "he_addition_time_sec": self.addition_time_sec,
+diff --git a/experiments/benchmark_seal_parallelism.py b/experiments/benchmark_seal_parallelism.py
+index f186435..52562b9 100644
+--- a/experiments/benchmark_seal_parallelism.py
++++ b/experiments/benchmark_seal_parallelism.py
+@@ -134,7 +134,7 @@ def _full_aggregation_case(
+         "updates": update_count,
+         "parameter_count": parameter_count,
+         "plaintext_update_bytes": parameter_count * np.dtype(np.float32).itemsize,
+-        "estimated_process_shared_memory_bytes": (
++        "estimated_mapped_update_store_bytes": (
+             parameter_count * update_count * np.dtype(np.float32).itemsize
+         ),
+         "end_to_end_wall_time_sec": end_to_end_wall_time_sec,
+@@ -196,10 +196,12 @@ def parse_args() -> argparse.Namespace:
+         help="Encrypted participant counts for full aggregation cases.",
+     )
+     parser.add_argument(
++        "--max-update-store-gb",
+         "--max-shared-memory-gb",
++        dest="max_update_store_gb",
+         type=float,
+         default=8.0,
+-        help="Skip a full aggregation case when its input matrix exceeds this size.",
++        help="Skip a full aggregation case when its file-backed update store exceeds this size.",
+     )
+     parser.add_argument("--output", type=Path, default=None)
+     return parser.parse_args()
+@@ -294,23 +296,23 @@ def main() -> None:
+         parameter_count = int(args.aggregate_parameter_count)
+         if parameter_count < 1:
+             raise ValueError("--aggregate-parameter-count must be positive")
+-        max_shared_memory_bytes = int(args.max_shared_memory_gb * (1024 ** 3))
++        max_update_store_bytes = int(args.max_update_store_gb * (1024 ** 3))
+         for update_count in sorted(
+             set(max(1, int(value)) for value in args.aggregate_updates)
+         ):
+-            required_shared_memory_bytes = (
++            required_update_store_bytes = (
+                 parameter_count * update_count * np.dtype(np.float32).itemsize
+             )
+             for workers in sorted(set(max(1, int(value)) for value in args.workers)):
+-                if workers > 1 and required_shared_memory_bytes > max_shared_memory_bytes:
++                if workers > 1 and required_update_store_bytes > max_update_store_bytes:
+                     rows.append(
+                         {
+                             "benchmark": "full_aggregation",
+                             "workers": workers,
+                             "updates": update_count,
+                             "parameter_count": parameter_count,
+-                            "estimated_process_shared_memory_bytes": (
+-                                required_shared_memory_bytes
++                            "estimated_mapped_update_store_bytes": (
++                                required_update_store_bytes
+                             ),
+                             "status": "skipped_memory_guard",
+                         }
+diff --git a/tests/test_seal_fedavg.py b/tests/test_seal_fedavg.py
+index 60f9a07..9e1e640 100644
+--- a/tests/test_seal_fedavg.py
++++ b/tests/test_seal_fedavg.py
+@@ -2,15 +2,53 @@ from __future__ import annotations
+ 
+ import copy
+ import unittest
++from unittest.mock import patch
+ 
+ import numpy as np
+ import torch
+ 
+-from dynfed.fmnist_lenet5_dynamic import fedavg_split_seal
++from dynfed.fmnist_lenet5_dynamic import (
++    _measure_he_wall_time,
++    _seal_process_aggregate_chunk_batch,
++    fedavg_split_seal,
++)
+ from dynfed.he_backend import HEOperationMetrics, check_he_backend, decode_seal_vector
+ from dynfed.split_learning import fedavg_split
+ 
+ 
++class HEOperationMetricsTests(unittest.TestCase):
++    def test_wall_time_and_worker_time_have_distinct_output_fields(self) -> None:
++        metrics = HEOperationMetrics(
++            backend="seal",
++            encryption_time_sec=1.5,
++            addition_time_sec=0.25,
++            decryption_time_sec=0.5,
++        )
++
++        @_measure_he_wall_time
++        def measured_operation(*, he_metrics: HEOperationMetrics) -> str:
++            return "ok"
++
++        self.assertEqual(measured_operation(he_metrics=metrics), "ok")
++        output = metrics.as_dict()
++        self.assertGreater(output["he_wall_time_sec"], 0.0)
++        self.assertEqual(output["he_worker_cpu_time_sec"], 2.25)
++        self.assertEqual(
++            output["he_ciphertext_bytes_semantics"],
++            "seal_save_size_upper_bound",
++        )
++
++    def test_process_task_batch_preserves_chunk_order(self) -> None:
++        bounds = ((0, 4096), (4096, 8192), (8192, 9000))
++        with patch(
++            "dynfed.fmnist_lenet5_dynamic._seal_process_aggregate_chunk",
++            side_effect=lambda item: item,
++        ):
++            results = _seal_process_aggregate_chunk_batch(bounds)
++
++        self.assertEqual(results, list(bounds))
++
++
+ class SealFedAvgTests(unittest.TestCase):
+     @classmethod
+     def setUpClass(cls) -> None:
+@@ -170,6 +208,8 @@ class SealFedAvgTests(unittest.TestCase):
+             torch.testing.assert_close(seal_param, plain_param, rtol=0.0, atol=2e-6)
+         self.assertEqual(metrics.encrypted_updates, 2)
+         self.assertGreater(metrics.ciphertext_bytes, 0)
++        self.assertGreater(metrics.mapped_update_bytes, 0)
++        self.assertGreater(metrics.process_tasks, 0)
+         self.assertLess(metrics.max_abs_error, 2e-6)
+ 
+ 

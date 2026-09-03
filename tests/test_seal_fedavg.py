@@ -2,13 +2,51 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
-from dynfed.fmnist_lenet5_dynamic import fedavg_split_seal
+from dynfed.fmnist_lenet5_dynamic import (
+    _measure_he_wall_time,
+    _seal_process_aggregate_chunk_batch,
+    fedavg_split_seal,
+)
 from dynfed.he_backend import HEOperationMetrics, check_he_backend, decode_seal_vector
 from dynfed.split_learning import fedavg_split
+
+
+class HEOperationMetricsTests(unittest.TestCase):
+    def test_wall_time_and_worker_time_have_distinct_output_fields(self) -> None:
+        metrics = HEOperationMetrics(
+            backend="seal",
+            encryption_time_sec=1.5,
+            addition_time_sec=0.25,
+            decryption_time_sec=0.5,
+        )
+
+        @_measure_he_wall_time
+        def measured_operation(*, he_metrics: HEOperationMetrics) -> str:
+            return "ok"
+
+        self.assertEqual(measured_operation(he_metrics=metrics), "ok")
+        output = metrics.as_dict()
+        self.assertGreater(output["he_wall_time_sec"], 0.0)
+        self.assertEqual(output["he_worker_cpu_time_sec"], 2.25)
+        self.assertEqual(
+            output["he_ciphertext_bytes_semantics"],
+            "seal_save_size_upper_bound",
+        )
+
+    def test_process_task_batch_preserves_chunk_order(self) -> None:
+        bounds = ((0, 4096), (4096, 8192), (8192, 9000))
+        with patch(
+            "dynfed.fmnist_lenet5_dynamic._seal_process_aggregate_chunk",
+            side_effect=lambda item: item,
+        ):
+            results = _seal_process_aggregate_chunk_batch(bounds)
+
+        self.assertEqual(results, list(bounds))
 
 
 class SealFedAvgTests(unittest.TestCase):
@@ -170,6 +208,8 @@ class SealFedAvgTests(unittest.TestCase):
             torch.testing.assert_close(seal_param, plain_param, rtol=0.0, atol=2e-6)
         self.assertEqual(metrics.encrypted_updates, 2)
         self.assertGreater(metrics.ciphertext_bytes, 0)
+        self.assertGreater(metrics.mapped_update_bytes, 0)
+        self.assertGreater(metrics.process_tasks, 0)
         self.assertLess(metrics.max_abs_error, 2e-6)
 
 

@@ -134,7 +134,7 @@ def _full_aggregation_case(
         "updates": update_count,
         "parameter_count": parameter_count,
         "plaintext_update_bytes": parameter_count * np.dtype(np.float32).itemsize,
-        "estimated_process_shared_memory_bytes": (
+        "estimated_mapped_update_store_bytes": (
             parameter_count * update_count * np.dtype(np.float32).itemsize
         ),
         "end_to_end_wall_time_sec": end_to_end_wall_time_sec,
@@ -196,10 +196,12 @@ def parse_args() -> argparse.Namespace:
         help="Encrypted participant counts for full aggregation cases.",
     )
     parser.add_argument(
+        "--max-update-store-gb",
         "--max-shared-memory-gb",
+        dest="max_update_store_gb",
         type=float,
         default=8.0,
-        help="Skip a full aggregation case when its input matrix exceeds this size.",
+        help="Skip a full aggregation case when its file-backed update store exceeds this size.",
     )
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
@@ -294,23 +296,23 @@ def main() -> None:
         parameter_count = int(args.aggregate_parameter_count)
         if parameter_count < 1:
             raise ValueError("--aggregate-parameter-count must be positive")
-        max_shared_memory_bytes = int(args.max_shared_memory_gb * (1024 ** 3))
+        max_update_store_bytes = int(args.max_update_store_gb * (1024 ** 3))
         for update_count in sorted(
             set(max(1, int(value)) for value in args.aggregate_updates)
         ):
-            required_shared_memory_bytes = (
+            required_update_store_bytes = (
                 parameter_count * update_count * np.dtype(np.float32).itemsize
             )
             for workers in sorted(set(max(1, int(value)) for value in args.workers)):
-                if workers > 1 and required_shared_memory_bytes > max_shared_memory_bytes:
+                if workers > 1 and required_update_store_bytes > max_update_store_bytes:
                     rows.append(
                         {
                             "benchmark": "full_aggregation",
                             "workers": workers,
                             "updates": update_count,
                             "parameter_count": parameter_count,
-                            "estimated_process_shared_memory_bytes": (
-                                required_shared_memory_bytes
+                            "estimated_mapped_update_store_bytes": (
+                                required_update_store_bytes
                             ),
                             "status": "skipped_memory_guard",
                         }

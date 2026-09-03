@@ -1,0 +1,338 @@
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -28,6 +28,14 @@
+     parser.add_argument("--policies", nargs="+")
+     parser.add_argument("--rounds", type=int)
+     parser.add_argument(
++        "--max-new-rounds",
++        type=int,
++        help=(
++            "Run at most this many new rounds while preserving the configured --rounds "
++            "as the RDP accounting horizon. The resulting checkpoint can be resumed."
++        ),
++    )
++    parser.add_argument(
+         "--resume-from-run",
+         type=Path,
+         help="Resume one seed from an existing run directory containing policy checkpoints.",
+@@ -50,6 +58,7 @@
+     seed: int,
+     policies: list[str],
+     rounds: int | None,
++    max_new_rounds: int | None = None,
+     resume_from_run: Path | None = None,
+ ) -> list[str]:
+     training = config["training"]
+@@ -116,6 +125,8 @@
+     }
+     for name, value in values.items():
+         _append_value(command, name, value)
++    if max_new_rounds is not None:
++        _append_value(command, "max_new_rounds", max_new_rounds)
+     if resume_from_run is not None:
+         _append_value(command, "resume_from_run", resume_from_run.resolve())
+ 
+@@ -142,6 +153,8 @@
+     policies = args.policies or list(config["policies"])
+     if args.resume_from_run is not None and len(seeds) != 1:
+         raise ValueError("--resume-from-run requires exactly one seed")
++    if args.max_new_rounds is not None and args.max_new_rounds < 1:
++        raise ValueError("--max-new-rounds must be positive")
+ 
+     for seed in seeds:
+         command = build_command(
+@@ -149,6 +162,7 @@
+             seed=seed,
+             policies=policies,
+             rounds=args.rounds,
++            max_new_rounds=args.max_new_rounds,
+             resume_from_run=args.resume_from_run,
+         )
+         print(subprocess.list2cmdline(command), flush=True)
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -21,6 +21,15 @@
+     )
+     parser.add_argument("--rounds", type=int, default=200)
+     parser.add_argument(
++        "--max-new-rounds",
++        type=int,
++        default=None,
++        help=(
++            "Stop after this many newly executed rounds without changing the --rounds "
++            "privacy-accounting horizon; writes a resumable paused checkpoint."
++        ),
++    )
++    parser.add_argument(
+         "--execution-revision",
+         default="paper_flow_v22_wall_raw_nsga",
+     )
+@@ -140,6 +149,8 @@
+ 
+ def main() -> None:
+     args = parse_args()
++    if args.max_new_rounds is not None and args.max_new_rounds < 1:
++        raise ValueError("--max-new-rounds must be positive")
+     output_root = timestamped_dir(args.output_root, "lenet5_dynamic_newtex202608")
+     output_root.mkdir(parents=True, exist_ok=True)
+     status_payload = {
+@@ -148,6 +159,7 @@
+         "run_dir": str(output_root),
+         "round": 0,
+         "rounds": int(args.rounds),
++        "max_new_rounds": args.max_new_rounds,
+         "dataset": args.dataset,
+         "model": args.model,
+         "policies": list(args.policies),
+@@ -240,9 +252,10 @@
+         train_limit=args.train_limit,
+         test_limit=args.test_limit,
+         resume_from_run=args.resume_from_run,
++        max_new_rounds=args.max_new_rounds,
+         policies=tuple(args.policies),
+     )
+-    print(f"[OK] summary table: {result['summary_table']}")
++    print(f"[{result['status'].upper()}] summary table: {result['summary_table']}")
+ 
+ 
+ if __name__ == "__main__":
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -235,6 +235,7 @@
+     train_limit: int = 12000,
+     test_limit: int = 2000,
+     resume_from_run: str | None = None,
++    max_new_rounds: int | None = None,
+     policies: tuple[str, ...] = (
+         "ours",
+         "fixed_dp",
+@@ -244,6 +245,8 @@
+         "no_protection",
+     ),
+ ) -> dict[str, Any]:
++    if max_new_rounds is not None and max_new_rounds < 1:
++        raise ValueError("max_new_rounds must be positive")
+     output_dir = Path(selection.output_dir)
+     output_dir.mkdir(parents=True, exist_ok=True)
+     device = torch.device(train_config.device)
+@@ -382,6 +385,7 @@
+             "train_limit": train_limit,
+             "test_limit": test_limit,
+             "resume_from_run": resume_from_run,
++            "max_new_rounds": max_new_rounds,
+             "policies": list(policies),
+             "runtime_environment": runtime_environment,
+             "model_partition": model_partition,
+@@ -432,10 +436,14 @@
+                 dataset_label=dataset_label,
+                 output_dir=output_dir / policy,
+                 resume_from_policy_dir=(Path(resume_from_run) / policy) if resume_from_run else None,
++                max_new_rounds=max_new_rounds,
+             )
+         )
+ 
+-    _write_csv(output_dir / "summary_table.csv", summaries)
++    all_completed = all(summary.get("status") == "completed" for summary in summaries)
++    summary_table_name = "summary_table.csv" if all_completed else "partial_summary_table.csv"
++    summary_table_path = output_dir / summary_table_name
++    _write_csv(summary_table_path, summaries)
+     _write_json(
+         output_dir / "config.json",
+         {
+@@ -446,6 +454,7 @@
+             "train_limit": train_limit,
+             "test_limit": test_limit,
+             "resume_from_run": resume_from_run,
++            "max_new_rounds": max_new_rounds,
+             "policies": list(policies),
+             "runtime_environment": runtime_environment,
+             "model_partition": model_partition,
+@@ -461,16 +470,30 @@
+     final_live_status = _read_json_or_empty(output_dir / "live_status.json")
+     final_live_status.update(
+         {
+-            "status": "completed",
++            "status": "completed" if all_completed else "paused",
+             "active_policy": None,
+             "policy_index": len(policies),
+             "num_policies": len(policies),
+-            "round": selection.rounds,
++            "round": min(
++                (int(summary.get("rounds", 0)) for summary in summaries),
++                default=0,
++            ),
+             "rounds": selection.rounds,
+-            "progress": 1.0,
+-            "summary_table": str(output_dir / "summary_table.csv"),
++            "progress": (
++                1.0
++                if all_completed
++                else min(
++                    (float(summary.get("rounds", 0)) / max(selection.rounds, 1) for summary in summaries),
++                    default=0.0,
++                )
++            ),
++            "summary_table": str(summary_table_path),
+             "summaries": summaries,
+-            "message": "All policies completed",
++            "message": (
++                "All policies completed"
++                if all_completed
++                else "Invocation round limit reached; checkpoints are ready to resume"
++            ),
+             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+         }
+     )
+@@ -478,10 +501,12 @@
+         output_dir / "live_status.json",
+         final_live_status,
+     )
+-    print(f"[OK] wrote {len(summaries)} LeNet5 runs to {output_dir}")
++    outcome = "OK" if all_completed else "PAUSED"
++    print(f"[{outcome}] wrote {len(summaries)} policy runs to {output_dir}")
+     return {
++        "status": "completed" if all_completed else "paused",
+         "output_dir": str(output_dir),
+-        "summary_table": str(output_dir / "summary_table.csv"),
++        "summary_table": str(summary_table_path),
+         "summaries": summaries,
+     }
+ 
+@@ -651,6 +676,7 @@
+     dataset_label: str,
+     output_dir: Path,
+     resume_from_policy_dir: Path | None = None,
++    max_new_rounds: int | None = None,
+ ) -> dict[str, Any]:
+     output_dir.mkdir(parents=True, exist_ok=True)
+     parent_status_path = output_dir.parent / "live_status.json"
+@@ -888,7 +914,11 @@
+         stage="client_state_init",
+     )
+ 
+-    for round_idx in range(start_round, selection.rounds):
++    stop_round = selection.rounds
++    if max_new_rounds is not None:
++        stop_round = min(selection.rounds, start_round + max_new_rounds)
++
++    for round_idx in range(start_round, stop_round):
+         round_wall_started_at = time.perf_counter()
+         round_he_metrics = HEOperationMetrics(backend=he_status.backend)
+         selection_wall_started_at = time.perf_counter()
+@@ -1885,6 +1915,67 @@
+         if device.type == "cuda":
+             torch.cuda.empty_cache()
+ 
++    if stop_round < selection.rounds:
++        partial_summary = _summarize_lenet5_policy(
++            policy,
++            round_rows,
++            decision_rows,
++            output_dir,
++            selection.time_limit,
++            model_name,
++            dataset_label,
++        )
++        partial_summary.update(
++            {
++                "status": "paused",
++                "target_rounds": selection.rounds,
++                "next_round": stop_round,
++                "checkpoint": str(checkpoint_path),
++                "execution_revision": train_config.execution_revision,
++                "dp_accounting_mode": privacy_parameters["accounting_mode"],
++                "dp_feature_horizon_events": privacy_parameters["feature_horizon_events"],
++                "dp_update_horizon_events": privacy_parameters["update_horizon_events"],
++                "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
++                "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
++                "he_backend": he_status.backend,
++                "he_wall_time_sec": sum(
++                    float(row.get("he_wall_time_sec", 0.0)) for row in round_rows
++                ),
++                "he_worker_cpu_time_sec": sum(
++                    float(row.get("he_worker_cpu_time_sec", 0.0)) for row in round_rows
++                ),
++                "he_max_abs_error": max(
++                    (float(row.get("he_max_abs_error", 0.0)) for row in round_rows),
++                    default=0.0,
++                ),
++                "he_process_fallbacks": sum(
++                    int(row.get("he_process_fallbacks", 0)) for row in round_rows
++                ),
++            }
++        )
++        _write_csv(output_dir / "client_decisions.csv", decision_rows)
++        _write_csv(output_dir / "flow_events.csv", flow_event_rows)
++        _write_csv(output_dir / "link_state.csv", link_state_rows)
++        _write_json(output_dir / "partial_summary.json", partial_summary)
++        paused_payload = {
++            **last_completed_status,
++            "status": "paused",
++            "active_policy": policy,
++            "policy": policy,
++            "round": stop_round,
++            "rounds": selection.rounds,
++            "progress": stop_round / max(selection.rounds, 1),
++            "checkpoint": str(checkpoint_path),
++            "message": (
++                f"Stopped after {max_new_rounds} new round(s); "
++                "resume with the same target horizon"
++            ),
++            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
++        }
++        _write_live_status(output_dir / "live_status.json", paused_payload)
++        _write_live_status(parent_status_path, paused_payload)
++        return partial_summary
++
+     # Per-client test accuracy on each client's held-out data
+     per_client_test = []
+     for client_id in range(len(client_test_indices)):
+@@ -1905,6 +1996,8 @@
+     summary = _summarize_lenet5_policy(
+         policy, round_rows, decision_rows, output_dir, selection.time_limit, model_name, dataset_label,
+     )
++    summary["status"] = "completed"
++    summary["target_rounds"] = selection.rounds
+     summary["per_client_test_accuracy_mean"] = float(np.mean(client_accs))
+     summary["per_client_test_accuracy_min"] = float(np.min(client_accs))
+     summary["per_client_test_accuracy_max"] = float(np.max(client_accs))
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -1,6 +1,8 @@
+ from __future__ import annotations
+ 
++import json
+ import random
++from pathlib import Path
+ 
+ import numpy as np
+ import torch
+@@ -55,6 +57,27 @@
+     split_local_train_lenet5,
+ )
+ from dynfed.privacy import OBJECT_SIZES, PRIVACY_ALPHA
++from experiments.run_paper_config import build_command
++
++
++def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
++    config_path = (
++        Path(__file__).resolve().parents[1]
++        / "configs"
++        / "paper_v22_cifar10_resnet18.json"
++    )
++    config = json.loads(config_path.read_text(encoding="utf-8"))
++
++    command = build_command(
++        config,
++        seed=42,
++        policies=["ours"],
++        rounds=None,
++        max_new_rounds=2,
++    )
++
++    assert command[command.index("--rounds") + 1] == "200"
++    assert command[command.index("--max-new-rounds") + 1] == "2"
+ 
+ 
+ def _flow_client(client_id: int) -> ClientFlowInput:
+

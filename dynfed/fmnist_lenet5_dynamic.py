@@ -10,12 +10,16 @@ import os
 import pickle
 import platform
 import random
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
-from multiprocessing import shared_memory
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
@@ -231,6 +235,7 @@ def run_fmnist_lenet5_training(
     train_limit: int = 12000,
     test_limit: int = 2000,
     resume_from_run: str | None = None,
+    max_new_rounds: int | None = None,
     policies: tuple[str, ...] = (
         "ours",
         "fixed_dp",
@@ -240,6 +245,8 @@ def run_fmnist_lenet5_training(
         "no_protection",
     ),
 ) -> dict[str, Any]:
+    if max_new_rounds is not None and max_new_rounds < 1:
+        raise ValueError("max_new_rounds must be positive")
     output_dir = Path(selection.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(train_config.device)
@@ -378,6 +385,7 @@ def run_fmnist_lenet5_training(
             "train_limit": train_limit,
             "test_limit": test_limit,
             "resume_from_run": resume_from_run,
+            "max_new_rounds": max_new_rounds,
             "policies": list(policies),
             "runtime_environment": runtime_environment,
             "model_partition": model_partition,
@@ -428,10 +436,14 @@ def run_fmnist_lenet5_training(
                 dataset_label=dataset_label,
                 output_dir=output_dir / policy,
                 resume_from_policy_dir=(Path(resume_from_run) / policy) if resume_from_run else None,
+                max_new_rounds=max_new_rounds,
             )
         )
 
-    _write_csv(output_dir / "summary_table.csv", summaries)
+    all_completed = all(summary.get("status") == "completed" for summary in summaries)
+    summary_table_name = "summary_table.csv" if all_completed else "partial_summary_table.csv"
+    summary_table_path = output_dir / summary_table_name
+    _write_csv(summary_table_path, summaries)
     _write_json(
         output_dir / "config.json",
         {
@@ -442,6 +454,7 @@ def run_fmnist_lenet5_training(
             "train_limit": train_limit,
             "test_limit": test_limit,
             "resume_from_run": resume_from_run,
+            "max_new_rounds": max_new_rounds,
             "policies": list(policies),
             "runtime_environment": runtime_environment,
             "model_partition": model_partition,
@@ -457,16 +470,30 @@ def run_fmnist_lenet5_training(
     final_live_status = _read_json_or_empty(output_dir / "live_status.json")
     final_live_status.update(
         {
-            "status": "completed",
+            "status": "completed" if all_completed else "paused",
             "active_policy": None,
             "policy_index": len(policies),
             "num_policies": len(policies),
-            "round": selection.rounds,
+            "round": min(
+                (int(summary.get("rounds", 0)) for summary in summaries),
+                default=0,
+            ),
             "rounds": selection.rounds,
-            "progress": 1.0,
-            "summary_table": str(output_dir / "summary_table.csv"),
+            "progress": (
+                1.0
+                if all_completed
+                else min(
+                    (float(summary.get("rounds", 0)) / max(selection.rounds, 1) for summary in summaries),
+                    default=0.0,
+                )
+            ),
+            "summary_table": str(summary_table_path),
             "summaries": summaries,
-            "message": "All policies completed",
+            "message": (
+                "All policies completed"
+                if all_completed
+                else "Invocation round limit reached; checkpoints are ready to resume"
+            ),
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
     )
@@ -474,10 +501,12 @@ def run_fmnist_lenet5_training(
         output_dir / "live_status.json",
         final_live_status,
     )
-    print(f"[OK] wrote {len(summaries)} LeNet5 runs to {output_dir}")
+    outcome = "OK" if all_completed else "PAUSED"
+    print(f"[{outcome}] wrote {len(summaries)} policy runs to {output_dir}")
     return {
+        "status": "completed" if all_completed else "paused",
         "output_dir": str(output_dir),
-        "summary_table": str(output_dir / "summary_table.csv"),
+        "summary_table": str(summary_table_path),
         "summaries": summaries,
     }
 
@@ -647,6 +676,7 @@ def _run_lenet5_policy(
     dataset_label: str,
     output_dir: Path,
     resume_from_policy_dir: Path | None = None,
+    max_new_rounds: int | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     parent_status_path = output_dir.parent / "live_status.json"
@@ -884,7 +914,11 @@ def _run_lenet5_policy(
         stage="client_state_init",
     )
 
-    for round_idx in range(start_round, selection.rounds):
+    stop_round = selection.rounds
+    if max_new_rounds is not None:
+        stop_round = min(selection.rounds, start_round + max_new_rounds)
+
+    for round_idx in range(start_round, stop_round):
         round_wall_started_at = time.perf_counter()
         round_he_metrics = HEOperationMetrics(backend=he_status.backend)
         selection_wall_started_at = time.perf_counter()
@@ -1787,6 +1821,13 @@ def _run_lenet5_policy(
             "real_he_used": round_real_he_used,
             "he_aggregation_calls": current_round["he_aggregation_calls"],
             "he_ciphertext_count": current_round["he_ciphertext_count"],
+            "he_ciphertext_bytes": current_round["he_ciphertext_bytes"],
+            "he_ciphertext_bytes_semantics": current_round[
+                "he_ciphertext_bytes_semantics"
+            ],
+            "he_wall_time_sec": current_round["he_wall_time_sec"],
+            "he_worker_cpu_time_sec": current_round["he_worker_cpu_time_sec"],
+            "he_process_fallbacks": current_round["he_process_fallbacks"],
             "he_operation_time_sec": sum(
                 float(current_round[field])
                 for field in (
@@ -1874,6 +1915,67 @@ def _run_lenet5_policy(
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
+    if stop_round < selection.rounds:
+        partial_summary = _summarize_lenet5_policy(
+            policy,
+            round_rows,
+            decision_rows,
+            output_dir,
+            selection.time_limit,
+            model_name,
+            dataset_label,
+        )
+        partial_summary.update(
+            {
+                "status": "paused",
+                "target_rounds": selection.rounds,
+                "next_round": stop_round,
+                "checkpoint": str(checkpoint_path),
+                "execution_revision": train_config.execution_revision,
+                "dp_accounting_mode": privacy_parameters["accounting_mode"],
+                "dp_feature_horizon_events": privacy_parameters["feature_horizon_events"],
+                "dp_update_horizon_events": privacy_parameters["update_horizon_events"],
+                "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
+                "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
+                "he_backend": he_status.backend,
+                "he_wall_time_sec": sum(
+                    float(row.get("he_wall_time_sec", 0.0)) for row in round_rows
+                ),
+                "he_worker_cpu_time_sec": sum(
+                    float(row.get("he_worker_cpu_time_sec", 0.0)) for row in round_rows
+                ),
+                "he_max_abs_error": max(
+                    (float(row.get("he_max_abs_error", 0.0)) for row in round_rows),
+                    default=0.0,
+                ),
+                "he_process_fallbacks": sum(
+                    int(row.get("he_process_fallbacks", 0)) for row in round_rows
+                ),
+            }
+        )
+        _write_csv(output_dir / "client_decisions.csv", decision_rows)
+        _write_csv(output_dir / "flow_events.csv", flow_event_rows)
+        _write_csv(output_dir / "link_state.csv", link_state_rows)
+        _write_json(output_dir / "partial_summary.json", partial_summary)
+        paused_payload = {
+            **last_completed_status,
+            "status": "paused",
+            "active_policy": policy,
+            "policy": policy,
+            "round": stop_round,
+            "rounds": selection.rounds,
+            "progress": stop_round / max(selection.rounds, 1),
+            "checkpoint": str(checkpoint_path),
+            "message": (
+                f"Stopped after {max_new_rounds} new round(s); "
+                "resume with the same target horizon"
+            ),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _write_live_status(output_dir / "live_status.json", paused_payload)
+        _write_live_status(parent_status_path, paused_payload)
+        return partial_summary
+
     # Per-client test accuracy on each client's held-out data
     per_client_test = []
     for client_id in range(len(client_test_indices)):
@@ -1894,6 +1996,8 @@ def _run_lenet5_policy(
     summary = _summarize_lenet5_policy(
         policy, round_rows, decision_rows, output_dir, selection.time_limit, model_name, dataset_label,
     )
+    summary["status"] = "completed"
+    summary["target_rounds"] = selection.rounds
     summary["per_client_test_accuracy_mean"] = float(np.mean(client_accs))
     summary["per_client_test_accuracy_min"] = float(np.min(client_accs))
     summary["per_client_test_accuracy_max"] = float(np.max(client_accs))
@@ -1915,16 +2019,40 @@ def _run_lenet5_policy(
         "he_encrypted_parameter_values",
         "he_ciphertext_count",
         "he_ciphertext_bytes",
+        "he_process_tasks",
+        "he_process_fallbacks",
         "he_failures",
     ):
         summary[field] = int(sum(int(row.get(field, 0)) for row in round_rows))
     for field in (
+        "he_process_workers",
+        "he_process_chunks_per_task",
+        "he_shared_memory_bytes",
+        "he_mapped_update_bytes",
+    ):
+        summary[field] = int(
+            max((int(row.get(field, 0)) for row in round_rows), default=0)
+        )
+    for field in (
+        "he_wall_time_sec",
         "he_key_setup_time_sec",
         "he_encryption_time_sec",
         "he_addition_time_sec",
         "he_decryption_time_sec",
     ):
         summary[field] = float(sum(float(row.get(field, 0.0)) for row in round_rows))
+    summary["he_worker_cpu_time_sec"] = float(
+        summary["he_encryption_time_sec"]
+        + summary["he_addition_time_sec"]
+        + summary["he_decryption_time_sec"]
+    )
+    summary["he_ciphertext_bytes_semantics"] = (
+        "serialized_bytes"
+        if he_status.backend == "tenseal"
+        else "seal_save_size_upper_bound"
+        if he_status.backend == "seal"
+        else "not_applicable"
+    )
     summary["he_max_abs_error"] = max(
         (float(row.get("he_max_abs_error", 0.0)) for row in round_rows),
         default=0.0,
@@ -3275,6 +3403,22 @@ _TENSEAL_CKKS_RUNTIME: dict[str, Any] | None = None
 _SEAL_PROCESS_RUNTIME: dict[str, Any] | None = None
 
 
+def _measure_he_wall_time(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Record elapsed HE aggregation time separately from summed worker work."""
+
+    @wraps(function)
+    def measured(*args: Any, **kwargs: Any) -> Any:
+        metrics = kwargs.get("he_metrics")
+        started_at = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            if metrics is not None:
+                metrics.wall_time_sec += time.perf_counter() - started_at
+
+    return measured
+
+
 def _reset_ckks_runtime() -> None:
     global _SEAL_CKKS_RUNTIME, _TENSEAL_CKKS_RUNTIME
     _SEAL_CKKS_RUNTIME = None
@@ -3316,7 +3460,7 @@ def _seal_ckks_runtime() -> tuple[dict[str, Any], float]:
 def _init_seal_process_runtime(
     public_key_path: str,
     secret_key_path: str,
-    shared_memory_name: str,
+    update_store_path: str,
     update_count: int,
     parameter_count: int,
     factors: tuple[float, ...],
@@ -3339,14 +3483,13 @@ def _init_seal_process_runtime(
     public_key.load(context, public_key_path)
     secret_key = seal.SecretKey()
     secret_key.load(context, secret_key_path)
-    shared_block = shared_memory.SharedMemory(name=shared_memory_name)
-    updates = np.ndarray(
-        (update_count, parameter_count),
+    updates = np.memmap(
+        update_store_path,
+        mode="r",
         dtype=np.float32,
-        buffer=shared_block.buf,
+        shape=(update_count, parameter_count),
     )
     _SEAL_PROCESS_RUNTIME = {
-        "shared_block": shared_block,
         "updates": updates,
         "factors": factors,
         "encrypted_mask": encrypted_mask,
@@ -3426,6 +3569,14 @@ def _seal_process_aggregate_chunk(
     )
 
 
+def _seal_process_aggregate_chunk_batch(
+    bounds_batch: tuple[tuple[int, int], ...],
+) -> list[tuple[int, np.ndarray, int, int, float, float, float, float]]:
+    """Process adjacent parameter chunks in one executor task."""
+
+    return [_seal_process_aggregate_chunk(bounds) for bounds in bounds_batch]
+
+
 def _tenseal_ckks_runtime() -> tuple[dict[str, Any], float]:
     global _TENSEAL_CKKS_RUNTIME
     if _TENSEAL_CKKS_RUNTIME is not None:
@@ -3451,6 +3602,7 @@ def _tenseal_ckks_runtime() -> tuple[dict[str, Any], float]:
     return _TENSEAL_CKKS_RUNTIME, time.perf_counter() - started_at
 
 
+@_measure_he_wall_time
 def fedavg_split_tenseal(
     state_diffs: list[dict[str, dict[str, torch.Tensor]]],
     sample_counts: list[float],
@@ -3559,6 +3711,7 @@ def fedavg_split_tenseal(
     return global_end, global_edge
 
 
+@_measure_he_wall_time
 def fedavg_split_seal(
     state_diffs: list[dict[str, dict[str, torch.Tensor]]],
     sample_counts: list[float],
@@ -3594,17 +3747,29 @@ def fedavg_split_seal(
         )
     mask = _validated_encrypted_mask(encrypted_mask, len(state_diffs))
     if int(he_workers) > 1 and any(mask):
-        return _fedavg_split_seal_processes(
-            state_diffs,
-            sample_counts,
-            global_end,
-            global_edge,
-            device,
-            chunk_size=chunk_size,
-            encrypted_mask=mask,
-            he_workers=he_workers,
-            he_metrics=he_metrics,
-        )
+        metrics_snapshot = copy.deepcopy(he_metrics)
+        try:
+            return _fedavg_split_seal_processes(
+                state_diffs,
+                sample_counts,
+                global_end,
+                global_edge,
+                device,
+                chunk_size=chunk_size,
+                encrypted_mask=mask,
+                he_workers=he_workers,
+                he_metrics=he_metrics,
+            )
+        except (BrokenProcessPool, MemoryError, OSError) as exc:
+            if he_metrics is not None and metrics_snapshot is not None:
+                he_metrics.__dict__.update(metrics_snapshot.__dict__)
+                he_metrics.process_fallbacks += 1
+            warnings.warn(
+                "Parallel SEAL aggregation failed; retrying the same full update "
+                f"in one process. Cause: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     work_device = torch.device("cpu")
     flat_updates = [
         _flatten_state_diff(diff, global_end, global_edge, work_device)
@@ -3706,21 +3871,43 @@ def _fedavg_split_seal_processes(
     if update_count == 0:
         return global_end, global_edge
 
-    runtime, key_setup_time_sec = _seal_ckks_runtime()
     total = max(1.0, float(sum(sample_counts)))
     factors = tuple(float(count) / total for count in sample_counts)
     mask = tuple(_validated_encrypted_mask(encrypted_mask, update_count))
     worker_count = max(1, min(int(he_workers), os.cpu_count() or 1))
-    shared_block = shared_memory.SharedMemory(
-        create=True,
-        size=update_count * parameter_count * np.dtype(np.float32).itemsize,
+    mapped_update_bytes = (
+        update_count * parameter_count * np.dtype(np.float32).itemsize
     )
-    updates = np.ndarray(
-        (update_count, parameter_count),
-        dtype=np.float32,
-        buffer=shared_block.buf,
+    runtime, key_setup_time_sec = _seal_ckks_runtime()
+    aggregated_array = np.empty(parameter_count, dtype=np.float32)
+    configured_temp_root = os.environ.get("DYNFL_HE_TMPDIR")
+    he_temp_root = (
+        Path(configured_temp_root).resolve()
+        if configured_temp_root
+        else ROOT / "out" / ".he_tmp"
     )
-    try:
+    he_temp_root.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(
+        prefix="dynfl_seal_process_",
+        dir=he_temp_root,
+    ) as temp_dir:
+        free_bytes = shutil.disk_usage(temp_dir).free
+        required_free_bytes = mapped_update_bytes + 512 * 1024 ** 2
+        if free_bytes < required_free_bytes:
+            raise OSError(
+                "SEAL process aggregation needs a file-backed update store of "
+                f"{mapped_update_bytes / (1024 ** 3):.2f} GiB, but the temporary "
+                f"drive has only {free_bytes / (1024 ** 3):.2f} GiB free."
+            )
+
+        update_store_path = str(Path(temp_dir) / "weighted_updates.float32")
+        updates = np.memmap(
+            update_store_path,
+            mode="w+",
+            dtype=np.float32,
+            shape=(update_count, parameter_count),
+        )
         for row_index, state_diff in enumerate(state_diffs):
             flattened = _flatten_state_diff(
                 state_diff,
@@ -3729,24 +3916,35 @@ def _fedavg_split_seal_processes(
                 torch.device("cpu"),
             )
             updates[row_index] = flattened.numpy()
+        updates.flush()
 
-        aggregated_array = np.empty(parameter_count, dtype=np.float32)
         chunk_bounds = [
             (start, min(start + chunk_size, parameter_count))
             for start in range(0, parameter_count, chunk_size)
         ]
-        with tempfile.TemporaryDirectory(prefix="dynfl_seal_keys_") as temp_dir:
-            public_key_path = str(Path(temp_dir) / "public_key.bin")
-            secret_key_path = str(Path(temp_dir) / "secret_key.bin")
-            runtime["public_key"].save(public_key_path)
-            runtime["secret_key"].save(secret_key_path)
+        chunks_per_task = max(
+            1,
+            min(
+                32,
+                int(np.ceil(len(chunk_bounds) / max(1, worker_count * 8))),
+            ),
+        )
+        chunk_batches = [
+            tuple(chunk_bounds[index:index + chunks_per_task])
+            for index in range(0, len(chunk_bounds), chunks_per_task)
+        ]
+        public_key_path = str(Path(temp_dir) / "public_key.bin")
+        secret_key_path = str(Path(temp_dir) / "secret_key.bin")
+        runtime["public_key"].save(public_key_path)
+        runtime["secret_key"].save(secret_key_path)
+        try:
             with ProcessPoolExecutor(
                 max_workers=worker_count,
                 initializer=_init_seal_process_runtime,
                 initargs=(
                     public_key_path,
                     secret_key_path,
-                    shared_block.name,
+                    update_store_path,
                     update_count,
                     parameter_count,
                     factors,
@@ -3754,41 +3952,51 @@ def _fedavg_split_seal_processes(
                 ),
             ) as executor:
                 results = executor.map(
-                    _seal_process_aggregate_chunk,
-                    chunk_bounds,
+                    _seal_process_aggregate_chunk_batch,
+                    chunk_batches,
                     chunksize=1,
                 )
-                for (
-                    start,
-                    decoded,
-                    ciphertext_count,
-                    ciphertext_bytes,
-                    encryption_time,
-                    addition_time,
-                    decryption_time,
-                    max_abs_error,
-                ) in results:
-                    stop = start + int(decoded.size)
-                    aggregated_array[start:stop] = decoded
-                    if he_metrics is not None:
-                        he_metrics.ciphertext_count += ciphertext_count
-                        he_metrics.ciphertext_bytes += ciphertext_bytes
-                        he_metrics.encryption_time_sec += encryption_time
-                        he_metrics.addition_time_sec += addition_time
-                        he_metrics.decryption_time_sec += decryption_time
-                        he_metrics.max_abs_error = max(
-                            he_metrics.max_abs_error,
-                            max_abs_error,
-                        )
-    finally:
-        shared_block.close()
-        shared_block.unlink()
+                for batch_results in results:
+                    for (
+                        start,
+                        decoded,
+                        ciphertext_count,
+                        ciphertext_bytes,
+                        encryption_time,
+                        addition_time,
+                        decryption_time,
+                        max_abs_error,
+                    ) in batch_results:
+                        stop = start + int(decoded.size)
+                        aggregated_array[start:stop] = decoded
+                        if he_metrics is not None:
+                            he_metrics.ciphertext_count += ciphertext_count
+                            he_metrics.ciphertext_bytes += ciphertext_bytes
+                            he_metrics.encryption_time_sec += encryption_time
+                            he_metrics.addition_time_sec += addition_time
+                            he_metrics.decryption_time_sec += decryption_time
+                            he_metrics.max_abs_error = max(
+                                he_metrics.max_abs_error,
+                                max_abs_error,
+                            )
+        finally:
+            del updates
 
     if he_metrics is not None:
         he_metrics.key_setup_time_sec += key_setup_time_sec
         he_metrics.aggregation_calls += 1
         he_metrics.encrypted_updates += sum(mask)
         he_metrics.encrypted_parameter_values += parameter_count * sum(mask)
+        he_metrics.process_workers = max(he_metrics.process_workers, worker_count)
+        he_metrics.process_tasks += len(chunk_batches)
+        he_metrics.process_chunks_per_task = max(
+            he_metrics.process_chunks_per_task,
+            chunks_per_task,
+        )
+        he_metrics.mapped_update_bytes = max(
+            he_metrics.mapped_update_bytes,
+            mapped_update_bytes,
+        )
     aggregated_tensor = torch.from_numpy(aggregated_array)
     _apply_flat_update(aggregated_tensor, global_end, global_edge)
     return global_end, global_edge
@@ -3880,6 +4088,7 @@ def _fedavg_split_bounded_he_streaming(
     return global_end, global_edge
 
 
+@_measure_he_wall_time
 def _fedavg_prefix_seal(
     prefix_updates: list[torch.Tensor],
     sample_counts: list[int],
@@ -3970,6 +4179,7 @@ def _fedavg_prefix_seal(
     return torch.tensor(decoded, dtype=torch.float32)
 
 
+@_measure_he_wall_time
 def _fedavg_prefix_tenseal(
     prefix_updates: list[torch.Tensor],
     sample_counts: list[int],
@@ -4206,6 +4416,27 @@ def _runtime_environment(device: torch.device) -> dict[str, Any]:
     cuda_device_name = None
     if cuda_available:
         cuda_device_name = torch.cuda.get_device_name(device if device.type == "cuda" else 0)
+    git_commit = None
+    git_dirty = None
+    try:
+        git_commit_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        git_status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        git_commit = git_commit_result.stdout.strip() or None
+        git_dirty = bool(git_status_result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
     return {
         "python_version": sys.version,
         "platform": platform.platform(),
@@ -4215,6 +4446,8 @@ def _runtime_environment(device: torch.device) -> dict[str, Any]:
         "cuda_available": cuda_available,
         "cuda_version": torch.version.cuda,
         "cuda_device_name": cuda_device_name,
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
         "package_versions": package_versions,
     }
 
