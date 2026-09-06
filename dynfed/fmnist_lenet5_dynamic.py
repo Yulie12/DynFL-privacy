@@ -44,13 +44,15 @@ from .lenet5_training import (
 from .split_learning import (
     apply_unified_dp,
     build_split_pair,
+    clip_state_difference,
     fedavg_split,
+    gaussian_state_difference,
     normalize_model_name,
     split_evaluate,
     split_local_train_lenet5,
 )
 from .nodes import build_profiles
-from .privacy import ClientPrivacyLedger
+from .privacy import ClientPrivacyLedger, mechanism_uses_dp
 from .selection import (
     Candidate,
     ProfileEvaluation,
@@ -69,6 +71,7 @@ from .selection import (
     _local_omega_proxy as selection_local_omega_proxy,
 )
 from .training import MODE_SPECS
+from .version import CURRENT_EXECUTION_REVISION
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,7 +94,7 @@ class Lenet5Config:
     dataset_name: str = "fmnist"
     model_name: str = "lenet5"
     model_revision: str = "groupnorm_v2"
-    execution_revision: str = "paper_flow_v22_wall_raw_nsga"
+    execution_revision: str = CURRENT_EXECUTION_REVISION
     local_epochs: int = 1
     learning_rate: float = 0.15
     l2: float = 0.0001
@@ -104,6 +107,7 @@ class Lenet5Config:
     test_size: float = 0.25
     device: str = "cpu"
     he_backend: str = "none"
+    he_execution: str = "real"
     he_local_deps: str | None = ".he_deps"
     require_real_he: bool = False
     he_aggregation_size: int = 0
@@ -127,13 +131,16 @@ def _should_apply_update_dp(
     return mode != "LIEIIIC"
 
 
-def _candidate_training_mechanisms(candidate: Candidate) -> dict[str, str]:
+def _candidate_training_mechanisms(
+    candidate: Candidate,
+    aggregate_cloud_update_dp: bool = False,
+) -> dict[str, str]:
     mechanisms = dict(candidate.mechanisms)
     feature_links = {
-        "LIE": ("L_E_emb", "E_L_grad"),
-        "LIC": ("L_C_emb", "C_L_grad"),
-        "LIEIIC": ("L_E_emb", "E_L_grad"),
-        "LIEIIIC": ("L_E_emb", "E_L_grad"),
+        "LIE": ("L_E_emb", "L_E_grad"),
+        "LIC": ("L_C_emb", "L_C_grad"),
+        "LIEIIC": ("L_E_emb", "L_E_grad"),
+        "LIEIIIC": ("L_E_emb", "L_E_grad"),
     }
     links = feature_links.get(candidate.mode)
     if links is not None:
@@ -152,6 +159,11 @@ def _candidate_training_mechanisms(candidate: Candidate) -> dict[str, str]:
     }.get(candidate.mode)
     if update_link is not None:
         mechanisms["upd"] = candidate_link_mechanism(candidate, update_link)
+    if (
+        aggregate_cloud_update_dp
+        and _candidate_cloud_update_mechanism(candidate) == "dp"
+    ):
+        mechanisms["upd"] = "none"
     return mechanisms
 
 
@@ -173,6 +185,16 @@ def _candidate_edge_update_mechanism(candidate: Candidate | None) -> str:
     if candidate is None or candidate.mode not in {"LIIE", "LIIEIIIC"}:
         return "none"
     return candidate_link_mechanism(candidate, "L_E_upd")
+
+
+def _candidate_uses_aggregate_update_dp(
+    candidate: Candidate | None,
+    trusted_edge_split_execution: bool = False,
+) -> bool:
+    mechanism = _candidate_cloud_update_mechanism(candidate)
+    return mechanism == "he3_dp" or (
+        trusted_edge_split_execution and mechanism == "dp"
+    )
 
 
 def _client_train_worker(
@@ -732,9 +754,12 @@ def _run_lenet5_policy(
     he_status = check_he_backend(train_config.he_backend, train_config.he_local_deps)
     _reset_ckks_runtime()
     real_he_available = he_status.available and he_status.backend in {"seal", "tenseal"}
-    if train_config.require_real_he and not real_he_available:
+    if train_config.he_execution not in {"real", "profiled"}:
+        raise ValueError("he_execution must be real or profiled")
+    execute_real_he = train_config.he_execution == "real" and real_he_available
+    if train_config.require_real_he and not execute_real_he:
         raise RuntimeError(
-            "Real HE was required, but no supported CKKS backend is available: "
+            "Real HE execution was required, but it is not enabled or unavailable: "
             f"{he_status.detail}"
         )
     if policy == "fixed_he" and not real_he_available:
@@ -810,6 +835,13 @@ def _run_lenet5_policy(
                 f"checkpoint={saved_execution_revision!r}, "
                 f"requested={train_config.execution_revision!r}. Start a new run so "
                 "aggregation semantics do not change mid-training."
+            )
+        saved_he_execution = saved_training.get("he_execution", "real")
+        if saved_he_execution != train_config.he_execution:
+            raise RuntimeError(
+                "Cannot resume across different HE execution modes: "
+                f"checkpoint={saved_he_execution!r}, "
+                f"requested={train_config.he_execution!r}."
             )
         saved_privacy_ledgers = checkpoint.get("privacy_ledgers")
         if not saved_privacy_ledgers:
@@ -931,6 +963,7 @@ def _run_lenet5_policy(
         selected = []
         round_comm = 0.0
         round_risk = 0.0
+        round_decision_rows_by_client: dict[int, dict[str, Any]] = {}
         infeasible = 0
         forced_feasibility_repair = False
 
@@ -986,7 +1019,11 @@ def _run_lenet5_policy(
             or round_idx % selection_period == 0
             or forced_feasibility_repair
         )
-        if policy in {"ours", "ours_fixed_liieiiic"} and should_update_policy:
+        if (
+            policy in {"ours", "ours_fixed_liieiiic"}
+            and should_update_policy
+            and bool(privacy_parameters["feature_dp_enabled"])
+        ):
             emit_stage_status(
                 f"Round {round_idx + 1}/{selection.rounds}: assigning public feature clip estimate",
                 stage="feature_clip_profiles",
@@ -1047,6 +1084,10 @@ def _run_lenet5_policy(
             "no_protection",
             "fixed_fedavg",
             "fixed_splitfed",
+            "fixed_splitfed_no_protection",
+            "fixed_splitfed_label_dp",
+            "fixed_splitfed_trusted_edge",
+            "fixed_splitfed_dp",
             "fixed_hfl",
             "nsga2",
         } and should_update_policy:
@@ -1081,6 +1122,10 @@ def _run_lenet5_policy(
             "no_protection",
             "fixed_fedavg",
             "fixed_splitfed",
+            "fixed_splitfed_no_protection",
+            "fixed_splitfed_label_dp",
+            "fixed_splitfed_trusted_edge",
+            "fixed_splitfed_dp",
             "fixed_hfl",
             "nsga2",
         } and profile_evaluation is None:
@@ -1100,14 +1145,12 @@ def _run_lenet5_policy(
             round_risk = max(round_risk, candidate.risk)
             infeasible += int(not candidate.feasible)
             ledger = privacy_ledgers[client_id]
-            projection = ledger.add(
+            projection = ledger.project(
                 candidate.feature_dp_events,
                 candidate.update_dp_events,
             )
-            remaining_epsilon[client_id] = ledger.remaining_budget
-            rem = remaining_epsilon[client_id]
-            decision_rows.append(
-                {
+            rem = ledger.remaining_budget
+            row = {
                     "policy": policy,
                     "round": round_idx,
                     "client_id": client_id,
@@ -1124,8 +1167,10 @@ def _run_lenet5_policy(
                     "remaining_epsilon": rem,
                     "feature_dp_events": candidate.feature_dp_events,
                     "update_dp_events": candidate.update_dp_events,
-                    "feature_epsilon": projection.feature_epsilon_after,
-                    "update_epsilon": projection.update_epsilon_after,
+                    "feature_epsilon": ledger.feature.current_epsilon(),
+                    "update_epsilon": ledger.update.current_epsilon(),
+                    "projected_feature_epsilon": projection.feature_epsilon_after,
+                    "projected_update_epsilon": projection.update_epsilon_after,
                     "communication_volume": candidate.communication_volume,
                     "feasible": candidate.feasible,
                     "feasible_resource": candidate.feasible_resource,
@@ -1141,7 +1186,8 @@ def _run_lenet5_policy(
                         None,
                     ),
                 }
-            )
+            decision_rows.append(row)
+            round_decision_rows_by_client[client_id] = row
             for metric in candidate.link_metrics:
                 link_state_rows.append(
                     {
@@ -1290,6 +1336,24 @@ def _run_lenet5_policy(
             round_value=round_idx,
         )
         selected_by_id = {client_id: candidate for client_id, candidate, _candidates, _rem in selected}
+        admitted_client_ids = set(flow_result.selected_client_ids)
+        for client_id, candidate in selected_by_id.items():
+            ledger = privacy_ledgers[client_id]
+            row = round_decision_rows_by_client[client_id]
+            if client_id in admitted_client_ids:
+                projection = ledger.add(
+                    candidate.feature_dp_events,
+                    candidate.update_dp_events,
+                )
+                row["feature_dp_events"] = projection.feature_events
+                row["update_dp_events"] = projection.update_events
+            else:
+                row["feature_dp_events"] = 0
+                row["update_dp_events"] = 0
+            remaining_epsilon[client_id] = ledger.remaining_budget
+            row["remaining_epsilon"] = ledger.remaining_budget
+            row["feature_epsilon"] = ledger.feature.current_epsilon()
+            row["update_epsilon"] = ledger.update.current_epsilon()
         round_real_he_used = False
         round_real_he_clients = 0
         multi_edge_loop_client_cycles = 0
@@ -1378,7 +1442,7 @@ def _run_lenet5_policy(
                     he_aggregation_size=train_config.he_aggregation_size,
                     he_backend=(
                         he_status.backend
-                        if real_he_available and mode == "LIIEIIIC"
+                        if execute_real_he and mode == "LIIEIIIC"
                         else "none"
                     ),
                     he_metrics=round_he_metrics,
@@ -1434,7 +1498,10 @@ def _run_lenet5_policy(
             for candidate in admitted_candidates
         )
         num_update_dp_clients = sum(
-            "dp" in candidate_mechanisms_for_object(candidate, "upd")
+            any(
+                mechanism_uses_dp(mechanism)
+                for mechanism in candidate_mechanisms_for_object(candidate, "upd")
+            )
             for candidate in admitted_candidates
         )
         num_he_clients = sum(
@@ -1453,6 +1520,9 @@ def _run_lenet5_policy(
         actual_cloud_share_of_admitted = actual_cloud_samples / actual_admitted_samples
 
         cloud_updates: list[tuple[Any, int, Candidate | None, list[int]]] = []
+        cloud_update_dp_fractions: list[float] = []
+        aggregate_dp_clip_scales: list[float] = []
+        aggregate_dp_clipped_clients = 0
         edge_cloud_groups: dict[tuple[int, str, str], list[tuple[int, Any, int, Candidate | None]]] = {}
         for client_id, state_diff, sample_count, candidate in global_updates:
             if candidate is not None and candidate.mode in EDGE_CLOUD_MODES:
@@ -1465,43 +1535,99 @@ def _run_lenet5_policy(
                     (client_id, state_diff, sample_count, candidate)
                 )
             else:
+                relative_update = _state_difference_from_client_update(
+                    client_id=client_id,
+                    state_diff=state_diff,
+                    client_model_states=client_model_states,
+                    global_end=global_end,
+                    global_edge=global_edge,
+                    device=torch.device("cpu"),
+                )
+                if _candidate_uses_aggregate_update_dp(
+                    candidate,
+                    effective_selection.trusted_edge_split_execution,
+                ):
+                    relative_update, _original_norm, clip_scale = clip_state_difference(
+                        relative_update,
+                        train_config.dp_clip_norm,
+                        torch.device("cpu"),
+                    )
+                    aggregate_dp_clip_scales.append(clip_scale)
+                    aggregate_dp_clipped_clients += 1
                 cloud_updates.append(
                     (
-                        _state_difference_from_client_update(
-                            client_id=client_id,
-                            state_diff=state_diff,
-                            client_model_states=client_model_states,
-                            global_end=global_end,
-                            global_edge=global_edge,
-                            device=torch.device("cpu"),
-                        ),
+                        relative_update,
                         sample_count,
                         candidate,
                         [client_id],
                     )
                 )
+                cloud_update_dp_fractions.append(
+                    1.0
+                    if _candidate_uses_aggregate_update_dp(
+                        candidate,
+                        effective_selection.trusted_edge_split_execution,
+                    )
+                    else 0.0
+                )
 
         for edge_id, updates in edge_cloud_groups.items():
-            edge_state, _edge_used_he = _aggregate_returned_client_models(
-                updates=updates,
-                client_model_states=client_model_states,
-                global_end=global_end,
-                global_edge=global_edge,
-                device=device,
-                model_name=model_name,
-                input_shape=input_shape,
-                num_classes=num_classes,
-                he_aggregation_size=train_config.he_aggregation_size,
-                he_backend="none",
-                he_metrics=round_he_metrics,
-            )
             representative = updates[0][3]
-            edge_update = _state_difference_from_model(
-                edge_state,
-                global_end,
-                global_edge,
-                torch.device("cpu"),
+            aggregate_dp = _candidate_uses_aggregate_update_dp(
+                representative,
+                effective_selection.trusted_edge_split_execution,
             )
+            if aggregate_dp:
+                clipped_updates = []
+                clipped_counts = []
+                for client_id, state_diff, sample_count, _candidate in updates:
+                    relative_update = _state_difference_from_client_update(
+                        client_id=client_id,
+                        state_diff=state_diff,
+                        client_model_states=client_model_states,
+                        global_end=global_end,
+                        global_edge=global_edge,
+                        device=torch.device("cpu"),
+                    )
+                    clipped, _original_norm, clip_scale = clip_state_difference(
+                        relative_update,
+                        train_config.dp_clip_norm,
+                        torch.device("cpu"),
+                    )
+                    clipped_updates.append(clipped)
+                    clipped_counts.append(sample_count)
+                    aggregate_dp_clip_scales.append(clip_scale)
+                edge_update = _weighted_average_state_differences(
+                    clipped_updates,
+                    clipped_counts,
+                )
+                aggregate_dp_clipped_clients += len(updates)
+                group_total = max(float(sum(clipped_counts)), 1e-12)
+                max_client_fraction = max(
+                    (float(count) / group_total for count in clipped_counts),
+                    default=0.0,
+                )
+            else:
+                edge_state, _edge_used_he = _aggregate_returned_client_models(
+                    updates=updates,
+                    client_model_states=client_model_states,
+                    global_end=global_end,
+                    global_edge=global_edge,
+                    device=device,
+                    model_name=model_name,
+                    input_shape=input_shape,
+                    num_classes=num_classes,
+                    he_aggregation_size=train_config.he_aggregation_size,
+                    he_backend="none",
+                    he_metrics=round_he_metrics,
+                )
+                edge_update = _state_difference_from_model(
+                    edge_state,
+                    global_end,
+                    global_edge,
+                    torch.device("cpu"),
+                )
+                max_client_fraction = 0.0
             if _candidate_cloud_update_mechanism(representative) == "dp":
                 edge_update = apply_unified_dp(
                     edge_update,
@@ -1521,6 +1647,7 @@ def _run_lenet5_policy(
                     [item[0] for item in updates],
                 )
             )
+            cloud_update_dp_fractions.append(max_client_fraction)
 
         cloud_input_update_norms = [
             _state_difference_l2_norm(state_diff)
@@ -1531,10 +1658,23 @@ def _run_lenet5_policy(
             client_edges=client_edges,
             edge_total_samples=edge_total_samples,
         )
-        global_update_norm = _weighted_state_difference_norm(
+        pre_dp_global_update_norm = _weighted_state_difference_norm(
             [item[0] for item in cloud_updates],
             global_aggregation_weights,
         )
+        global_update_norm = pre_dp_global_update_norm
+        (
+            aggregate_dp_max_client_weight,
+            aggregate_dp_sensitivity,
+            aggregate_dp_noise_std,
+        ) = _aggregate_dp_release_parameters(
+            global_aggregation_weights,
+            cloud_update_dp_fractions,
+            clip_norm=train_config.dp_clip_norm,
+            noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
+        )
+        aggregate_dp_release = aggregate_dp_max_client_weight > 0.0
+        aggregate_dp_noise_norm = 0.0
         cloud_edge_ratios = _cloud_edge_sample_ratios(
             cloud_updates,
             client_edges=client_edges,
@@ -1560,7 +1700,7 @@ def _run_lenet5_policy(
                 input_shape=input_shape,
                 num_classes=num_classes,
                 he_aggregation_size=train_config.he_aggregation_size,
-                he_backend=he_status.backend if real_he_available else "none",
+                he_backend=he_status.backend if execute_real_he else "none",
                 he_metrics=round_he_metrics,
             )
             shared_returned_state = _state_dict_to_device_nested(
@@ -1589,7 +1729,7 @@ def _run_lenet5_policy(
                 for candidate in global_candidates
             ]
             use_real_he = (
-                real_he_available
+                execute_real_he
                 and any(global_he_mask)
             )
             if use_real_he:
@@ -1626,6 +1766,34 @@ def _run_lenet5_policy(
                 global_end, global_edge = fedavg_split(
                     global_state_diffs,
                     global_sample_counts,
+                    global_end,
+                    global_edge,
+                    device,
+                )
+            if aggregate_dp_release:
+                aggregate_signal = _weighted_average_state_differences(
+                    global_state_diffs,
+                    global_sample_counts,
+                )
+                aggregate_noise = gaussian_state_difference(
+                    {
+                        "end": dict(global_end.named_parameters()),
+                        "edge": dict(global_edge.named_parameters()),
+                    },
+                    aggregate_dp_noise_std,
+                    np.random.default_rng(
+                        _dp_noise_seed(selection.seed, round_idx, "global_aggregate", 20_000)
+                    ),
+                    torch.device("cpu"),
+                )
+                aggregate_dp_noise_norm = _state_difference_l2_norm(aggregate_noise)
+                global_update_norm = _summed_state_difference_norm(
+                    aggregate_signal,
+                    aggregate_noise,
+                )
+                global_end, global_edge = fedavg_split(
+                    [aggregate_noise],
+                    [1.0],
                     global_end,
                     global_edge,
                     device,
@@ -1667,6 +1835,10 @@ def _run_lenet5_policy(
             + time.perf_counter()
             - policy_started_at
         )
+        cumulative_selection_wall_time_sec = sum(
+            float(row.get("selection_wall_time_sec", 0.0)) for row in round_rows
+        ) + selection_wall_time_sec
+        accounted_system_time_sec = logical_time + cumulative_selection_wall_time_sec
         accounted_phase_wall_time_sec = (
             selection_wall_time_sec
             + training_wall_time_sec
@@ -1680,6 +1852,7 @@ def _run_lenet5_policy(
                 "policy": policy,
                 "round": round_idx,
                 "logical_time": logical_time,
+                "accounted_system_time_sec": accounted_system_time_sec,
                 "round_duration": flow_result.round_duration,
                 "round_wall_time_sec": round_wall_time_sec,
                 "cumulative_wall_time_sec": cumulative_wall_time_sec,
@@ -1711,6 +1884,11 @@ def _run_lenet5_policy(
                 "max_update_epsilon": max(
                     ledger.update.current_epsilon() for ledger in privacy_ledgers.values()
                 ),
+                "privacy_guarantee": (
+                    "trusted_edge_and_client_update"
+                    if effective_selection.trusted_edge_split_execution
+                    else "record_feature_and_client_update"
+                ),
                 "infeasible_clients": infeasible,
                 "skipped_clients": skipped_clients,
                 "num_effective_clients": len(flow_result.selected_client_ids),
@@ -1720,7 +1898,16 @@ def _run_lenet5_policy(
                 "admitted_update_norm_max": max(admitted_update_norms, default=0.0),
                 "cloud_input_update_norm_mean": _list_mean(cloud_input_update_norms),
                 "cloud_input_update_norm_max": max(cloud_input_update_norms, default=0.0),
+                "pre_dp_global_update_norm": pre_dp_global_update_norm,
                 "global_update_norm": global_update_norm,
+                "aggregate_dp_release": int(aggregate_dp_release),
+                "aggregate_dp_clipped_clients": aggregate_dp_clipped_clients,
+                "aggregate_dp_clip_scale_mean": _list_mean(aggregate_dp_clip_scales),
+                "aggregate_dp_clip_scale_min": min(aggregate_dp_clip_scales, default=1.0),
+                "aggregate_dp_max_client_weight": aggregate_dp_max_client_weight,
+                "aggregate_dp_sensitivity": aggregate_dp_sensitivity,
+                "aggregate_dp_noise_std": aggregate_dp_noise_std,
+                "aggregate_dp_noise_norm": aggregate_dp_noise_norm,
                 "num_feature_dp_clients": num_feature_dp_clients,
                 "num_update_dp_clients": num_update_dp_clients,
                 "num_he_clients": num_he_clients,
@@ -1800,7 +1987,11 @@ def _run_lenet5_policy(
             "larger_channel_epsilon": larger_channel_epsilon,
             "feature_epsilon": max_feature_epsilon,
             "update_epsilon": max_update_epsilon,
-            "privacy_guarantee": "record_feature_and_client_update",
+            "privacy_guarantee": (
+                "trusted_edge_and_client_update"
+                if effective_selection.trusted_edge_split_execution
+                else "record_feature_and_client_update"
+            ),
             "dp_delta": privacy_parameters["delta"],
             "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
             "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
@@ -1934,10 +2125,13 @@ def _run_lenet5_policy(
                 "execution_revision": train_config.execution_revision,
                 "dp_accounting_mode": privacy_parameters["accounting_mode"],
                 "dp_feature_horizon_events": privacy_parameters["feature_horizon_events"],
+                "dp_feature_enabled": privacy_parameters["feature_dp_enabled"],
                 "dp_update_horizon_events": privacy_parameters["update_horizon_events"],
+                "trusted_edge_split_execution": effective_selection.trusted_edge_split_execution,
                 "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
                 "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
                 "he_backend": he_status.backend,
+                "he_execution": train_config.he_execution,
                 "he_wall_time_sec": sum(
                     float(row.get("he_wall_time_sec", 0.0)) for row in round_rows
                 ),
@@ -2004,6 +2198,7 @@ def _run_lenet5_policy(
     summary["per_client_test_accuracy_std"] = float(np.std(client_accs))
     summary["per_client_test"] = per_client_test
     summary["he_backend"] = he_status.backend
+    summary["he_execution"] = train_config.he_execution
     summary["he_available"] = he_status.available
     summary["he_status"] = he_status.detail
     summary["real_he_available"] = real_he_available
@@ -2071,6 +2266,8 @@ def _run_lenet5_policy(
     summary["dp_update_noise_multiplier"] = privacy_parameters["update_noise_multiplier"]
     summary["dp_feature_horizon_events"] = privacy_parameters["feature_horizon_events"]
     summary["dp_update_horizon_events"] = privacy_parameters["update_horizon_events"]
+    summary["dp_feature_enabled"] = privacy_parameters["feature_dp_enabled"]
+    summary["trusted_edge_split_execution"] = effective_selection.trusted_edge_split_execution
     summary["tracks_returned_client_models"] = True
     summary["privacy_policy_scope"] = "per_link"
     summary["torch_seed"] = selection.seed
@@ -2082,11 +2279,16 @@ def _run_lenet5_policy(
     )
     summary["wall_time_sec"] = end_to_end_wall_time_sec
     summary["end_to_end_wall_time_sec"] = end_to_end_wall_time_sec
+    summary["accounted_system_time_sec"] = (
+        float(summary["total_logical_time"])
+        + float(summary["total_selection_wall_time_sec"])
+    )
     summary["timing_scope"] = {
         "end_to_end_wall_time_sec": "policy initialization through final summary preparation",
         "cumulative_wall_time_sec": "policy initialization through each completed round",
         "total_round_wall_time_sec": "sum of measured training rounds",
         "total_logical_time": "modeled cloud-edge-end execution path",
+        "accounted_system_time_sec": "modeled execution path plus measured mode selection",
     }
     _write_csv(output_dir / "round_metrics.csv", round_rows)
     _write_csv(output_dir / "client_decisions.csv", decision_rows)
@@ -2205,7 +2407,10 @@ def _run_client_training_tasks(
             "model_name": model_name,
             "input_shape": input_shape,
             "num_classes": num_classes,
-            "mechanisms": _candidate_training_mechanisms(candidate),
+            "mechanisms": _candidate_training_mechanisms(
+                candidate,
+                aggregate_cloud_update_dp=selection.trusted_edge_split_execution,
+            ),
             "dp_clip_norm": train_config.dp_clip_norm,
             "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
             "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
@@ -2651,6 +2856,53 @@ def _state_difference_l2_norm(
     return _weighted_state_difference_norm([state_diff], [1])
 
 
+def _weighted_average_state_differences(
+    state_diffs: list[dict[str, dict[str, torch.Tensor]]],
+    sample_counts: list[float],
+    device: torch.device = torch.device("cpu"),
+) -> dict[str, dict[str, torch.Tensor]]:
+    if not state_diffs:
+        return {"end": {}, "edge": {}}
+    total = max(1e-12, sum(max(float(count), 0.0) for count in sample_counts))
+    averaged: dict[str, dict[str, torch.Tensor]] = {}
+    for state_diff, count in zip(state_diffs, sample_counts):
+        factor = max(float(count), 0.0) / total
+        for part_name, values in state_diff.items():
+            target = averaged.setdefault(part_name, {})
+            for name, value in values.items():
+                weighted = value.detach().to(device) * factor
+                if name in target:
+                    target[name].add_(weighted)
+                else:
+                    target[name] = weighted.clone()
+    return averaged
+
+
+def _summed_state_difference_norm(
+    first: dict[str, dict[str, torch.Tensor]],
+    second: dict[str, dict[str, torch.Tensor]],
+) -> float:
+    norm_sq = 0.0
+    for part_name in set(first) | set(second):
+        first_part = first.get(part_name, {})
+        second_part = second.get(part_name, {})
+        for name in set(first_part) | set(second_part):
+            left = first_part.get(name)
+            right = second_part.get(name)
+            if left is None:
+                value = right
+            elif right is None:
+                value = left
+            else:
+                value = left.detach().to(torch.device("cpu"), dtype=torch.float64)
+                value = value + right.detach().to(torch.device("cpu"), dtype=torch.float64)
+            if value is not None and (
+                torch.is_floating_point(value) or torch.is_complex(value)
+            ):
+                norm_sq += float(torch.sum(torch.abs(value) ** 2).item())
+    return float(np.sqrt(max(norm_sq, 0.0)))
+
+
 def _weighted_state_difference_norm(
     state_diffs: list[dict[str, dict[str, torch.Tensor]]],
     sample_counts: list[float],
@@ -2686,6 +2938,39 @@ def _cloud_update_edge(
     if len(edges) != 1:
         raise ValueError("A cloud aggregation object must belong to exactly one edge domain.")
     return next(iter(edges))
+
+
+def _aggregate_dp_release_parameters(
+    aggregation_weights: list[float],
+    within_item_client_fractions: list[float],
+    *,
+    clip_norm: float,
+    noise_multiplier: float,
+) -> tuple[float, float, float]:
+    """Return max client weight, replacement sensitivity, and Gaussian std."""
+    if len(aggregation_weights) != len(within_item_client_fractions):
+        raise ValueError("DP client fractions must align with cloud aggregation weights")
+    total = sum(max(float(weight), 0.0) for weight in aggregation_weights)
+    if total <= 0.0:
+        return 0.0, 0.0, 0.0
+    max_client_weight = max(
+        (
+            max(float(weight), 0.0)
+            / total
+            * max(float(fraction), 0.0)
+            for weight, fraction in zip(
+                aggregation_weights,
+                within_item_client_fractions,
+            )
+        ),
+        default=0.0,
+    )
+    sensitivity = 2.0 * float(clip_norm) * max_client_weight
+    return (
+        max_client_weight,
+        sensitivity,
+        float(noise_multiplier) * sensitivity,
+    )
 
 
 def _edge_normalized_cloud_weights(
@@ -2891,7 +3176,10 @@ def _coordinate_accuracy_oracle_round(
                 model_name=model_name,
                 input_shape=input_shape,
                 num_classes=num_classes,
-                mechanisms=_candidate_training_mechanisms(candidate),
+                mechanisms=_candidate_training_mechanisms(
+                    candidate,
+                    aggregate_cloud_update_dp=selection_config.trusted_edge_split_execution,
+                ),
                 dp_clip_norm=train_config.dp_clip_norm,
                 dp_noise_multiplier=float(privacy_parameters["feature_noise_multiplier"]),
                 dp_rng=eval_rng,
@@ -2905,7 +3193,10 @@ def _coordinate_accuracy_oracle_round(
                 ),
             )
             if _should_apply_update_dp(
-                _candidate_training_mechanisms(candidate),
+                _candidate_training_mechanisms(
+                    candidate,
+                    aggregate_cloud_update_dp=selection_config.trusted_edge_split_execution,
+                ),
                 train_config.dp_update_mode,
                 candidate.mode,
             ):
@@ -4324,6 +4615,8 @@ def _summarize_lenet5_policy(
         "round_to_best": best["round"],
         "final_train_accuracy": final["train_accuracy"],
         "total_logical_time": final["logical_time"],
+        "accounted_system_time_sec": final["logical_time"]
+        + sum(row.get("selection_wall_time_sec", 0.0) for row in round_rows),
         "total_round_wall_time_sec": sum(row.get("round_wall_time_sec", 0.0) for row in round_rows),
         "total_selection_wall_time_sec": sum(row.get("selection_wall_time_sec", 0.0) for row in round_rows),
         "total_training_wall_time_sec": sum(row.get("training_wall_time_sec", 0.0) for row in round_rows),
@@ -4350,11 +4643,20 @@ def _summarize_lenet5_policy(
             float(final.get("max_feature_epsilon", 0.0)),
             float(final.get("max_update_epsilon", 0.0)),
         ),
-        "privacy_guarantee": {
-            "feature": "record replacement adjacency",
-            "update": "client replacement adjacency",
-            "combined_epsilon": None,
-        },
+        "privacy_guarantee": (
+            {
+                "split_execution": "trusted end-to-edge execution domain",
+                "feature": None,
+                "update": "client replacement adjacency",
+                "combined_epsilon": None,
+            }
+            if final.get("privacy_guarantee") == "trusted_edge_and_client_update"
+            else {
+                "feature": "record replacement adjacency",
+                "update": "client replacement adjacency",
+                "combined_epsilon": None,
+            }
+        ),
         "feasible_rate": _list_mean(float(row["feasible_resource"]) for row in decision_rows),
         "all_constraint_feasible_rate": _list_mean(float(row["feasible"]) for row in decision_rows),
         "resource_feasible_rate": _list_mean(float(row["feasible_resource"]) for row in decision_rows),

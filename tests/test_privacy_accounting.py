@@ -7,6 +7,8 @@ from dynfed.privacy import (
     ClientPrivacyLedger,
     PrivacyAccountant,
     calibrate_gaussian_noise,
+    mechanism_uses_dp,
+    mechanism_uses_he,
 )
 from dynfed.selection import SelectionConfig, resolved_privacy_parameters
 
@@ -52,3 +54,11 @@ def test_update_dp_is_applied_on_the_tex_eligible_stage() -> None:
     assert _should_apply_update_dp(mechanisms, "upd_only", "LIIEIIIC")
     assert _should_apply_update_dp(mechanisms, "upd_only", "LIEIIC")
     assert not _should_apply_update_dp(mechanisms, "upd_only", "LIEIIIC")
+
+
+def test_combined_he_dp_is_accounted_but_not_noised_per_client() -> None:
+    mechanisms = {"upd": "he3_dp"}
+
+    assert mechanism_uses_dp("he3_dp")
+    assert mechanism_uses_he("he3_dp")
+    assert not _should_apply_update_dp(mechanisms, "upd_only", "LIEIIC")

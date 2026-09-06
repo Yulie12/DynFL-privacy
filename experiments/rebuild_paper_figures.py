@@ -139,7 +139,7 @@ def _plot_time_accuracy(root: Path, policies: list[str], output: Path) -> None:
     for policy in policies:
         rows = _read_csv(root / policy / "round_metrics.csv")
         if any("cumulative_wall_time_sec" not in row for row in rows):
-            raise RuntimeError("Paper curves require v22 cumulative wall time metrics")
+            raise RuntimeError("Paper curves require cumulative wall time metrics")
         xs = [float(row["cumulative_wall_time_sec"]) for row in rows]
         ys = [float(row["test_accuracy"]) for row in rows]
         ax.plot(xs, ys, linewidth=1.6, label=POLICY_LABELS.get(policy, policy))

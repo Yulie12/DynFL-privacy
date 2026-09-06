@@ -5,6 +5,7 @@ import copy
 import csv
 import json
 import statistics
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,9 @@ from scipy import stats
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_EXECUTION_REVISION = "paper_flow_v22_wall_raw_nsga"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from dynfed.version import CURRENT_EXECUTION_REVISION
 
 POLICY_LABELS = {
     "ours": "Ours",
@@ -62,6 +65,7 @@ SUMMARY_METRICS = (
     "best_test_accuracy",
     "avg_last_10_accuracy",
     "total_logical_time",
+    "accounted_system_time_sec",
     "total_communication_volume",
     "mean_effective_clients",
     "max_feature_epsilon",
@@ -207,7 +211,7 @@ def main() -> None:
         "privacy_budget": args.privacy_budget,
         "curve_processing": "raw unsmoothed test accuracy with linear time interpolation",
         "tail_fraction": args.tail_fraction,
-        "common_wall_time_horizon_sec": common_time_horizon,
+        "common_system_time_horizon_sec": common_time_horizon,
         "sources": [
             {
                 "seed": source.seed,
@@ -281,7 +285,8 @@ def discover_sources(
             update_budget = resolved_privacy.get(
                 "update_budget", selection.get("initial_epsilon", -1.0)
             )
-        if float(feature_budget) != float(privacy_budget):
+        feature_enabled = bool(resolved_privacy.get("feature_dp_enabled", True))
+        if feature_enabled and float(feature_budget) != float(privacy_budget):
             continue
         if float(update_budget) != float(privacy_budget):
             continue
@@ -380,7 +385,7 @@ def paired_comparisons(
         "final_test_accuracy",
         "avg_last_10_accuracy",
         "total_communication_volume",
-        "end_to_end_wall_time_sec",
+        "accounted_system_time_sec",
     )
     rows: list[dict[str, Any]] = []
     for baseline in policies:
@@ -495,15 +500,15 @@ def aggregate_time(
                 raise RuntimeError(
                     f"Expected {rounds} rows for seed={seed}, policy={policy}, got {len(metrics)}"
                 )
-            if any("cumulative_wall_time_sec" not in item for item in metrics):
+            if any("accounted_system_time_sec" not in item for item in metrics):
                 raise RuntimeError(
-                    "The selected run predates cumulative end to end wall timing for "
+                    "The selected run predates accounted system timing for "
                     f"seed={seed}, policy={policy}"
                 )
-            times = [float(item["cumulative_wall_time_sec"]) for item in metrics]
+            times = [float(item["accounted_system_time_sec"]) for item in metrics]
             if any(right <= left for left, right in zip(times, times[1:])):
                 raise RuntimeError(
-                    f"Wall time is not strictly increasing for seed={seed}, policy={policy}"
+                    f"System time is not strictly increasing for seed={seed}, policy={policy}"
                 )
             values = [float(item["test_accuracy"]) for item in metrics]
             run_series[(seed, policy)] = (times, values)
@@ -513,7 +518,7 @@ def aggregate_time(
     common_start = max(first_times)
     common_horizon = min(final_times)
     if common_horizon < common_start:
-        raise RuntimeError("Completed runs do not share a positive wall time interval")
+        raise RuntimeError("Completed runs do not share a positive system time interval")
     if abs(common_horizon - common_start) <= 1e-12:
         grid = [common_horizon]
     else:
@@ -541,7 +546,7 @@ def aggregate_time(
             rows.append(
                 {
                     "policy": policy,
-                    "wall_time_sec": wall_time,
+                    "accounted_system_time_sec": wall_time,
                     "test_accuracy_mean": mean,
                     "test_accuracy_std": std,
                     "test_accuracy_ci95_low": mean - ci95,
@@ -709,7 +714,6 @@ def plot_reconfiguration(rows: list[dict[str, Any]], output: Path) -> None:
         linewidth=0,
     )
     for name, label, color in (
-        ("feature_dp", "Feature DP", "#4e79a7"),
         ("update_dp", "Update DP", "#e15759"),
         ("he", "HE", "#59a14f"),
         ("mode_switch", "Mode switch", "#7f7f7f"),
@@ -738,7 +742,7 @@ def plot_reconfiguration(rows: list[dict[str, Any]], output: Path) -> None:
         columnspacing=0.65,
         handlelength=1.2,
     )
-    axes[1].legend(frameon=False, fontsize=6.6, ncol=2)
+    axes[1].legend(frameon=False, fontsize=6.6, ncol=3)
     fig.tight_layout(pad=0.55)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=300)
@@ -807,7 +811,7 @@ def plot_accuracy_over_time(
             spine.set_edgecolor("#555555")
             spine.set_linewidth(0.9)
 
-    ax.set_xlabel("Cumulative measured wall time (s)", fontsize=8.5)
+    ax.set_xlabel("Accounted system time (s)", fontsize=8.5)
     ax.set_ylabel("Test accuracy (%)", fontsize=8.5)
     if xs[-1] > xs[0]:
         ax.set_xlim(xs[0], xs[-1])

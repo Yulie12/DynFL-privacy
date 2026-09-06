@@ -7,8 +7,9 @@ from typing import Any, Iterable
 
 OBJECT_SIZES = {
     "emb": 1.6,
-    "label": 0.2,
-    "grad": 1.6,
+    "logits": 0.02,
+    "grad": 0.02,
+    "emb_grad": 1.6,
     "upd": 4.0,
     "weakemb": 3.0,
     "strongemb": 5.5,
@@ -17,16 +18,20 @@ OBJECT_SIZES = {
 
 PRIVACY_ALPHA = {
     "none": 1.0,
+    "trusted": 1.0,
     "dp": 1.0,
     "he2": 3.2,
-    "he3": 24.01,
+    "he3": 8.04,
+    "he3_dp": 8.04,
 }
 
 PRIVACY_BASE_TIME = {
     "none": 0.0,
+    "trusted": 0.0,
     "dp": 0.04,
     "he2": 0.35,
-    "he3": 1.53,
+    "he3": 0.90,
+    "he3_dp": 0.94,
 }
 
 _RDP_ALPHAS: list[float] = []
@@ -281,6 +286,14 @@ def normalize_mechanism(mechanism: str) -> str:
     return value
 
 
+def mechanism_uses_dp(mechanism: str) -> bool:
+    return normalize_mechanism(mechanism) in {"dp", "he3_dp"}
+
+
+def mechanism_uses_he(mechanism: str) -> bool:
+    return normalize_mechanism(mechanism).startswith("he")
+
+
 def protected_size(objects: list[str], mechanism: str) -> float:
     mechanism = normalize_mechanism(mechanism)
     raw_size = sum(OBJECT_SIZES[item] for item in objects)
@@ -292,15 +305,17 @@ def privacy_processing_time(objects: list[str], mechanism: str, epsilon: float) 
     if not objects:
         return 0.0
     eps_factor = 1.0
-    if mechanism == "dp":
+    if mechanism_uses_dp(mechanism):
         eps_factor = 1.0 + 1.0 / max(float(epsilon), 1e-6)
     return len(objects) * PRIVACY_BASE_TIME[mechanism] * eps_factor
 
 
 def utility_penalty(mechanism: str, epsilon: float) -> float:
     mechanism = normalize_mechanism(mechanism)
-    if mechanism == "dp":
+    if mechanism_uses_dp(mechanism):
         return min(0.12, 0.01 + 0.08 / max(float(epsilon), 0.25))
+    if mechanism == "trusted":
+        return 0.0
     if mechanism == "he2":
         return 0.018
     if mechanism == "he3":
@@ -310,8 +325,10 @@ def utility_penalty(mechanism: str, epsilon: float) -> float:
 
 def privacy_score(mechanism: str, epsilon: float) -> float:
     mechanism = normalize_mechanism(mechanism)
-    if mechanism == "dp":
+    if mechanism_uses_dp(mechanism):
         return 1.0 / (1.0 + math.log1p(max(float(epsilon), 0.0)))
+    if mechanism == "trusted":
+        return 0.72
     if mechanism == "he2":
         return 0.82
     if mechanism == "he3":

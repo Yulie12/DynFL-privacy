@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "paper_v22_cifar10_resnet18.json"
+DEFAULT_CONFIG = ROOT / "configs" / "paper_v26_cifar10_resnet18.json"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -17,6 +17,7 @@ from dynfed.he_backend import (
     CKKS_POLY_MODULUS_DEGREE,
     CKKS_SCALE_BITS,
 )
+from dynfed.version import CURRENT_EXECUTION_REVISION
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--policies", nargs="+")
     parser.add_argument("--rounds", type=int)
+    parser.add_argument("--he-execution", choices=["real", "profiled"])
+    parser.add_argument("--output-root")
     parser.add_argument(
         "--max-new-rounds",
         type=int,
@@ -103,15 +106,14 @@ def build_command(
         "min_edge_cloud_fusion_ratio": system["min_edge_cloud_fusion_ratio"],
         "dp_accounting_mode": privacy["accounting_mode"],
         "initial_epsilon": privacy["initial_epsilon"],
-        "dp_emb_epsilon": privacy["feature_epsilon_budget"],
         "dp_upd_epsilon": privacy["update_epsilon_budget"],
-        "dp_feature_epsilon_budget": privacy["feature_epsilon_budget"],
         "dp_update_epsilon_budget": privacy["update_epsilon_budget"],
         "dp_delta": privacy["delta"],
         "dp_clip_norm": privacy["clip_norm"],
         "dp_update_mode": privacy["update_mode"],
         "cloud_dp_stability_threshold": privacy["cloud_dp_stability_threshold"],
         "he_backend": he["backend"],
+        "he_execution": he.get("execution", "real"),
         "he_aggregation_size": he["aggregation_size"],
         "he_workers": he.get("workers", 1),
         "pareto_archive_size": optimization["pareto_archive_size"],
@@ -123,6 +125,10 @@ def build_command(
         "seed": seed,
         "output_root": config["output_root"],
     }
+    if not system.get("trusted_edge_split_execution"):
+        feature_budget = privacy["feature_epsilon_budget"]
+        values["dp_emb_epsilon"] = feature_budget
+        values["dp_feature_epsilon_budget"] = feature_budget
     for name, value in values.items():
         _append_value(command, name, value)
     if max_new_rounds is not None:
@@ -133,6 +139,7 @@ def build_command(
     for name in (
         "require_feasible",
         "require_edge_cloud_coverage",
+        "trusted_edge_split_execution",
     ):
         if system.get(name):
             command.append(_flag(name))
@@ -148,6 +155,11 @@ def main() -> None:
     args = parse_args()
     config_path = args.config.resolve()
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    if args.he_execution is not None:
+        config["he"]["execution"] = args.he_execution
+        config["he"]["require_real_he"] = args.he_execution == "real"
+    if args.output_root is not None:
+        config["output_root"] = args.output_root
     validate_config(config)
     seeds = args.seeds or [int(seed) for seed in config["seeds"]]
     policies = args.policies or list(config["policies"])
@@ -171,6 +183,10 @@ def main() -> None:
 
 
 def validate_config(config: dict) -> None:
+    if config.get("execution_revision") != CURRENT_EXECUTION_REVISION:
+        raise RuntimeError(
+            f"Paper experiments require {CURRENT_EXECUTION_REVISION}"
+        )
     he = config["he"]
     expected = {
         "poly_modulus_degree": int(CKKS_POLY_MODULUS_DEGREE),
@@ -188,8 +204,16 @@ def validate_config(config: dict) -> None:
         )
     if int(config["system"]["clients"]) < int(config["system"]["edges"]):
         raise ValueError("The number of clients must be at least the number of edges")
+    if not bool(config["system"].get("trusted_edge_split_execution")):
+        raise ValueError(
+            "Formal configurations must enable trusted edge split execution"
+        )
     if int(he.get("workers", 1)) < 1:
         raise ValueError("The number of HE workers must be positive")
+    if he.get("execution", "real") not in {"real", "profiled"}:
+        raise ValueError("HE execution must be real or profiled")
+    if he.get("require_real_he") and he.get("execution", "real") != "real":
+        raise ValueError("require_real_he is only valid with real HE execution")
     privacy = config["privacy"]
     if not bool(privacy.get("enforce_cloud_dp_stability")):
         raise ValueError(

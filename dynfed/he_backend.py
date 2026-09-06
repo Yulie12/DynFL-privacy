@@ -11,7 +11,7 @@ import numpy as np
 
 
 CKKS_POLY_MODULUS_DEGREE = 8192
-CKKS_COEFF_MOD_BIT_SIZES = (40, 40, 40, 40)
+CKKS_COEFF_MOD_BIT_SIZES = (50, 40)
 CKKS_SCALE_BITS = 40
 CKKS_SCALE = 2 ** CKKS_SCALE_BITS
 
@@ -173,4 +173,4 @@ def _validate_seal_backend(seal: Any) -> float:
 
 
 def has_he_mechanism(mechanisms: dict[str, str]) -> bool:
-    return any(value in {"he2", "he3"} for value in mechanisms.values())
+    return any(str(value).startswith("he") for value in mechanisms.values())

@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         description="Aggregate the versioned controlled paper experiments."
     )
     parser.add_argument(
-        "--root", type=Path, default=ROOT / "out" / "paper_v22_controlled"
+        "--root", type=Path, default=ROOT / "out" / "paper_v26_controlled"
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[40, 42, 44])
     parser.add_argument(
@@ -37,9 +37,9 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=[40, 41, 42, 43, 44],
     )
-    parser.add_argument("--rounds", type=int, default=200)
+    parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--edges", type=int, default=10)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v22_controlled_aggregate")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v26_controlled_aggregate")
     parser.add_argument("--paper-figure-dir", type=Path, default=ROOT / "tex" / "paper" / "figures")
     return parser.parse_args()
 
@@ -97,7 +97,7 @@ def main() -> None:
         )
         period_rows.append({"period": period, **rows[0]})
     write_csv(output_dir / "strategy_period_statistics.csv", period_rows)
-    plot_period(period_rows, figure_dir / "cifar10_strategy_period_v22.png")
+    plot_period(period_rows, figure_dir / "cifar10_strategy_period_v26.png")
 
     privacy_rows: list[dict[str, Any]] = []
     for budget in (1.0, 2.0, 4.0, 8.0):
@@ -113,7 +113,7 @@ def main() -> None:
         )
         privacy_rows.append({"privacy_budget": budget, **rows[0]})
     write_csv(output_dir / "privacy_budget_statistics.csv", privacy_rows)
-    plot_privacy(privacy_rows, figure_dir / "cifar10_privacy_budget_v22.png")
+    plot_privacy(privacy_rows, figure_dir / "cifar10_privacy_budget_v26.png")
 
     scale_rows: list[dict[str, Any]] = []
     for clients in (20, 50, 100):
@@ -129,7 +129,7 @@ def main() -> None:
         )
         scale_rows.extend({"clients": clients, **row} for row in rows)
     write_csv(output_dir / "decision_scalability_statistics.csv", scale_rows)
-    plot_scale(scale_rows, figure_dir / "cifar10_decision_scalability_v22.png")
+    plot_scale(scale_rows, figure_dir / "cifar10_decision_scalability_v26.png")
 
     ablation_policies = [
         "ours",
@@ -158,7 +158,7 @@ def main() -> None:
     plot_accuracy_over_time(
         plotted,
         ablation_policies,
-        figure_dir / "cifar10_ablation_wall_time_accuracy_v22.png",
+        figure_dir / "cifar10_ablation_wall_time_accuracy_v26.png",
         tail_fraction=0.25,
         labels={
             "ours": "Ours",
@@ -183,11 +183,11 @@ def plot_period(rows: list[dict[str, Any]], output: Path) -> None:
         axes[1], xs, rows, "total_selection_wall_time_sec", "Decision"
     )
     _error_series(
-        axes[2], xs, rows, "end_to_end_wall_time_sec", "End to end"
+        axes[2], xs, rows, "accounted_system_time_sec", "System"
     )
     axes[0].set_ylabel("Accuracy (%)")
     axes[1].set_ylabel("Decision time (s)")
-    axes[2].set_ylabel("Wall time (s)")
+    axes[2].set_ylabel("System time (s)")
     axes[2].set_xlabel("Strategy update period")
     axes[0].legend(frameon=False, fontsize=7)
     _finish_small_figure(fig, axes, output)
@@ -202,8 +202,7 @@ def plot_privacy(rows: list[dict[str, Any]], output: Path) -> None:
     _error_series(
         axes[0], xs, rows, "avg_last_10_accuracy", "Last 10", percent=True
     )
-    _error_series(axes[1], xs, rows, "max_feature_epsilon", "Feature")
-    _error_series(axes[1], xs, rows, "max_update_epsilon", "Update")
+    _error_series(axes[1], xs, rows, "max_update_epsilon", "Update DP")
     axes[0].set_ylabel("Accuracy (%)")
     axes[1].set_ylabel("Realized privacy loss")
     axes[1].set_xlabel("Total privacy target")
@@ -233,12 +232,12 @@ def plot_scale(rows: list[dict[str, Any]], output: Path) -> None:
             axes[1],
             xs,
             policy_rows,
-            "end_to_end_wall_time_sec",
+            "accounted_system_time_sec",
             POLICY_LABELS[policy],
             color=POLICY_COLORS[policy],
         )
     axes[0].set_ylabel("Decision time (s)")
-    axes[1].set_ylabel("Wall time (s)")
+    axes[1].set_ylabel("System time (s)")
     axes[1].set_xlabel("Number of clients")
     for axis in axes:
         axis.legend(frameon=False, fontsize=7)

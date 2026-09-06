@@ -61,7 +61,7 @@ class SealFedAvgTests(unittest.TestCase):
 
         parms = seal.EncryptionParameters(seal.scheme_type.ckks)
         parms.set_poly_modulus_degree(8192)
-        parms.set_coeff_modulus(seal.CoeffModulus.Create(8192, [40, 40, 40, 40]))
+        parms.set_coeff_modulus(seal.CoeffModulus.Create(8192, [50, 40]))
         encoder = seal.CKKSEncoder(seal.SEALContext(parms))
         expected = np.array([0.1, 0.2, -0.3, 0.4], dtype=np.float64)
 

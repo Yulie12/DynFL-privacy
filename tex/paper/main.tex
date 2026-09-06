@@ -107,7 +107,7 @@ consumption, encrypted aggregation overhead, and estimated convergence error
 cost. The resulting multiobjective problem is solved through bounded Pareto
 search and an ideal point Tchebycheff criterion. Experiments on CIFAR 10 with
 ResNet 18 and Fashion MNIST with LeNet 5 examine privacy feasibility, test
-accuracy, communication, and measured end to end wall time.
+accuracy, communication, and system time including the measured decision cost.
 \end{abstract}
 
 \begin{keyword}
@@ -136,11 +136,11 @@ Nevertheless, most existing methods are built around a specific collaborative pr
 They pay insufficient attention to the complete collaboration decision, namely which model blocks should be executed at the end, edge, and cloud layers, which aggregation flow should be used, and how this task assignment should interact with privacy mechanisms.
 
 Privacy protection further complicates this decision.
-DP limits the influence of a single sample and client by clipping and perturbing intermediate features and model updates, but it may degrade convergence.
+DP limits the influence of one client by clipping and perturbing model updates, but it may degrade convergence.
 Adaptive DP methods tune privacy budgets, clipping thresholds, and client selection to improve the privacy utility tradeoff~\cite{GLDP,xu2025adpfl,elabd2025dynamicdp}.
 HE, secure aggregation, and privacy preserving offloading have also been studied in FL and cloud-edge-end systems~\cite{dong2026privacyoffloading,PPHFL,islam2025pphffl}.
-Different collaborative modes expose different privacy related objects.
-For example, split training between end devices and edge nodes transmits intermediate features and backward gradients, whereas aggregation between edge nodes and the cloud transmits model updates.
+Different collaborative modes expose model updates at different trust boundaries.
+For example, split training keeps intermediate features and backward gradients inside the associated end and edge execution domain, whereas cloud aggregation requires protected model updates to cross that domain boundary.
 Therefore, the communication, computation, and estimated convergence error
 costs of privacy mechanisms should be modeled together with collaborative mode
 selection.
@@ -170,7 +170,7 @@ The main contributions are summarized as follows.
     \item We establish a joint model for latency, communication, privacy consumption, encrypted aggregation overhead, and estimated convergence error cost. Privacy mechanisms are treated as collaboration dimensions instead of external additions to a fixed workflow.
     \item We formulate collaboration reconfiguration as a constrained multiobjective problem. A bounded Pareto search constructs feasible global decisions, and an ideal point Tchebycheff criterion selects the executed configuration.
 \end{itemize}
-The framework is evaluated through 200 round CIFAR 10 training with ResNet 18
+The framework is evaluated through 100 round CIFAR 10 training with ResNet 18
 under heterogeneous devices and edge level label skew.
 
 \section{Related Work}
@@ -245,6 +245,12 @@ Given a global model \(M\), different modes induce the partition
 edge, and cloud layers, respectively.
 Weaker devices use split positions closer to the input layer and offload more computation toward upper layers, whereas stronger devices can undertake a larger proportion of local training.
 
+Each end device and its associated edge node form a trusted execution domain.
+Intermediate representations, logits, backward gradients, and model updates exchanged inside this domain are not exposed to the cloud adversary.
+The cloud is honest but curious, and update transmissions from an end device or edge node to the cloud cross the trust boundary.
+These cross domain updates are protected by DP or HE.
+Raw samples remain at the end device throughout training.
+
 \begin{definition}[Collaborative Link Block]
 Given a collaborative mode \(h_i\), a collaborative link block is the local
 training step and cross layer interaction associated with end device \(i\)
@@ -298,10 +304,13 @@ The link size, rate, and latency are treated as link attributes in the cost mode
 \label{fig:classic}
 \end{figure}
 
-Based on the abstract training flow illustrated in \figref{fig:classic}, this paper considers seven basic modes over the end (\(L\)), edge (\(E\)), and cloud (\(C\)) layers. The interfaces mark candidate interaction boundaries from shallow to deep stages. A deeper boundary keeps more computation on the end side, whereas an earlier boundary offloads more computation toward upper layers.
+Based on the abstract training flow illustrated in \figref{fig:classic}, the unified representation describes seven basic modes over the end (\(L\)), edge (\(E\)), and cloud (\(C\)) layers. The interfaces mark candidate interaction boundaries from shallow to deep stages. A deeper boundary keeps more computation on the end side, whereas an earlier boundary offloads more computation toward upper layers.
 \begin{equation}
-\mathcal{H}=\{\mathrm{LIE},\mathrm{LIC},\mathrm{LIIE},\mathrm{LIIC},\mathrm{LIEIIC},\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
+\mathcal{H}_{\mathrm{base}}=\{\mathrm{LIE},\mathrm{LIC},\mathrm{LIIE},\mathrm{LIIC},\mathrm{LIEIIC},\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
 \end{equation}
+LIC sends intermediate representations directly to the cloud and is therefore
+excluded under the stated trust model. The executable mode set is
+\(\mathcal H=\mathcal H_{\mathrm{base}}\setminus\{\mathrm{LIC}\}\).
 The symbols \(L\), \(E\), and \(C\) indicate the update submission layer of a collaborative link block, while \(\mathrm{I}\), \(\mathrm{II}\), and \(\mathrm{III}\) denote the collaborative interaction interfaces defined in \figref{fig:classic}.
 
 \begin{definition}[Collaborative Link Transmission Indicator Matrix]
@@ -347,8 +356,8 @@ The corresponding candidate mechanism matrix is
 \begin{equation}
 \mathcal{O}_{b}^{h_i}(u,v)=
 \begin{cases}
-\{\mathrm{DP}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ b\in\{\mathrm{emb},\mathrm{grad}\},\\
-\{\mathrm{DP},\mathrm{HE}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ \text{update upload},\\
+\{\mathrm{trusted}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ (u,v)\in\{(L,E),(E,L)\},\\
+\{\mathrm{DP},\mathrm{HE}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ b=\mathrm{upd},\ v=C,\\
 \{\mathrm{none}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ \text{model return},\\
 \emptyset, & \mathbf{I}_{b}^{h_i}(u,v)=0.
 \end{cases}
@@ -369,7 +378,7 @@ The entries with \(\{\mathrm{none}\}\) are model return links.
 
 The selected mode determines the transmitted objects, and the indicator matrices record their directions.
 Privacy mechanisms are then selected for the eligible transmitted objects.
-Embeddings and gradients may use DP, while model updates may use DP or HE~\cite{PPHFL}.
+Embedding and gradient exchanges remain inside the trusted end and edge domain, while updates sent to the cloud may use DP or HE~\cite{PPHFL}.
 \(\Pi(h_i)\) denotes the candidate privacy policy set under mode \(h_i\), and each policy \(\pi_i\in\Pi(h_i)\) maps an eligible link to a selected privacy mechanism.
 For each transmitted link \(\lambda=(u,v,b)\), the selected privacy mechanism \(\pi_i(\lambda)\) is chosen from \(\mathcal{O}_{b}^{h_i}(u,v)\).
 Model return links are counted for communication latency only and are not assigned DP or HE.
@@ -397,13 +406,13 @@ Detailed transmitted objects and candidate privacy mechanisms are determined by 
 \hline
 \textbf{Mode} & \textbf{Execution structure} & \textbf{Aggregation structure} & \textbf{Protected upload} & \textbf{Available mechanism} \\
 \hline
-LIE & End and edge split & Edge & Embedding and gradient & Feature DP \\
-LIC & End and cloud split & Cloud & Embedding and gradient & Feature DP \\
-LIIE & Local training & Edge & Client update & Update DP or HE \\
+LIE & End and edge split & Edge & Internal embedding and gradient & Trusted execution \\
+LIC & End and cloud split & Cloud & Embedding and gradient & Excluded in this threat model \\
+LIIE & Local training & Edge & Internal client update & Trusted execution \\
 LIIC & Local training & Cloud & Client update & Update DP or HE \\
-LIEIIC & End and edge split & Cloud through edge & Feature and edge update & Feature DP, update DP or HE \\
-LIEIIIC & Repeated end and edge split & Edge then cloud & Feature and edge update & Feature DP, update DP or HE \\
-LIIEIIIC & Repeated local and edge training & Edge then cloud & Client and edge update & Update DP or HE \\
+LIEIIC & End and edge split & Cloud through edge & Edge update & Update DP or HE \\
+LIEIIIC & Repeated end and edge split & Edge then cloud & Edge update & Update DP or HE \\
+LIIEIIIC & Repeated local and edge training & Edge then cloud & Edge update & Update DP or HE \\
 \hline
 \end{tabular}
 \end{table*}
@@ -643,205 +652,75 @@ T_i^{\mathrm{lupd}}(h_i,\pi_i)
 The expanded form is shown only for the representative path in \figref{fig:time}. For any selected mode \(h_i\), \(T_i^t(h_i,\pi_i)\) accumulates the terms on the complete link flow induced by that mode, including the model return required to prepare the device for the next round.
 
 \subsubsection{Privacy Budget Accounting}
-Two DP channels protect different released objects. The feature channel
-contains embedding and backward gradient messages. Its neighboring inputs
-differ by one record in a local minibatch. Each embedding vector is clipped to
-norm \(C_z\), which gives replacement sensitivity \(\Delta_z=2C_z\).
-Each backward gradient vector is clipped separately to norm \(C_g\), which
-gives replacement sensitivity \(\Delta_g=2C_g\). Both releases use the feature
-channel noise multiplier and are counted as separate privacy events.
-
-The update channel protects one participating client contribution. Its
-neighboring inputs replace the complete contribution of one client. A client
-or edge update is clipped to norm \(C_u\), which gives replacement sensitivity
+The DP channel protects a model update before it crosses the trusted execution
+domain. Two client datasets are adjacent when the complete contribution of one
+client is replaced. A client update or an edge update computed from a client
+group is clipped to norm \(C_u\). Because every clipped output lies in the
+radius \(C_u\) ball, replacement sensitivity is bounded by
 \(\Delta_u=2C_u\). Gaussian noise with standard deviation
-\(\sigma_u\Delta_u\) is then added before the protected update is released.
-Let \(\mathcal C_P=\{\mathrm{emb},\mathrm{upd}\}\) denote these channels and
-let \((\bar\epsilon_{i,c},\delta_c)\) be the target for channel \(c\).
+\(\sigma_u\Delta_u\) is added before release. Let
+\((\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\) denote the fixed
+privacy target for client \(i\).
 
 For Gaussian DP, we use RDP accounting to accumulate repeated privacy
-releases~\cite{mironov2017rdp}. Let \(R_{i,c}^{t}(\alpha)\) be the accumulated
-RDP value of client \(i\) at order \(\alpha>1\) before round \(t\). If
-candidate \((h_i,\pi_i)\) enables DP on channel \(c\), the new RDP increment is
+releases~\cite{mironov2017rdp}. Let
+\(R_{i,\mathrm{upd}}^{t}(\alpha)\) be the accumulated RDP value of client
+\(i\) at order \(\alpha>1\) before round \(t\). If candidate
+\((h_i,\pi_i)\) enables DP on a cross domain update link, the new RDP increment is
 \begin{equation}
-\Delta R_{i,c}^{t}(\alpha;h_i,\pi_i)
-=\sum_{\lambda\in\mathcal E_{c}^{h_i}}
+\Delta R_{i,\mathrm{upd}}^{t}(\alpha;h_i,\pi_i)
+=\sum_{\lambda\in\mathcal E_{\mathrm{upd}}^{h_i}}
 N_{\lambda}(h_i)\mathbb I\!\left(\pi_i(\lambda)=\mathrm{DP}\right)
-\frac{\alpha}{2\sigma_c^2}.
+\frac{\alpha}{2\sigma_u^2}.
 \label{eq:privacy_budget}
 \end{equation}
-Here, \(\alpha\) is the RDP order, \(\sigma_c\) is the Gaussian noise
-multiplier of channel \(c\), and \(N_{\lambda}(h_i)\) is the execution count of
-link \(\lambda\) in the selected link flow. Therefore, a DP link inside \(L_B\)
-or \(E_B\) loops consumes privacy budget every time it is executed. HE does not
-consume DP budget.
+Here, \(\alpha\) is the RDP order, \(\sigma_u\) is the update noise
+multiplier, and \(N_{\lambda}(h_i)\) is the execution count of link
+\(\lambda\). Trusted internal links and HE protected links do not consume DP
+budget.
 
 Before accepting a candidate, the accumulated RDP after adding
-\(\Delta R_{i,c}^{t}\) is converted to its \((\epsilon,\delta_c)\) value by
+\(\Delta R_{i,\mathrm{upd}}^{t}\) is converted to its
+\((\epsilon,\delta_{\mathrm{upd}})\) value by
 \begin{equation}
 \begin{aligned}
-\epsilon_{i,c}^{t,+}(h_i,\pi_i)
+\epsilon_{i,\mathrm{upd}}^{t,+}(h_i,\pi_i)
 &=\min_{\alpha>1}\Bigl[
-R_{i,c}^{t}(\alpha)\\
-&\quad+\Delta R_{i,c}^{t}(\alpha;h_i,\pi_i)
-+\frac{\log(1/\delta_c)}{\alpha-1}
+R_{i,\mathrm{upd}}^{t}(\alpha)\\
+&\quad+\Delta R_{i,\mathrm{upd}}^{t}(\alpha;h_i,\pi_i)
++\frac{\log(1/\delta_{\mathrm{upd}})}{\alpha-1}
 \Bigr].
 \end{aligned}
 \label{eq:rdp_to_dp}
 \end{equation}
-A candidate satisfies the privacy constraint only when both channels obey
-\(\epsilon_{i,c}^{t,+}\le\bar\epsilon_{i,c}\).
+A candidate satisfies the privacy constraint when
+\(\epsilon_{i,\mathrm{upd}}^{t,+}\le
+\bar\epsilon_{i,\mathrm{upd}}\).
 After the candidate is selected, the corresponding RDP increments are added to
-the next round state \(R_{i,c}^{t+1}(\alpha)\).
+the next round state \(R_{i,\mathrm{upd}}^{t+1}(\alpha)\).
 
 The selector uses resource profiles, topology, client data sizes, and fixed
-cost parameters declared before training. It does not inspect unprotected
-embeddings, gradients, or model updates. RDP composition remains valid when
-the next mechanism is selected from previous protected releases. Across all
-rounds and links, the feature transcript satisfies
-\((\epsilon_{i,\mathrm{emb}},\delta_{\mathrm{emb}})\) record DP and the update
-transcript satisfies \((\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\)
-client DP. Because the two channels use different neighboring relations, they
-are reported as a pair and are not presented as one total epsilon.
+cost parameters declared before training. Across all rounds and cross domain
+DP links, the released update transcript satisfies
+\((\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\) client DP.
 
-The total privacy targets do not change with the number of training rounds. Let
-\(K_c^{\max}(T)\) be the largest possible number of DP releases of channel
-\(c\) over \(T\) rounds. Before training, the noise multiplier \(\sigma_c\) is
+The total privacy target does not change with the number of training rounds.
+Let \(K_{\mathrm{upd}}^{\max}(T)\) be the largest possible number of update DP
+releases over \(T\) rounds. Before training, the noise multiplier \(\sigma_u\) is
 chosen to satisfy
 \begin{equation}
 \min_{\alpha>1}\left[
-\frac{K_c^{\max}(T)\alpha}{2\sigma_c^2}
-+\frac{\log(1/\delta_c)}{\alpha-1}
-\right]\le\bar\epsilon_{i,c}.
+\frac{K_{\mathrm{upd}}^{\max}(T)\alpha}{2\sigma_u^2}
++\frac{\log(1/\delta_{\mathrm{upd}})}{\alpha-1}
+\right]\le\bar\epsilon_{i,\mathrm{upd}}.
 \label{eq:noise_calibration}
 \end{equation}
-Thus, when \(T\) increases, the noise multiplier is recalibrated, while the
-total privacy target remains fixed.
+When \(T\) increases, the noise multiplier is recalibrated while the total
+privacy target remains fixed.
 
 \subsubsection{Estimation of Convergence Error Cost}
 We next estimate the convergence error cost associated with the selected
 privacy mechanisms.
-Consider a model consisting of an encoder \(f_{\phi}\) and a downstream trainer \(g_{\theta}\).
-For a local sample \(x\), the encoder output is
-\(z=f_{\phi}(x)\in\mathbb{R}^{d_z}\).
-Feature level DP first clips the representation and then injects Gaussian noise, following forward pass output perturbation methods for differentially private intermediate representations~\cite{du2023dpforward}.
-\begin{equation}
-\begin{aligned}
-    z^{\mathrm{clip}}
-    &=
-    \frac{z}{\max(1,\|z\|_2/C_z)},
-    &\tilde{z}&=z^{\mathrm{clip}}+\nu,\\
-    \nu&\sim\mathcal{N}(0,\sigma^2\Delta_z^2I_{d_z}),
-    &\Delta_z&=2C_z.
-\end{aligned}
-\label{eq:feature_dp_noise}
-\end{equation}
-Here, \(C_z>0\) is the feature clipping threshold. By construction,
-\(\|z^{\mathrm{clip}}\|_2\le C_z\). Therefore, for any two inputs \(x\) and
-\(x'\),
-\(\|z^{\mathrm{clip}}(x)-z^{\mathrm{clip}}(x')\|_2\le 2C_z\).
-Accordingly, the \(L_2\)-sensitivity under replacement adjacency is bounded by
-\(\Delta_z=2C_z\), and the Gaussian noise is calibrated to \(\Delta_z\).
-Let \(g=\nabla_z\ell\) denote the backward gradient transmitted from the
-upper layer. Its release is
-\begin{equation}
-g^{\mathrm{clip}}
-=\frac{g}{\max(1,\|g\|_2/C_g)},
-\qquad
-\widetilde g=g^{\mathrm{clip}}+\nu_g,
-\qquad
-\nu_g\sim\mathcal N(0,\sigma_{\mathrm{emb}}^2\Delta_g^2I_{d_g}),
-\quad \Delta_g=2C_g.
-\label{eq:gradient_dp_noise}
-\end{equation}
-Thus, embedding and gradient messages are normalized by their own replacement
-sensitivities before their RDP increments are accumulated in the feature
-channel. The experiments use \(C_z=C_g\), but the two thresholds remain
-distinct mechanism parameters.
-Clipping itself can also distort the optimization signal. Let
-\(z_i^t=f_{\phi^t}(x_i)\) and
-\(J_{\phi,i}^t=\nabla_{\phi}f_{\phi^t}(x_i)\). Assume that
-\(\|J_{\phi,i}^t\|_{\mathrm{op}}
-=\sigma_{\max}(J_{\phi,i}^t)\le\kappa_z\), where
-\(\|\cdot\|_{\mathrm{op}}\) denotes the spectral operator norm induced by the
-Euclidean vector norm \(\|\cdot\|_2\). Assume also that the representation
-gradient is \(L_z\)-Lipschitz, i.e.,
-\(\|\nabla_z\ell(\theta,z')-\nabla_z\ell(\theta,z)\|_2
-\le L_z\|z'-z\|_2\). The resulting conditional mean square parameter gradient
-distortion is bounded by
-\begin{equation}
-\begin{aligned}
-\mathcal{D}_{\mathrm{fclip},i}^{t}
-&=\mathbb{E}\!\left[
-\|(J_{\phi,i}^t)^\top
-[\nabla_z\ell(\theta^t,z_i^{t,\mathrm{clip}})
--\nabla_z\ell(\theta^t,z_i^t)]\|_2^2\mid w^t\right]\\
-&\le \underbrace{\kappa_z^2L_z^2\mathbb{E}\!\left[
-(\|z_i^t\|_2-C_z)_+^2\mid w^t\right]}_{\displaystyle
-\mathcal{B}_{\mathrm{fclip},i}^{t}}.
-\end{aligned}
-\label{eq:feature_clipping_bias}
-\end{equation}
-The bound follows from
-\(\|z_i^{t,\mathrm{clip}}-z_i^t\|_2=(\|z_i^t\|_2-C_z)_+\). Hence,
-the explicitly defined upper bound term
-\(\mathcal{B}_{\mathrm{fclip},i}^{t}\) is zero when the representation norm
-does not exceed \(C\) almost surely and is positive when clipping is active.
-The complete clipping distortion derivation is given in
-Appendix~\ref{app:convergence_derivation}.
-For a linear prediction head, let
-\(o=W_{\mathrm{clf}}z^{\mathrm{clip}}+b\) and
-\(\tilde{o}=W_{\mathrm{clf}}\tilde{z}+b=o+W_{\mathrm{clf}}\nu\).
-For the softmax cross entropy loss \(\ell(\theta,\tilde{z})\), we use the
-classical small noise approximation that relates additive noise training to a
-curvature dependent regularization term~\cite{bishop1995training}. Since
-\(\nabla_o^2\ell=\operatorname{diag}(p)-pp^\top\) for
-\(p=\operatorname{softmax}(o)\), a second order Taylor expansion gives
-\begin{equation}
-\begin{aligned}
-\mathbb{E}_{\nu}[\ell(\theta,\tilde{z})]
-&\approx \ell(\theta,z^{\mathrm{clip}})+\Delta_{\mathrm{emb}},\\
-\Delta_{\mathrm{emb}}
-&=\frac{\sigma^2\Delta_z^2}{2}
-\operatorname{Tr}\!\left(W_{\mathrm{clf}}^\top\nabla_o^2\ell W_{\mathrm{clf}}\right)
-\\
-&=\frac{\sigma^2\Delta_z^2}{4}\sum_{j,k}p_jp_k
-\|W_{\mathrm{clf},j}-W_{\mathrm{clf},k}\|_2^2.
-\end{aligned}
-\label{eq:delta_emb}
-\end{equation}
-This term shows that feature perturbation increases the expected local
-objective even when the injected noise has zero mean. This Taylor term isolates
-the Gaussian perturbation relative to the clipped representation. The separate
-term \(\mathcal{B}_{\mathrm{fclip},i}^{t}\) accounts for the distortion from
-the original representation to the clipped one.
-
-Feature level DP also affects the backward signal.
-Let \(\Delta o=W_{\mathrm{clf}}\nu\) and
-\(\Sigma_o=\mathbb{E}[\Delta o\Delta o^\top]
-=\sigma^2\Delta_z^2W_{\mathrm{clf}}W_{\mathrm{clf}}^\top\).
-Expanding the perturbed softmax probability \(\tilde{p}\) to second order gives
-\(\mathbb{E}_{\nu}[\tilde{p}_r]\approx
-p_r+\tfrac{1}{2}\operatorname{Tr}(H^{(r)}\Sigma_o)\), where \(H^{(r)}\) is
-the Hessian of the \(r\)-th softmax output with respect to logits. Define the
-bias vector by \([\mathbf{b}_{\mathrm{bias}}]_r=
-\tfrac{1}{2}\operatorname{Tr}(H^{(r)}\Sigma_o)\).
-Then the expected gradient with respect to the transmitted representation satisfies
-\begin{equation}
-\mathbb{E}_{\nu}\left[\frac{\partial\ell}{\partial \tilde{z}}\right]
-\approx
-W_{\mathrm{clf}}^\top(p-y)
-+W_{\mathrm{clf}}^\top\mathbf{b}_{\mathrm{bias}}.
-\label{eq:feature_dp_bias}
-\end{equation}
-Thus, feature level DP introduces not only variance but also a systematic
-gradient bias with magnitude
-\(\zeta=\|W_{\mathrm{clf}}^\top\mathbf{b}_{\mathrm{bias}}\|_2\) in
-representation space. Under the Jacobian bound above, its squared contribution
-to the encoder parameter gradient is at most \(\kappa_z^2\zeta^2\). Details of
-the loss and backward bias expansions are provided in
-Appendix~\ref{app:convergence_derivation}.
-
 For update level DP, we clip the client update difference before Gaussian perturbation~\cite{pmlr-v162-zhang22b}.
 The client update vector \(u_i^t=\operatorname{vec}(\theta_i^t-w_s^t)\) is clipped and perturbed.
 \begin{equation}
@@ -885,7 +764,7 @@ Update clipping and Gaussian perturbation affect convergence in different ways.
 The clipping distortion is generally nonzero in expectation and is therefore
 treated as a deterministic gradient error. Its conditional mean square
 \(\mathcal{B}_{\mathrm{clip},i}^{t}\) contributes to the persistent bias term
-in the PL error bound, together with the feature level gradient biases.
+in the PL error bound.
 
 In contrast, Gaussian update noise has zero mean and contributes through its
 variance. Its contribution depends on the aggregation weight used by the
@@ -921,7 +800,8 @@ provided in Appendix~\ref{app:convergence_derivation}.
 
 We assume that the original global objective \(F(w)\) is \(G\)-smooth and satisfies the \(\mu\)-PL condition
 \(\|\nabla F(w)\|_2^2\ge 2\mu(F(w)-F(w^*))\).
-Combining feature clipping bias, feature noise bias, loss inflation, local stochastic variance, update clipping bias, and update DP variance gives a one step recursion
+Combining local stochastic variance, update clipping bias, and update DP
+variance gives a one step recursion
 \begin{equation}
 \mathbb{E}[F(w^{t+1})-F(w^*)]
 \le
@@ -930,16 +810,12 @@ Combining feature clipping bias, feature noise bias, loss inflation, local stoch
 \label{eq:pl_recursion}
 \end{equation}
 Taking the steady state of this recursion motivates the convergence error cost
-used during selection. Let \(m_{z,i}^t\) and \(m_{u,i}^t\) be the numbers of
-feature DP releases and client update DP releases generated by the selected
-link flow. Define the client bias and variance costs as
+used during selection. Let \(m_{u,i}^t\) be the number of update DP releases
+generated by the selected link flow. Define the client bias and variance costs as
 \begin{equation}
 \begin{aligned}
-B_i^t={}&\frac{3}{2\mu}\Bigl[m_{z,i}^t\bigl(
-\mathcal B_{\mathrm{fclip},i}^t
-+\kappa_z^2\|W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}}\|_2^2
-+G\Delta_{\mathrm{emb}}\bigr)
-+m_{u,i}^t\mathcal B_{\mathrm{clip},i}^t\Bigr],\\
+B_i^t={}&\frac{3m_{u,i}^t}{2\mu}
+\mathcal B_{\mathrm{clip},i}^t,\\
 V_i^t={}&\frac{G\eta_{\mathrm{lr}}L_B}{\mu}\left[
 \sigma_{\mathrm{local}}^2
 +m_{u,i}^t\frac{\sigma_u^2\Delta_u^2d}
@@ -1011,8 +887,8 @@ denote a complete system decision. Its global feasible set is
 \begin{aligned}
 \mathcal X^t=\bigl\{\mathbf{x}\mid{}&h_i\in\mathcal H_i^{\mathrm{res}},\
 \pi_i\in\Pi(h_i),\\
-&\epsilon_{i,c}^{t,+}(h_i,\pi_i)\le\bar\epsilon_{i,c},
-\ \forall c\in\mathcal C_P,\ \forall i\in\mathcal N\bigr\}.
+&\epsilon_{i,\mathrm{upd}}^{t,+}(h_i,\pi_i)
+\le\bar\epsilon_{i,\mathrm{upd}},\ \forall i\in\mathcal N\bigr\}.
 \end{aligned}
 \label{eq:global_feasible_set}
 \end{equation}
@@ -1135,27 +1011,30 @@ The search is performed only at the strategy update points determined by
 by changing collaborative modes is included in \(T_i^t\).
 
 The implementation applies one explicit utility stability safeguard before
-the bounded search. The feature and update Gaussian standard deviations,
-relative to their clipping radii, are
+the bounded search. The update Gaussian standard deviation relative to its
+clipping radius is
 \begin{equation}
-q_{\mathrm{emb}}=2\sigma_{\mathrm{emb}},
-\qquad
 q_{\mathrm{upd}}=2\sigma_{\mathrm{upd}}.
 \label{eq:cloud_dp_stability}
 \end{equation}
-The factor two follows from the replacement sensitivities
-\(\Delta_z=2C_z\) and \(\Delta_u=2C_u\). If a cloud reaching DP candidate has
-\(q_c>\tau_{\mathrm{DP}}\), it is removed only when the same client has a
+The factor two follows from the replacement sensitivity \(\Delta_u=2C_u\).
+If a cloud reaching DP candidate has
+\(q_{\mathrm{upd}}>\tau_{\mathrm{DP}}\), it is removed only when the same client has a
 feasible cloud reaching HE candidate. We use
 \(\tau_{\mathrm{DP}}=1\). A cloud reaching DP candidate with a per coordinate
-Gaussian standard deviation larger than the corresponding clipping scale is
+Gaussian standard deviation larger than the update clipping scale is
 replaced by an HE alternative when such an alternative is feasible.
 
 Because the reported task is global model training, the feasible global set
 also excludes configurations with too little cross edge information. For every
-represented edge domain \(j\), the executed profile satisfies
-\(\mathcal H_C=\{\mathrm{LIC},\mathrm{LIIC},\mathrm{LIEIIC},
-\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}\) and
+represented edge domain \(j\), define
+\begin{equation}
+\begin{split}
+\mathcal H_C=\{&\mathrm{LIIC},\mathrm{LIEIIC},\\
+&\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
+\end{split}
+\end{equation}
+The executed profile satisfies
 \begin{equation}
 \frac{\sum_{i:e(i)=j}n_i\mathbb I(h_i\in\mathcal H_C)}
 {\sum_{i:e(i)=j}n_i}
@@ -1201,16 +1080,17 @@ final weighted sum. Under \equref{eq:edge_cloud_coverage}, every represented edg
 \label{alg:selection}
 \small
 \begin{algorithmic}[1]
-\REQUIRE Device set \(\mathcal N\), resource feasible modes \(\mathcal H_i^{\mathrm{res}}\), policy sets \(\Pi(h_i)\), RDP states \(R_{i,c}^t(\alpha)\), targets \((\bar\epsilon_{i,c},\delta_c)\), round system state, path latency and buffer models, \(K_{\mathrm P},K_{\mathrm B},I_{\max},S_P\), optional \(\mathbf z^{r,t}\), and \(\mathbf x^{t-1}\)
+\REQUIRE Device set \(\mathcal N\), resource feasible modes \(\mathcal H_i^{\mathrm{res}}\), policy sets \(\Pi(h_i)\), update RDP states \(R_{i,\mathrm{upd}}^t(\alpha)\), targets \((\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\), round system state, path latency and buffer models, \(K_{\mathrm P},K_{\mathrm B},I_{\max},S_P\), optional \(\mathbf z^{r,t}\), and \(\mathbf x^{t-1}\)
 \ENSURE Selected global profile \(\mathbf x^\star=\{(h_i^\star,\pi_i^\star)\}_{i\in\mathcal N}\)
 \STATE \textbf{Preparation}
 \STATE For every \(i\in\mathcal N\), construct the candidate set satisfying the resource and privacy constraints
 \STATE \(\displaystyle
 \mathcal S_i=\{(h_i,\pi_i)\mid h_i\in\mathcal H_i^{\mathrm{res}},
 \pi_i\in\Pi(h_i),
-\epsilon_{i,c}^{t,+}(h_i,\pi_i)\le\bar\epsilon_{i,c},\ \forall c\in\mathcal C_P\}\).
+\epsilon_{i,\mathrm{upd}}^{t,+}(h_i,\pi_i)
+\le\bar\epsilon_{i,\mathrm{upd}}\}\).
 \STATE If client \(i\) has a feasible cloud reaching HE candidate, remove each
-cloud reaching DP candidate with \(q_c>\tau_{\mathrm{DP}}\) from
+cloud reaching DP candidate with \(q_{\mathrm{upd}}>\tau_{\mathrm{DP}}\) from
 \(\mathcal S_i\) according to \equref{eq:cloud_dp_stability}.
 \STATE \(\displaystyle
 \mathcal X^t=\left\{\mathbf x\in\prod_{i\in\mathcal N}\mathcal S_i
@@ -1290,17 +1170,17 @@ The main symbols used in the collaboration reconfiguration model and solver are 
 \textbf{Symbol} & \textbf{Meaning} \\
 \hline
 \(\mathcal{N}, N\) & End device set and number of end devices \\
-\(\mathcal{H}, \mathcal{H}_i^{\mathrm{res}}\) & Global candidate collaborative mode set and resource feasible mode set of client \(i\) \\
+\(\mathcal{H}_{\mathrm{base}},\mathcal{H}, \mathcal{H}_i^{\mathrm{res}}\) & Abstract mode set, executable mode set, and resource feasible mode set of client \(i\) \\
 \(\Pi(h_i), \pi_i\) & Candidate privacy policy set under mode \(h_i\), and the privacy policy selected by client \(i\) \\
 \(\psi_{\lambda}(h_i,\pi_i)\) & Actual privacy mechanism applied on link \(\lambda\), selected from \(\pi_i\) for privacy eligible links and set to \(\mathrm{none}\) otherwise \\
 \(s_i=(h_i,\pi_i),\mathcal{S}_i\) & One decision pair of client \(i\), and the feasible candidate set \\
 \(L_B,E_B\) & Number of local link block loops and number of edge aggregation loops before cloud aggregation \\
 \(Q_{\mathrm{comp},i}, Q_{\mathrm{mem},i}\) & Local computation budget and memory upper bound of client \(i\) \\
-\(R_{i,c}^t(\alpha)\) & Client RDP state for privacy channel \(c\) at order \(\alpha\) \\
-\((\bar\epsilon_{i,c},\delta_c)\) & Fixed total privacy target for embedding or update channel \(c\) \\
+\(R_{i,\mathrm{upd}}^t(\alpha)\) & Client RDP state for update DP at order \(\alpha\) \\
+\((\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\) & Fixed total privacy target for the update channel \\
 \(W_{i,L}^{\mathrm{comp}}, M_i^{\mathrm{mem}}\) & Computation workload and memory requirement of client \(i\) under a selected mode \\
 \(\chi(h_i),F_i\) & Mode dependent sample computation workload and fixed computing rate of client \(i\) \\
-\(\epsilon_{i,c}^{t,+}\) & Projected channel epsilon after one candidate link flow \\
+\(\epsilon_{i,\mathrm{upd}}^{t,+}\) & Projected update epsilon after one candidate link flow \\
 \(T_i, T_{\mathrm{sys}}\) & Path level link flow latency of client \(i\), and system latency of one triggered aggregation event \\
 \(C_i^{\mathrm{sw},t}, S_P\) & Mode switching overhead in round \(t\), and strategy update period for limiting reconfiguration frequency \\
 \(K_{\mathrm P},K_{\mathrm B},I_{\max}\) & Pareto archive limit, deterministic exploration queue limit, and maximum search expansions \\
@@ -1313,10 +1193,7 @@ The main symbols used in the collaboration reconfiguration model and solver are 
 \(\Psi_C^t, r_C^t\) & Cloud fusion insufficiency penalty and cloud fusion ratio \\
 \(N_e,N_{e,A}^t\) & Full edge data mass and admitted cloud data mass \\
 \(\rho_{\mathrm{buf}},\rho_{\mathrm{PL}}\) & Buffered aggregation participation threshold and PL based convergence contraction factor \\
-\(\eta_{\mathrm{lr}},\nu\) & Learning rate and Gaussian noise added to intermediate features by feature level DP \\
-\(\Delta_{\mathrm{emb}},W_{\mathrm{clf}}\) & Feature level DP loss inflation term and local classifier weight matrix \\
-\(C_z,C_g,\Delta_z,\Delta_g\) & Embedding and backward gradient clipping thresholds and their replacement sensitivities \\
-\(L_z,\kappa_z\) & Representation gradient smoothness constant and encoder Jacobian bound \\
+\(\eta_{\mathrm{lr}},\sigma_{\mathrm{local}}^2\) & Learning rate and local stochastic gradient variance \\
 \(C_u,\Delta_u,\mathcal{B}_{\mathrm{clip},i}^{t}\) & Update clipping threshold, client replacement sensitivity, and clipping bias estimate \\
 \hline\hline
 \end{tabular}
@@ -1329,7 +1206,7 @@ The main symbols used in the collaboration reconfiguration model and solver are 
 We evaluate the proposed method with real model training supported by the system
 simulator. The cloud-edge-end system contains 100 end devices, 10 edge nodes,
 and one cloud node. The main comparison trains a pretrained ResNet 18 model on
-CIFAR 10 for 200 communication rounds under extreme edge label skew. Each round
+CIFAR 10 for 100 communication rounds under extreme edge label skew. Each round
 uses three local epochs and a learning rate of 0.01. Five runs use random seeds
 40 to 44. Fashion MNIST with LeNet 5 provides a second dataset and model
 setting. The main parameters are listed in \tabref{tab:sim_params}.
@@ -1344,22 +1221,28 @@ setting. The main parameters are listed in \tabref{tab:sim_params}.
 \hline
 \textbf{Parameter} & \textbf{Value} & \textbf{Parameter} & \textbf{Value} \\
 \hline
-End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=200\) \\
+End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=100\) \\
 Training and test samples & 12000 and 2000 & Random seeds & 40, 41, 42, 43, and 44 \\
 Client computation and memory factors & Independent $\mathcal U(0.5,2.0)$ & Edge computation factor & $\mathcal U(2/3,1.5)$ \\
 Local link block loops & \(L_B=5\) & Edge aggregation loops & \(E_B=3\) \\
-Fixed total DP targets & \(\bar\epsilon_{\mathrm{emb}}=\bar\epsilon_{\mathrm{upd}}=8.0\) & DP slack parameters & \(\delta_{\mathrm{emb}}=\delta_{\mathrm{upd}}=10^{-5}\) \\
-Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=44.73\) MB & HE expansion factor & \(\alpha_{\mathrm{HE}}=24.01\) \\
-CKKS polynomial degree and scale & \(8192\) and \(2^{40}\) & CKKS coefficient modulus bits & \([40,40,40,40]\) \\
-CKKS reference profile for a 4 MB update & 96.04 MB and 1.53 s & CKKS key preparation & 0.15 s per policy run \\
+Fixed total DP target & \(\bar\epsilon_{\mathrm{upd}}=8.0\) & DP slack parameter & \(\delta_{\mathrm{upd}}=10^{-5}\) \\
+Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=44.73\) MB & HE expansion factor & \(\alpha_{\mathrm{HE}}=8.04\) \\
+CKKS polynomial degree and scale & \(8192\) and \(2^{40}\) & CKKS coefficient modulus bits & \([50,40]\) \\
+CKKS reference profile for a 4 MB update & 32.14 MB and 0.90 s & CKKS key preparation & 0.13 s per policy run \\
 Base link rates & end to edge 5, end to cloud 2.2, edge to cloud 8 MB/s & Rate variation & sinusoidal amplitude 0.2 and uniform jitter 0.25 \\
 Aggregation fraction & $\rho_{\mathrm{buf}}=1.0$ & Strategy update period & $S_P=1$ \\
-DP clip norms & $C_z=C_g=C_u=1.0$ & Auto calibrated noise multipliers & $\sigma_{\mathrm{emb}}=53.534$, $\sigma_{\mathrm{upd}}=19.548$ \\
+Update clip norm & $C_u=1.0$ & Auto calibrated noise multiplier & $\sigma_{\mathrm{upd}}=6.911$ \\
 Pareto archive, beam, and expansions & $K_{\mathrm P}=16$, $K_{\mathrm B}=4$, $I_{\max}=50$ & Cloud fusion penalty & $\xi=0.2$, $\varepsilon=0.05$ \\
 Training hardware & Intel i7 11700F, GTX 1660 Ti 6 GB, 31.8 GB RAM & Software & Python 3.10.9, PyTorch 2.5.1, torchvision 0.20.1, SEAL 4.0.0 \\
 \hline
 \end{tabularx}
 \end{table*}
+
+The encrypted aggregator performs ciphertext addition without ciphertext
+multiplication. The coefficient modulus therefore contains one 50 bit data
+prime and one 40 bit special prime. Its total of 90 bits is below the 218 bit
+limit reported by SEAL for polynomial degree 8192 at the 128 bit security
+level.
 
 The fixed link, switching, and aggregation profiles used by the analytical
 latency model are listed in \tabref{tab:additional_profile_params}.
@@ -1386,7 +1269,7 @@ one embedding transmission event in the analytical link model. The
 corresponding backward gradient event uses the same payload profile. This value
 is a reproducible simulation input rather than a per sample or per layer tensor
 size.
-The ResNet 18 update payload is computed from 11181642 trainable values stored
+The ResNet 18 update payload is computed from 11181642 parameter values stored
 as 32 bit floating point numbers. The CKKS processing profile uses 4 MB as its
 reference granularity and scales linearly with the actual update payload.
 
@@ -1438,35 +1321,42 @@ links, and 8 MB/s for edge to cloud links. Reverse links use the same base
 rate. These values define a reproducible synthetic network scenario rather
 than a physical network measurement.
 
-The privacy noise multipliers are calibrated from the predefined total privacy
-targets and the largest candidate link flow. The selector and real training use
-the same privacy parameters. Feature epsilon is a record privacy value and
-update epsilon is a client privacy value. HE overhead is included during selection. When
-HE is selected, the complete update is packed in CKKS ciphertexts and aggregated
-with SEAL during training. All methods use the same data partition, optimizer, local epochs, and
-edge normalized aggregation rule in \equref{eq:edge_normalized_fedavg}. The main
+The update noise multiplier is calibrated from the predefined total privacy
+target and the largest executable cross domain update flow. The selector and
+training use the same privacy parameters. The main utility experiments use the
+measured CKKS profile in the collaboration cost and apply the corresponding
+weighted aggregate numerically. A separate validation executes complete update
+encryption, ciphertext aggregation, and final decryption with SEAL. All methods
+use the same data partition, optimizer, local epochs, and edge normalized
+aggregation rule in \equref{eq:edge_normalized_fedavg}. The main
 comparison uses five random seeds. Controlled studies use seeds 40, 42, and 44
 and change only the parameter or component under evaluation. The key ablation
 uses all five seeds from 40 to 44.
 
 Every run stores the complete configuration, runtime environment, exact client
-partition, generated device and edge profiles, model parameter partition, raw
-client decisions, link events, and round metrics. These artifacts are written
-to \texttt{config.json}, \texttt{runtime\_environment.json},
-\texttt{data\_partition.json}, \texttt{device\_profiles.csv},
-\texttt{edge\_profiles.csv}, and \texttt{model\_partition.json} in the run
-directory.
+partition, generated system profiles, model parameter partition, raw client
+decisions, link events, and round metrics in its output directory.
 
-We report modeled logical time and measured wall time separately. Logical time
-is produced by the cloud-edge-end latency model. Measured wall time starts
-before policy initialization and ends after the final round summary is
-prepared. It includes candidate construction, mode selection, training, link
-flow execution, DP and HE processing, aggregation, evaluation, checkpointing,
-and mode switching. End to end efficiency comparisons use measured wall time.
-Logical time is retained as an analytical model output and is not used in
-efficiency comparisons.
+The system time used for efficiency comparisons is the modeled cloud-edge-end
+execution time plus the measured mode selection time. It includes the decision
+cost while excluding the sequential host overhead caused by emulating many
+clients on one machine. Host wall time is recorded separately as an
+implementation measurement and is not used as deployment latency.
+
+\subsection{CKKS Profile Validation}
+\label{sec:ckks_validation}
+
+The CKKS profile uses polynomial modulus degree 8192, coefficient modulus bits
+\([50,40]\), scale \(2^{40}\), and chunks of at most 4096 values. A complete
+one round ResNet 18 validation selected HE for 40 clients and encrypted 21.13 GB
+of generated ciphertext. Encryption, ciphertext addition, and decryption took
+335.78 s. The maximum absolute difference from plaintext aggregation was
+\(9.17\times10^{-8}\). The profiled and encrypted executions produced the same
+test accuracy, and their global update norms differed by
+\(1.47\times10^{-9}\). These measurements determine the HE communication and
+computation coefficients used in the main experiments.
 % The numerical tables and figures below must be regenerated with execution
-% revision paper_flow_v22_wall_raw_nsga before submission.
+% revision paper_flow_v25_trusted_edge_domain before submission.
 \subsection{Compared Methods and Main Results}
 Ours performs joint Pareto search over the global client profile and selects a
 compromise between system latency and estimated convergence error cost. Individual Optimal
@@ -1492,32 +1382,32 @@ multiobjective optimizer reference under the same training and privacy
 conditions.
 
 \tabref{tab:main_comparison} and \figref{fig:accuracy_convergence} present the
-five random seeds. The primary efficiency value is measured end to end wall
-time. The two privacy columns report the largest client loss in their respective
-record and client privacy channels. The figure uses the common measured time
-interval determined by the shortest completed run and shows raw accuracy
+five random seeds. The primary efficiency value is system time, which combines
+modeled workflow execution with measured decision time. The privacy column
+reports the largest client update privacy loss. The figure uses the common measured time
+system time interval determined by the shortest completed run and shows raw accuracy
 without temporal smoothing. Numerical values from execution revisions before
-\texttt{paper\_flow\_v22\_wall\_raw\_nsga} are not retained because they used different
+\texttt{paper\_flow\_v25\_trusted\_edge\_domain} are not retained because they used different
 privacy, encrypted aggregation, feasible set, and timing semantics.
 
 \begin{table*}[t]
 \centering
-\caption{Main comparison on CIFAR 10 with ResNet 18 over 200 communication rounds. Values will report the mean and 95\% confidence interval over five random seeds}
+\caption{Main comparison on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over five random seeds}
 \label{tab:main_comparison}
 \scriptsize
 \begin{adjustbox}{max width=\textwidth}
-\begin{tabular}{lcccccc}
+\begin{tabular}{lccccc}
 \hline
-\textbf{Method} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{Wall Time (s)} & \textbf{Comm. (GB)} & \textbf{$\epsilon_{\mathrm{emb}}$} & \textbf{$\epsilon_{\mathrm{upd}}$} \\
+\textbf{Method} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{$\epsilon_{\mathrm{upd}}$} \\
 \hline
-Ours & -- & -- & -- & -- & -- & -- \\
-Individual Optimal & -- & -- & -- & -- & -- & -- \\
-No Protection & -- & -- & -- & -- & -- & -- \\
-Random & -- & -- & -- & -- & -- & -- \\
-Fixed FedAvg & -- & -- & -- & -- & -- & -- \\
-Fixed SplitFed & -- & -- & -- & -- & -- & -- \\
-Fixed HFL & -- & -- & -- & -- & -- & -- \\
-NSGA II & -- & -- & -- & -- & -- & -- \\
+Ours & -- & -- & -- & -- & -- \\
+Individual Optimal & -- & -- & -- & -- & -- \\
+No Protection & -- & -- & -- & -- & -- \\
+Random & -- & -- & -- & -- & -- \\
+Fixed FedAvg & -- & -- & -- & -- & -- \\
+Fixed SplitFed & -- & -- & -- & -- & -- \\
+Fixed HFL & -- & -- & -- & -- & -- \\
+NSGA II & -- & -- & -- & -- & -- \\
 \hline
 \end{tabular}
 \end{adjustbox}
@@ -1526,12 +1416,12 @@ NSGA II & -- & -- & -- & -- & -- & -- \\
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_resnet18_200r_wall_time_accuracy_v22.png}{
-\includegraphics[width=\columnwidth]{cifar10_resnet18_200r_wall_time_accuracy_v22.png}
+\IfFileExists{cifar10_resnet18_100r_wall_time_accuracy_v25.png}{
+\includegraphics[width=\columnwidth]{cifar10_resnet18_100r_wall_time_accuracy_v25.png}
 }{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v22 main experiment figure pending}}
+\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v25 main experiment figure pending}}
 }
-\caption{Raw test accuracy against cumulative measured wall time on CIFAR 10 with ResNet 18. All curves use the common time interval determined by the shortest completed run. The curves show the mean over five random seeds, the shaded regions show 95\% confidence intervals, and the inset enlarges the final quarter of the common interval.}
+\caption{Raw test accuracy against system time on CIFAR 10 with ResNet 18. All curves use the common interval determined by the shortest completed run. The curves show the mean over five random seeds, the shaded regions show 95\% confidence intervals, and the inset enlarges the final quarter of the common interval.}
 \label{fig:accuracy_convergence}
 \end{figure}
 
@@ -1540,18 +1430,18 @@ NSGA II & -- & -- & -- & -- & -- & -- \\
 
 The client decision logs expose how the selected workflow changes during
 training. \figref{fig:reconfiguration_behavior} reports the share of clients in
-each collaboration mode together with the shares using feature DP, update DP,
-and HE. The mode switch curve records the fraction of clients whose selected
+each collaboration mode together with the shares using update DP and HE. The
+mode switch curve records the fraction of clients whose selected
 mode differs from the preceding round. These measurements distinguish dynamic
 workflow reconfiguration from a fixed topology with changing scalar
 parameters.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_reconfiguration_trace_v22.png}{
-\includegraphics[width=\columnwidth]{cifar10_reconfiguration_trace_v22.png}
+\IfFileExists{cifar10_reconfiguration_trace_v25.png}{
+\includegraphics[width=\columnwidth]{cifar10_reconfiguration_trace_v25.png}
 }{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v22 reconfiguration figure pending}}
+\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v25 reconfiguration figure pending}}
 }
 \caption{Raw collaboration mode shares, privacy mechanism shares, and client mode switch rate over communication rounds. The curves report the mean over five random seeds.}
 \label{fig:reconfiguration_behavior}
@@ -1562,19 +1452,19 @@ parameters.
 
 Fashion MNIST with LeNet 5 evaluates the comparison in a different image
 domain and model scale. The experiment uses the same 100 clients, 10 edge
-nodes, 200 communication rounds, five random seeds, privacy targets, and
+nodes, 100 communication rounds, five random seeds, privacy targets, and
 collaboration policies. The local learning rate is 0.15 and each round uses one
 local epoch. The split is placed between the convolutional encoder and the
 fully connected classifier.
 
 \begin{table}[t]
 \centering
-\caption{Fashion MNIST Results with LeNet 5 over 200 Communication Rounds}
+\caption{Fashion MNIST Results with LeNet 5 over 100 Communication Rounds}
 \label{tab:second_dataset}
 \scriptsize
 \begin{tabular}{lccc}
 \hline
-\textbf{Method} & \textbf{Final Acc.} & \textbf{Wall Time} & \textbf{Comm.} \\
+\textbf{Method} & \textbf{Final Acc.} & \textbf{System Time} & \textbf{Comm.} \\
 \hline
 Ours & -- & -- & -- \\
 Individual Optimal & -- & -- & -- \\
@@ -1590,32 +1480,31 @@ NSGA II & -- & -- & -- \\
 
 \begin{figure}[t]
 \centering
-\IfFileExists{fmnist_lenet5_200r_wall_time_accuracy_v22.png}{
-\includegraphics[width=\columnwidth]{fmnist_lenet5_200r_wall_time_accuracy_v22.png}
+\IfFileExists{fmnist_lenet5_100r_wall_time_accuracy_v25.png}{
+\includegraphics[width=\columnwidth]{fmnist_lenet5_100r_wall_time_accuracy_v25.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v22 second dataset figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 second dataset figure pending}}
 }
-\caption{Raw Fashion MNIST test accuracy against cumulative measured wall time with LeNet 5. The curves report the mean and 95\% confidence interval over five random seeds.}
+\caption{Raw Fashion MNIST test accuracy against system time with LeNet 5. The curves report the mean and 95\% confidence interval over five random seeds.}
 \label{fig:second_dataset}
 \end{figure}
 
 \subsection{Decision Time and Scale}
 \label{sec:decision_scale}
 
-\figref{fig:decision_scale} reports measured decision time and end to end wall
-time with 20, 50, and 100 clients. The search overhead and the executed training
-cost are evaluated in one completion time. Ours and Individual Optimal use the
+\figref{fig:decision_scale} reports measured decision time and system time with
+20, 50, and 100 clients. Ours and Individual Optimal use the
 same client profiles, candidate sets, privacy targets, and training settings at
 each scale.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_decision_scalability_v22.png}{
-\includegraphics[width=\columnwidth]{cifar10_decision_scalability_v22.png}
+\IfFileExists{cifar10_decision_scalability_v25.png}{
+\includegraphics[width=\columnwidth]{cifar10_decision_scalability_v25.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v22 scale experiment figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 scale experiment figure pending}}
 }
-\caption{Measured decision time and end to end wall time under different client scales.}
+\caption{Measured decision time and system time under different client scales.}
 \label{fig:decision_scale}
 \end{figure}
 
@@ -1683,36 +1572,35 @@ Test accuracy change & -- & -- \\
 
 \figref{fig:strategy_period} evaluates strategy update periods 1, 5, 10, and
 20 with seeds 40, 42, and 44. The experiment reports final and last 10 round
-accuracy, total decision time, and end to end wall time. This comparison tests
+accuracy, total decision time, and system time. This comparison tests
 how frequently the collaboration workflow must be reconfigured to retain its
 utility while controlling search overhead.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_strategy_period_v22.png}{
-\includegraphics[width=\columnwidth]{cifar10_strategy_period_v22.png}
+\IfFileExists{cifar10_strategy_period_v25.png}{
+\includegraphics[width=\columnwidth]{cifar10_strategy_period_v25.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v22 strategy period figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 strategy period figure pending}}
 }
-\caption{Effect of the strategy update period on accuracy, decision time, and end to end wall time.}
+\caption{Effect of the strategy update period on accuracy, decision time, and system time.}
 \label{fig:strategy_period}
 \end{figure}
 
 \subsection{Privacy Budget Sensitivity}
 \label{sec:privacy_sensitivity}
 
-\figref{fig:privacy_budget} evaluates total privacy targets 1, 2, 4, and 8 for
-both privacy channels with seeds 40, 42, and 44. Each run recalibrates its
-feature and update noise multipliers for the same 200 round horizon. The figure
-reports realized record privacy loss, realized client privacy loss, final
-accuracy, and last 10 round accuracy.
+\figref{fig:privacy_budget} evaluates total update privacy targets 1, 2, 4,
+and 8 with seeds 40, 42, and 44. Each run recalibrates the update noise
+multiplier for the same 100 round horizon. The figure reports realized client
+privacy loss, final accuracy, and last 10 round accuracy.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_privacy_budget_v22.png}{
-\includegraphics[width=\columnwidth]{cifar10_privacy_budget_v22.png}
+\IfFileExists{cifar10_privacy_budget_v25.png}{
+\includegraphics[width=\columnwidth]{cifar10_privacy_budget_v25.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v22 privacy budget figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 privacy budget figure pending}}
 }
 \caption{Accuracy and realized privacy loss under different total privacy targets.}
 \label{fig:privacy_budget}
@@ -1729,24 +1617,24 @@ restricts every feasible client to the LIIEIIIC
 mode while retaining the same training and feasibility checks.
 
 The controlled comparison uses seeds 40 to 44. The table reports the
-complete 200 round utility, communication, privacy, participation, and measured
-wall time results. The figure shows raw accuracy within the common wall time
+complete 100 round utility, communication, privacy, participation, and system
+time results. The figure shows raw accuracy within the common system time
 interval determined by the shortest completed ablation run.
 
 \begin{table*}[t]
 \centering
-\caption{Ablation results on CIFAR 10 with ResNet 18 over 200 communication rounds. Values will report the mean and 95\% confidence interval over five random seeds}
+\caption{Ablation results on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over five random seeds}
 \label{tab:ablation}
 \scriptsize
 \begin{adjustbox}{max width=\textwidth}
-\begin{tabular}{lcccccccc}
+\begin{tabular}{lcccccc}
 \hline
-\textbf{Variant} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{Wall Time (s)} & \textbf{Comm. (GB)} & \textbf{Effective Clients (\%)} & \textbf{$\epsilon_{\mathrm{emb}}$} & \textbf{$\epsilon_{\mathrm{upd}}$} & \textbf{HE Time (s)} \\
+\textbf{Variant} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{Effective Clients (\%)} & \textbf{$\epsilon_{\mathrm{upd}}$} \\
 \hline
-Ours & -- & -- & -- & -- & -- & -- & -- & -- \\
-No Global Coordination & -- & -- & -- & -- & -- & -- & -- & -- \\
-No Error Cost Estimate & -- & -- & -- & -- & -- & -- & -- & -- \\
-Fixed LIIEIIIC & -- & -- & -- & -- & -- & -- & -- & -- \\
+Ours & -- & -- & -- & -- & -- & -- \\
+No Global Coordination & -- & -- & -- & -- & -- & -- \\
+No Error Cost Estimate & -- & -- & -- & -- & -- & -- \\
+Fixed LIIEIIIC & -- & -- & -- & -- & -- & -- \\
 \hline
 \end{tabular}
 \end{adjustbox}
@@ -1754,12 +1642,12 @@ Fixed LIIEIIIC & -- & -- & -- & -- & -- & -- & -- & -- \\
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_ablation_wall_time_accuracy_v22.png}{
-\includegraphics[width=\columnwidth]{cifar10_ablation_wall_time_accuracy_v22.png}
+\IfFileExists{cifar10_ablation_wall_time_accuracy_v25.png}{
+\includegraphics[width=\columnwidth]{cifar10_ablation_wall_time_accuracy_v25.png}
 }{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v22 ablation figure pending}}
+\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v25 ablation figure pending}}
 }
-\caption{Raw test accuracy against cumulative measured wall time for the complete method and three ablation variants. The curves use the common interval determined by the shortest completed run, and the inset enlarges the final quarter of that interval.}
+\caption{Raw test accuracy against system time for the complete method and three ablation variants. The curves use the common interval determined by the shortest completed run, and the inset enlarges the final quarter of that interval.}
 \label{fig:ablation}
 \end{figure}
 
@@ -1786,187 +1674,22 @@ through parallel profile evaluation, distributed search, and warm starts.
 
 This appendix provides the intermediate steps used to estimate convergence
 error cost in Section~\ref{sec:cost_utility_model}. It separates the effects
-of feature clipping, Gaussian feature perturbation, update clipping, and update
-noise. Equalities associated with clipping are exact, whereas the feature noise
-terms use a second order small noise approximation~\cite{bishop1995training}.
-
-\subsection{Feature Clipping Distortion}
-
-For
-\begin{equation}
-z^{\mathrm{clip}}=\frac{z}{\max(1,\|z\|_2/C_z)},
-\label{eq:app_feature_clipping}
-\end{equation}
-if \(\|z\|_2\le C_z\), then \(z^{\mathrm{clip}}=z\) and the clipping residual is
-zero. If \(\|z\|_2>C_z\), then
-\begin{equation}
-\begin{aligned}
-\|z^{\mathrm{clip}}-z\|_2
-&=\left\|\left(\frac{C_z}{\|z\|_2}-1\right)z\right\|_2\\
-&=\left|\frac{C_z}{\|z\|_2}-1\right|\|z\|_2
-=\|z\|_2-C_z.
-\end{aligned}
-\label{eq:app_feature_residual_active}
-\end{equation}
-Hence, the two cases can be written compactly as
-\begin{equation}
-\|z^{\mathrm{clip}}-z\|_2=(\|z\|_2-C_z)_+.
-\label{eq:app_feature_residual}
-\end{equation}
-
-Let \(g_z(\theta,z)=\nabla_z\ell(\theta,z)\). Under the assumptions
-\begin{equation}
-\|g_z(\theta,z')-g_z(\theta,z)\|_2\le L_z\|z'-z\|_2,
-\qquad
-\|J_{\phi,i}^t\|_{\mathrm{op}}\le\kappa_z,
-\label{eq:app_feature_assumptions}
-\end{equation}
-where \(J_{\phi,i}^t=\nabla_\phi f_{\phi^t}(x_i)\), the chain rule and the
-submultiplicative property of the operator norm yield
-\begin{equation}
-\begin{aligned}
-&\left\|(J_{\phi,i}^t)^\top
-\left[g_z(\theta^t,z_i^{t,\mathrm{clip}})
--g_z(\theta^t,z_i^t)\right]\right\|_2\\
-&\quad\le
-\|J_{\phi,i}^t\|_{\mathrm{op}}
-\|g_z(\theta^t,z_i^{t,\mathrm{clip}})-g_z(\theta^t,z_i^t)\|_2\\
-&\quad\le
-\kappa_zL_z\|z_i^{t,\mathrm{clip}}-z_i^t\|_2
-=\kappa_zL_z(\|z_i^t\|_2-C_z)_+.
-\end{aligned}
-\label{eq:app_feature_gradient_bound}
-\end{equation}
-Squaring and taking conditional expectation gives
-\begin{equation}
-\mathcal{D}_{\mathrm{fclip},i}^t
-\le
-\kappa_z^2L_z^2
-\mathbb{E}\!\left[(\|z_i^t\|_2-C_z)_+^2\mid w^t\right]
-=\mathcal{B}_{\mathrm{fclip},i}^t,
-\label{eq:app_feature_bias_bound}
-\end{equation}
-which establishes \equref{eq:feature_clipping_bias}. This is a parameter gradient
-distortion bound, not a direct loss difference bound.
-
-\subsection{Expected Loss Inflation Under Gaussian Feature Noise}
-
-Let \(o=W_{\mathrm{clf}}z^{\mathrm{clip}}+b\),
-\(\Delta o=W_{\mathrm{clf}}\nu\), and
-\(\tilde{o}=o+\Delta o\). Since
-\(\nu\sim\mathcal{N}(0,\sigma^2\Delta_z^2I_{d_z})\),
-\begin{equation}
-\mathbb{E}[\Delta o]=0,
-\qquad
-\Sigma_o=\mathbb{E}[\Delta o\Delta o^\top]
-=\sigma^2\Delta_z^2W_{\mathrm{clf}}W_{\mathrm{clf}}^\top.
-\label{eq:app_logit_covariance}
-\end{equation}
-A second order Taylor expansion of the loss around \(o\) gives
-\begin{equation}
-\ell(\tilde{o})
-\approx
-\ell(o)+\nabla_o\ell(o)^\top\Delta o
-+\frac{1}{2}\Delta o^\top\nabla_o^2\ell(o)\Delta o.
-\label{eq:app_loss_taylor}
-\end{equation}
-Taking expectation eliminates the first-order term. Using
-\(\mathbb{E}[x^\top Ax]=\operatorname{Tr}(A\mathbb{E}[xx^\top])\) gives
-\begin{equation}
-\begin{aligned}
-\mathbb{E}_{\nu}[\ell(\tilde{o})]
-&\approx \ell(o)
-+\frac{1}{2}\operatorname{Tr}(\nabla_o^2\ell\,\Sigma_o)\\
-&=\ell(o)+\frac{\sigma^2\Delta_z^2}{2}
-\operatorname{Tr}\!\left(
-W_{\mathrm{clf}}^\top\nabla_o^2\ell W_{\mathrm{clf}}
-\right).
-\end{aligned}
-\label{eq:app_expected_loss}
-\end{equation}
-For softmax cross entropy,
-\(\nabla_o^2\ell=\operatorname{diag}(p)-pp^\top\succeq0\). Moreover, for a
-matrix \(W\) whose rows are \(W_j\),
-\begin{equation}
-\operatorname{Tr}\!\left[W^\top(\operatorname{diag}(p)-pp^\top)W\right]
-=\frac{1}{2}\sum_{j,k}p_jp_k\|W_j-W_k\|_2^2.
-\label{eq:app_pairwise_identity}
-\end{equation}
-Substitution into \equref{eq:app_expected_loss} yields
-\begin{equation}
-\Delta_{\mathrm{emb}}
-=\frac{\sigma^2\Delta_z^2}{4}
-\sum_{j,k}p_jp_k\|W_{\mathrm{clf},j}-W_{\mathrm{clf},k}\|_2^2
-\ge0,
-\label{eq:app_loss_inflation}
-\end{equation}
-which recovers \equref{eq:delta_emb}. Thus, zero mean noise removes the linear
-Taylor term but not the curvature dependent quadratic term.
-
-\subsection{Backward Gradient Bias Under Gaussian Feature Noise}
-
-For the \(r\)-th softmax output, let
-\(H^{(r)}=\nabla_o^2p_r(o)\). Its second order expansion is
-\begin{equation}
-\tilde p_r
-\approx
-p_r+\nabla_op_r(o)^\top\Delta o
-+\frac{1}{2}\Delta o^\top H^{(r)}\Delta o.
-\label{eq:app_softmax_taylor}
-\end{equation}
-Taking expectation and using \(\mathbb{E}[\Delta o]=0\) gives
-\begin{equation}
-\mathbb{E}_{\nu}[\tilde p_r]
-\approx p_r+\frac{1}{2}\operatorname{Tr}(H^{(r)}\Sigma_o)
-=p_r+[\mathbf b_{\mathrm{bias}}]_r.
-\label{eq:app_probability_bias}
-\end{equation}
-For softmax cross entropy with one hot label \(y\),
-\(\nabla_{\tilde{o}}\ell=\tilde p-y\). Therefore,
-\begin{equation}
-\begin{aligned}
-\mathbb{E}_{\nu}[\nabla_{\tilde z}\ell]
-&=W_{\mathrm{clf}}^\top
-\left(\mathbb{E}_{\nu}[\tilde p]-y\right)\\
-&\approx W_{\mathrm{clf}}^\top(p-y)
-+W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}},
-\end{aligned}
-\label{eq:app_backward_bias}
-\end{equation}
-Equation~\equref{eq:feature_dp_bias} follows. The second term is a systematic
-representation gradient bias. Its mapping through the encoder Jacobian gives
-\begin{equation}
-\|(J_{\phi,i}^t)^\top W_{\mathrm{clf}}^\top
-\mathbf b_{\mathrm{bias}}\|_2^2
-\le\kappa_z^2\|W_{\mathrm{clf}}^\top
-\mathbf b_{\mathrm{bias}}\|_2^2.
-\label{eq:app_encoder_noise_bias}
-\end{equation}
+of update clipping and Gaussian update noise.
 
 \subsection{PL Error Recursion}
 
-Let the combined deterministic parameter gradient perturbation be
+Let the deterministic parameter gradient perturbation caused by update
+clipping be
 \begin{equation}
-e_i^t=e_{\mathrm{fclip},i}^t+e_{\mathrm{fnoise},i}^t
-+e_{\mathrm{uclip},i}^t.
+e_i^t=e_{\mathrm{uclip},i}^t.
 \label{eq:app_total_bias}
 \end{equation}
-The elementary inequality
+For consistency with the separable upper bound used during selection, we use
+the conservative bound
 \begin{equation}
-\|a+b+c\|_2^2\le3(\|a\|_2^2+\|b\|_2^2+\|c\|_2^2)
-\label{eq:app_three_term_bound}
-\end{equation}
-and the bounds above imply
-\begin{equation}
-\begin{aligned}
 \mathbb{E}[\|e_i^t\|_2^2\mid w^t]
-\le3\Bigl(&\mathbb{I}_{\mathrm{emb}}^{i,t}
-\mathcal{B}_{\mathrm{fclip},i}^t
-+\mathbb{I}_{\mathrm{emb}}^{i,t}\kappa_z^2
-\|W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}}\|_2^2\\
-&+\mathbb{I}_{\mathrm{upd}}^{i,t}
-\mathcal{B}_{\mathrm{clip},i}^t\Bigr).
-\end{aligned}
+\le3\mathbb{I}_{\mathrm{upd}}^{i,t}
+\mathcal{B}_{\mathrm{clip},i}^t.
 \label{eq:app_combined_bias_bound}
 \end{equation}
 To make the coefficients in \equref{eq:client_error_cost} explicit, define the
@@ -2052,28 +1775,16 @@ Substituting \equref{eq:app_combined_bias_bound} into
 \end{equation}
 where
 \begin{equation}
-\begin{aligned}
 S_{\mathrm{bias},i}^t
-={}&\mathbb{I}_{\mathrm{emb}}^{i,t}\mathcal B_{\mathrm{fclip},i}^t
-+\mathbb{I}_{\mathrm{upd}}^{i,t}\mathcal B_{\mathrm{clip},i}^t\\
-&+\mathbb{I}_{\mathrm{emb}}^{i,t}\kappa_z^2
-\|W_{\mathrm{clf}}^\top\mathbf b_{\mathrm{bias}}\|_2^2.
-\end{aligned}
+=\mathbb{I}_{\mathrm{upd}}^{i,t}\mathcal B_{\mathrm{clip},i}^t.
 \label{eq:app_bias_sum}
 \end{equation}
-Because \(\Delta_{\mathrm{emb}}\ge0\) and
-\(G\alpha^2V_i^t/2\le G\alpha^2V_i^t\), we use the conservative residual
+Because \(G\alpha^2V_i^t/2\le G\alpha^2V_i^t\), we use the conservative residual
 \begin{equation}
 \mathcal R(h_i,\pi_i)
-=\frac{3\alpha}{2}\left(
-S_{\mathrm{bias},i}^t
-+\mathbb{I}_{\mathrm{emb}}^{i,t}G\Delta_{\mathrm{emb}}
-\right)+G\alpha^2V_i^t.
+=\frac{3\alpha}{2}S_{\mathrm{bias},i}^t+G\alpha^2V_i^t.
 \label{eq:app_residual_definition}
 \end{equation}
-The additional nonnegative \(G\Delta_{\mathrm{emb}}\) term retains the
-curvature dependent expected loss inflation when constructing the convergence
-error cost estimate.
 
 For a fixed conditional residual, iterating the recursion gives
 \begin{equation}
@@ -2089,8 +1800,8 @@ Thus its persistent contribution is estimated by
 \(\mathcal R(h_i,\pi_i)/\rho_{\mathrm{PL}}\). Substituting
 \(\alpha=\eta_{\mathrm{lr}}L_B\), \equref{eq:app_total_variance}, and
 \equref{eq:app_bias_sum} gives the client terms \(B_i^t\) and \(V_i^t\) in
-\equref{eq:client_error_cost}. Feature terms and client update terms are
-multiplied by their numbers of DP releases. The same calculation gives
+\equref{eq:client_error_cost}. Update terms are multiplied by their numbers of
+DP releases. The same calculation gives
 \(B_g^t\) and \(V_g^t\) for a DP release applied after edge aggregation.
 Weighting the bias terms by \(q_i^t\) or \(q_g^t\), and independent variance
 terms by their squared weights, gives \equref{eq:global_omega}.
@@ -2103,18 +1814,19 @@ key to encrypt every parameter of an HE protected update. The cloud evaluator
 does not hold the secret key and performs only ciphertext addition. A trusted
 coordinator holds the secret key and decrypts the final aggregate. The
 implementation uses polynomial modulus degree 8192, coefficient modulus bits
-\([40,40,40,40]\), scale \(2^{40}\), and chunks of at most 4096 values. The
+\([50,40]\), scale \(2^{40}\), and chunks of at most 4096 values. The
 same key pair is reused within one policy run.
 
 This protection hides selected update contents from the communication links
 and the cloud evaluator. It does not hide the final aggregate from the trusted
 coordinator and does not address malicious updates or collusion with the
-coordinator. The experiment process emulates these roles while executing the
-actual SEAL encryption, ciphertext addition, and decryption operations. Every
-round records the ciphertext count, encrypted parameter count, operation wall
-time, and maximum absolute error against plaintext aggregation. The selector
-uses \(\alpha_{\mathrm{HE}}\) and \(T^P(\mathrm{HE})\) as profiled estimates,
-whereas end to end wall time includes the measured CKKS operations.
+coordinator. The implementation provides a complete SEAL execution path for
+these roles. The validation experiment records ciphertext count, encrypted
+parameter count, operation time, and maximum absolute error against plaintext
+aggregation. The main utility experiments use the measured
+\(\alpha_{\mathrm{HE}}\) and \(T^P(\mathrm{HE})\) values to represent CKKS
+communication and computation costs without repeating the same cryptographic
+benchmark in every training round.
 
 \section*{Code and Data Availability}
 The supplementary artifact contains the implementation, versioned experiment

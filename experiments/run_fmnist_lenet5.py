@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from dynfed.fmnist_lenet5_dynamic import Lenet5Config, run_fmnist_lenet5_training
 from dynfed.selection import SelectionConfig
+from dynfed.version import CURRENT_EXECUTION_REVISION
 from dynfed.utils import timestamped_dir
 
 
@@ -31,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--execution-revision",
-        default="paper_flow_v22_wall_raw_nsga",
+        default=CURRENT_EXECUTION_REVISION,
     )
     parser.add_argument("--clients", type=int, default=100)
     parser.add_argument("--edges", type=int, default=10)
@@ -81,7 +82,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dp-update-noise-multiplier", type=float, default=None)
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
+    parser.add_argument(
+        "--trusted-edge-split-execution",
+        action="store_true",
+        help=(
+            "Treat end-to-edge split activations and returned gradients as internal "
+            "to a trusted execution domain. Direct end-to-cloud split is disabled."
+        ),
+    )
     parser.add_argument("--he-backend", default="none", choices=["none", "seal", "tenseal"])
+    parser.add_argument("--he-execution", default="real", choices=["real", "profiled"])
     parser.add_argument("--he-local-deps", default=".he_deps")
     parser.add_argument("--require-real-he", action="store_true")
     parser.add_argument(
@@ -192,6 +202,8 @@ def main() -> None:
         time_limit=args.time_limit,
         risk_limit=args.risk_limit,
         aggregation_fraction=args.aggregation_fraction,
+        privacy_local_epochs=args.local_epochs,
+        trusted_edge_split_execution=args.trusted_edge_split_execution,
         pareto_archive_size=args.pareto_archive_size,
         pareto_beam_size=args.pareto_beam_size,
         pareto_max_iters=args.pareto_max_iters,
@@ -237,6 +249,7 @@ def main() -> None:
         dp_update_mode=args.dp_update_mode,
         device=args.device,
         he_backend=args.he_backend,
+        he_execution=args.he_execution,
         he_local_deps=args.he_local_deps,
         require_real_he=args.require_real_he,
         he_aggregation_size=args.he_aggregation_size,

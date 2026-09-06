@@ -43,10 +43,12 @@ python experiments\run_paper_config.py
 ```
 
 The versioned configuration is
-`configs/paper_v22_cifar10_resnet18.json`. It fixes CIFAR 10, pretrained
-ResNet 18, 100 clients, 10 edge nodes, 200 rounds, seeds 40 through 44,
-separate feature and update privacy targets of 8.0, full update CKKS
-aggregation, and the eight compared policies. The configured seeds are 40, 41,
+`configs/paper_v25_cifar10_resnet18.json`. It fixes CIFAR 10, pretrained
+ResNet 18, 100 clients, 10 edge nodes, 100 rounds, seeds 40 through 44,
+a client level update privacy target of 8.0, trusted end to edge split
+execution, full update CKKS cost profiling, and the eight compared policies. The 100 round utility runs use
+the measured CKKS profile and numerically equivalent aggregation so that the
+same cryptographic benchmark is not repeated in every round. The configured seeds are 40, 41,
 42, 43, and 44. The runner accepts `--seeds`,
 `--policies`, and `--rounds` overrides so long experiments can be split into
 separate processes without changing the recorded base configuration.
@@ -55,7 +57,7 @@ Resume one interrupted seed into a new output directory while retaining its
 model, privacy ledger, random state, and completed round history:
 
 ```powershell
-python experiments\run_paper_config.py --seeds 42 --policies ours --resume-from-run out\paper_v22_cifar10_resnet18\EXISTING_RUN_DIRECTORY
+python experiments\run_paper_config.py --seeds 42 --policies ours --resume-from-run out\paper_v25_cifar10_resnet18\EXISTING_RUN_DIRECTORY
 ```
 
 `--resume-from-run` deliberately accepts exactly one seed at a time.
@@ -71,9 +73,12 @@ python experiments\run_fmnist_lenet5.py --rounds 100 --executor process_pool --e
 Run with real CKKS encrypted aggregation for HE-selected updates:
 
 ```powershell
-pip install -r requirements-he.txt
-python experiments\run_fmnist_lenet5.py --rounds 100 --he-backend tenseal --require-real-he --he-aggregation-size 0 --policies ours
+python experiments\run_paper_config.py --seeds 42 --policies ours --max-new-rounds 1 --he-execution real --output-root out\paper_v25_cifar10_resnet18_real_he_validation
 ```
+
+This validation encrypts the complete selected updates. It is separate from
+the profiled 100 round utility experiment. Revision v22 checkpoints cannot be
+resumed by revision v25.
 
 To use the Fed3Scale SEAL binding instead of TenSEAL, build and install the
 local PySEAL package from a Visual Studio x64 developer prompt:
@@ -151,32 +156,32 @@ The current implementation is aligned with the paper logic around:
 - strategy update period,
 - switching cost estimate,
 - mixed edge and cloud flow execution,
-- separate record and client DP guarantees,
-- complete CKKS aggregation, and
-- measured end to end wall time.
+- trusted end to edge split execution and client replacement update DP,
+- complete CKKS validation and profiled CKKS utility execution, and
+- accounted system time with measured decision cost.
 
-Only outputs with `training.execution_revision=paper_flow_v22_wall_raw_nsga` are
+Only outputs with `training.execution_revision=paper_flow_v25_trusted_edge_domain` are
 accepted by the current aggregation scripts. Historical checkpoints and
 results are not compatible with the revised DP, HE, timing, and Pareto logic.
 
 Validate the bounded Pareto search against exact enumeration on small cases:
 
 ```powershell
-python experiments\validate_pareto_search.py --output-dir out\pareto_validation_v22
+python experiments\validate_pareto_search.py --output-dir out\pareto_validation_v25
 ```
 
 Aggregate completed main runs and produce confidence intervals and paired
 comparisons:
 
 ```powershell
-python experiments\aggregate_multiseed_results.py --root out\paper_v22_cifar10_resnet18 --seeds 40 41 42 43 44 --output-dir out\paper_v22_cifar10_resnet18_aggregate --paper-figure tex\paper\figures\cifar10_resnet18_200r_wall_time_accuracy_v22.png --paper-reconfiguration-figure tex\paper\figures\cifar10_reconfiguration_trace_v22.png
+python experiments\aggregate_multiseed_results.py --root out\paper_v25_cifar10_resnet18 --seeds 40 41 42 43 44 --output-dir out\paper_v25_cifar10_resnet18_aggregate --paper-figure tex\paper\figures\cifar10_resnet18_100r_wall_time_accuracy_v25.png --paper-reconfiguration-figure tex\paper\figures\cifar10_reconfiguration_trace_v25.png
 ```
 
 Calibrate the estimated convergence error cost against the realized post
 update loss and utility changes:
 
 ```powershell
-python experiments\calibrate_convergence_cost.py --root out\paper_v22_cifar10_resnet18 --seeds 40 41 42 43 44 --output-dir out\paper_v22_convergence_calibration
+python experiments\calibrate_convergence_cost.py --root out\paper_v25_cifar10_resnet18 --seeds 40 41 42 43 44 --output-dir out\paper_v25_convergence_calibration
 ```
 
 Run and aggregate the strategy period, privacy budget, client scale, and
@@ -191,8 +196,8 @@ python experiments\aggregate_controlled_results.py
 Run and aggregate the Fashion MNIST and LeNet 5 setting:
 
 ```powershell
-python experiments\run_paper_config.py --config configs\paper_v22_fmnist_lenet5.json
-python experiments\aggregate_multiseed_results.py --root out\paper_v22_fmnist_lenet5 --seeds 40 41 42 43 44 --dataset fmnist --model lenet5 --output-dir out\paper_v22_fmnist_lenet5_aggregate --paper-figure tex\paper\figures\fmnist_lenet5_200r_wall_time_accuracy_v22.png
+python experiments\run_paper_config.py --config configs\paper_v25_fmnist_lenet5.json
+python experiments\aggregate_multiseed_results.py --root out\paper_v25_fmnist_lenet5 --seeds 40 41 42 43 44 --dataset fmnist --model lenet5 --output-dir out\paper_v25_fmnist_lenet5_aggregate --paper-figure tex\paper\figures\fmnist_lenet5_100r_wall_time_accuracy_v25.png
 ```
 
 ## Data
@@ -201,7 +206,7 @@ Datasets are not committed. Put data under a local path and pass `--data-root`
 when needed, or use the existing local defaults on the machine where the
 experiments were developed.
 
-Each v22 run writes the exact selected subset partition, generated client and
+Each v25 run writes the exact selected subset partition, generated client and
 edge profiles, model parameter split, runtime package versions, raw decisions,
 link events, and round metrics beside its `config.json` file.
 

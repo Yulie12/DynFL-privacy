@@ -144,14 +144,14 @@ def _dp_profile_config(profile_name: str) -> tuple[str, dict[str, str]]:
 
 PRESETS = {
     "paper100": {
-        "label": "200r paper set",
-        "output_root": "out/fmnist_lenet5_paper_200r",
+        "label": "100r paper set",
+        "output_root": "out/fmnist_lenet5_paper_100r",
         "args": [
             "experiments/run_fmnist_lenet5.py",
-            "--rounds", "200",
+            "--rounds", "100",
             "--local-epochs", "1",
             *BASE_ARGS,
-            "--output-root", "out/fmnist_lenet5_paper_200r",
+            "--output-root", "out/fmnist_lenet5_paper_100r",
             "--policies", "ours", "fixed_dp", "privacy_only", "no_protection", "random",
         ],
     },
@@ -1673,12 +1673,15 @@ def _expected_config_from_preset(preset: dict) -> dict:
             "cloud_dp_stability_threshold": _float_arg(
                 args, "--cloud-dp-stability-threshold", 1.0
             ),
+            "trusted_edge_split_execution": bool(
+                args.get("--trusted-edge-split-execution", False)
+            ),
         },
         "training": {
             "dataset_name": _str_arg(args, "--dataset", "cifar10"),
             "model_name": _str_arg(args, "--model", "resnet18_pretrained"),
             "model_revision": "groupnorm_v2",
-            "execution_revision": "paper_flow_v22_wall_raw_nsga",
+            "execution_revision": "paper_flow_v26_aggregate_update_dp",
             "local_epochs": _int_arg(args, "--local-epochs", 3),
             "learning_rate": _float_arg(args, "--lr", 0.01),
             "iid": iid,

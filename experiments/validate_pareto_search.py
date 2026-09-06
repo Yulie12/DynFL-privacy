@@ -31,6 +31,7 @@ from dynfed.selection import (
     enumerate_candidates,
     evaluate_global_profile,
 )
+from dynfed.version import CURRENT_EXECUTION_REVISION
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidates-per-client", type=int, default=4)
     parser.add_argument("--archive-size", type=int, default=16)
     parser.add_argument("--max-iters", type=int, default=50)
-    parser.add_argument("--output-dir", default="out/pareto_validation_v22")
+    parser.add_argument("--output-dir", default="out/pareto_validation_v25")
     return parser.parse_args()
 
 
@@ -70,7 +71,7 @@ def _candidate_pool(candidates: list[Candidate], limit: int) -> list[Candidate]:
             source,
             key=lambda item: (
                 not any(
-                    value in {"he2", "he3"}
+                    str(value).startswith("he")
                     for value in (item.link_mechanisms or item.mechanisms).values()
                 ),
                 item.time,
@@ -321,7 +322,7 @@ def main() -> None:
         "decision_profile_match_rate": _mean(rows, "decision_profile_match"),
         "decision_objective_match_rate": _mean(rows, "decision_objective_match"),
         "mean_evaluation_reduction_ratio": _mean(rows, "evaluation_reduction_ratio"),
-        "execution_revision": "paper_flow_v22_wall_raw_nsga",
+        "execution_revision": CURRENT_EXECUTION_REVISION,
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2),

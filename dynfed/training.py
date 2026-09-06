@@ -37,18 +37,18 @@ class ModeSpec:
 
 MODE_SPECS = {
     # Edge-only (data lost to global model → highest global penalty)
-    # LIE (edge-only, emb+label+grad): SpeedTask-analogue, all stages on edge
-    "LIE": ModeSpec("LIE", "edge", ["emb", "label", "grad"], [], 1.0, 0.35, 0.0, 0.17, alpha=6, edge_cpu=4, cloud_cpu=0, local_memory=0.72),
+    # Split modes keep labels local and exchange embeddings, logits, and gradients.
+    "LIE": ModeSpec("LIE", "edge", ["emb", "logits", "grad", "emb_grad"], [], 1.0, 0.35, 0.0, 0.17, alpha=6, edge_cpu=4, cloud_cpu=0, local_memory=0.72),
     # LIIE (edge-only, upd): SpeedTask in visualization (α=2)
     "LIIE": ModeSpec("LIIE", "edge", ["upd"], [], 1.15, 0.25, 0.0, 0.15, alpha=2, edge_cpu=4, cloud_cpu=0, local_memory=1.20),
     # LIC (cloud-direct, emb+label+grad): SuperTask in visualization (α=6)
-    "LIC": ModeSpec("LIC", "cloud", ["emb", "label", "grad"], [], 1.0, 0.0, 0.75, 0.025, alpha=6, edge_cpu=0, cloud_cpu=4, local_memory=0.68),
+    "LIC": ModeSpec("LIC", "cloud", ["emb", "logits", "grad", "emb_grad"], [], 1.0, 0.0, 0.75, 0.025, alpha=6, edge_cpu=0, cloud_cpu=4, local_memory=0.68),
     # LIIC (cloud-direct, upd): No-Split in visualization (α=4)
     "LIIC": ModeSpec("LIIC", "cloud", ["upd"], [], 1.15, 0.0, 0.7, 0.02, alpha=4, edge_cpu=1, cloud_cpu=1, local_memory=1.20),
     # LIEIIC (edge→cloud): Split in visualization (α=5)
-    "LIEIIC": ModeSpec("LIEIIC", "edge", ["emb", "label", "grad"], ["upd"], 0.92, 0.7, 0.45, 0.003, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.74),
+    "LIEIIC": ModeSpec("LIEIIC", "edge", ["emb", "logits", "grad", "emb_grad"], ["upd"], 0.92, 0.7, 0.45, 0.003, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.74),
     # LIEIIIC (edge→cloud, 2 edge loops): Split with multi-epoch
-    "LIEIIIC": ModeSpec("LIEIIIC", "edge", ["emb", "label", "grad"], ["upd"], 0.9, 1.1, 0.42, 0.001, E_edge_loops=3, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.78),
+    "LIEIIIC": ModeSpec("LIEIIIC", "edge", ["emb", "logits", "grad", "emb_grad"], ["upd"], 0.9, 1.1, 0.42, 0.001, E_edge_loops=3, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.78),
     # LIIEIIIC (edge→cloud upd, 2 edge loops): No-Split with multi-epoch
     "LIIEIIIC": ModeSpec("LIIEIIIC", "edge", ["upd"], ["upd"], 1.05, 0.9, 0.42, 0.004, E_edge_loops=3, alpha=3, edge_cpu=1, cloud_cpu=1, local_memory=1.24),
 }

@@ -11,20 +11,20 @@ def _write_metrics(path: Path, times: list[float], accuracy: list[float]) -> Non
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=["round", "cumulative_wall_time_sec", "test_accuracy"],
+            fieldnames=["round", "accounted_system_time_sec", "test_accuracy"],
         )
         writer.writeheader()
         for index, (wall_time, value) in enumerate(zip(times, accuracy)):
             writer.writerow(
                 {
                     "round": index,
-                    "cumulative_wall_time_sec": wall_time,
+                    "accounted_system_time_sec": wall_time,
                     "test_accuracy": value,
                 }
             )
 
 
-def test_time_aggregation_uses_raw_cumulative_wall_time(tmp_path: Path) -> None:
+def test_time_aggregation_uses_accounted_system_time(tmp_path: Path) -> None:
     sources = {}
     for seed, times, values in (
         (40, [2.0, 4.0, 6.0], [0.1, 0.3, 0.5]),

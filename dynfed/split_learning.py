@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -670,7 +671,7 @@ def split_local_train_lenet5(
     training_seed: int | None = None,
     model_cache: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """Split learning with optional object-level DP on embeddings and gradients.
+    """Split learning with labels retained at the client.
 
     Returns:
         {"end": end_state_diff, "edge": edge_state_diff}
@@ -778,7 +779,8 @@ def split_local_train_lenet5(
         if edge_opt is not None:
             edge_opt.zero_grad()
 
-        # End forward, optional feature DP, edge forward/backward, optional gradient DP.
+        # The remote side returns logits. The client keeps labels local and sends
+        # a protected loss gradient back to the remote model.
         emb = end(bx)
         transmitted_emb = _protect_tensor_dp(
             emb,
@@ -791,10 +793,11 @@ def split_local_train_lenet5(
         )
         edge_input = transmitted_emb.detach().requires_grad_(True)
         logits = edge(edge_input)
-        loss = F.cross_entropy(logits, by)
-        loss.backward()
-        grad_to_end = _protect_tensor_dp(
-            edge_input.grad.detach(),
+        client_logits = logits.detach().requires_grad_(True)
+        client_loss = F.cross_entropy(client_logits, by, reduction="sum")
+        label_grad = torch.autograd.grad(client_loss, client_logits)[0]
+        protected_label_grad = _protect_batched_average_gradient_dp(
+            label_grad,
             mechanisms.get("grad", "none"),
             dp_clip_norm,
             dp_noise_multiplier,
@@ -802,6 +805,8 @@ def split_local_train_lenet5(
             device,
             dp_epsilon,
         )
+        logits.backward(protected_label_grad)
+        grad_to_end = edge_input.grad.detach()
 
         edge_trainable = [p for p in edge.parameters() if p.requires_grad]
         if edge_opt is not None and edge_trainable:
@@ -817,6 +822,28 @@ def split_local_train_lenet5(
     end_diff = {name: param.data - global_end_state[name] for name, param in end.named_parameters()}
     edge_diff = {name: param.data - global_edge_state[name] for name, param in edge.named_parameters()}
     return {"end": end_diff, "edge": edge_diff}
+
+
+def _protect_batched_average_gradient_dp(
+    tensor: torch.Tensor,
+    mechanism: str,
+    clip_norm: float,
+    noise_multiplier: float,
+    rng: np.random.Generator,
+    device: torch.device,
+    epsilon: float = 1.0,
+) -> torch.Tensor:
+    """Release the average of clipped per-record output gradients."""
+    batch_size = max(1, int(tensor.shape[0]))
+    flat = tensor.detach().reshape(batch_size, -1)
+    norms = torch.linalg.vector_norm(flat, ord=2, dim=1, keepdim=True)
+    scales = torch.clamp(float(clip_norm) / (norms + 1e-12), max=1.0)
+    clipped = (flat * scales).reshape_as(tensor) / float(batch_size)
+    if mechanism != "dp":
+        return clipped
+    std = 2.0 * float(clip_norm) * float(noise_multiplier) / float(batch_size)
+    noise = rng.normal(0.0, std, size=tuple(tensor.shape)).astype(np.float32)
+    return clipped + torch.from_numpy(noise).to(device=device, dtype=tensor.dtype)
 
 
 def split_evaluate(
@@ -895,6 +922,61 @@ def apply_unified_dp(
             diff[part_key][name] = protected + noise
 
     return diff
+
+
+def clip_state_difference(
+    diff: dict[str, dict[str, torch.Tensor]],
+    clip_norm: float,
+    device: torch.device,
+) -> tuple[dict[str, dict[str, torch.Tensor]], float, float]:
+    """Globally clip one complete client contribution without adding noise."""
+    if not math.isfinite(float(clip_norm)) or float(clip_norm) <= 0.0:
+        raise ValueError("clip_norm must be finite and positive")
+
+    total_norm_sq = 0.0
+    for values in diff.values():
+        for value in values.values():
+            if torch.is_floating_point(value) or torch.is_complex(value):
+                total_norm_sq += float(torch.sum(torch.abs(value) ** 2).item())
+    original_norm = float(np.sqrt(max(total_norm_sq, 0.0)))
+    scale = min(1.0, float(clip_norm) / max(original_norm, 1e-12))
+    clipped: dict[str, dict[str, torch.Tensor]] = {}
+    for part_name, values in diff.items():
+        clipped[part_name] = {}
+        for name, value in values.items():
+            copied = value.detach().to(device).clone()
+            if torch.is_floating_point(copied) or torch.is_complex(copied):
+                copied.mul_(scale)
+            clipped[part_name][name] = copied
+    return clipped, original_norm, scale
+
+
+def gaussian_state_difference(
+    reference: dict[str, dict[str, torch.Tensor]],
+    standard_deviation: float,
+    rng: np.random.Generator,
+    device: torch.device,
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Generate one Gaussian perturbation matching a nested model update."""
+    if not math.isfinite(float(standard_deviation)) or standard_deviation < 0.0:
+        raise ValueError("standard_deviation must be finite and non-negative")
+    noise: dict[str, dict[str, torch.Tensor]] = {}
+    for part_name, values in reference.items():
+        noise[part_name] = {}
+        for name, value in values.items():
+            if torch.is_floating_point(value) or torch.is_complex(value):
+                array = rng.normal(
+                    0.0,
+                    float(standard_deviation),
+                    size=tuple(value.shape),
+                ).astype(np.float32)
+                noise[part_name][name] = torch.from_numpy(array).to(
+                    device=device,
+                    dtype=value.dtype,
+                )
+            else:
+                noise[part_name][name] = torch.zeros_like(value, device=device)
+    return noise
 
 
 def _protect_tensor_dp(

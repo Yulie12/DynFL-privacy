@@ -13,8 +13,10 @@ from dynfed.flow_executor import (
     summarize_mixed_round_flow,
 )
 from dynfed.fmnist_lenet5_dynamic import (
+    _aggregate_dp_release_parameters,
     _candidate_cloud_update_mechanism,
     _candidate_training_mechanisms,
+    _candidate_uses_aggregate_update_dp,
     _should_apply_update_dp,
     _aggregate_returned_client_models,
     _state_difference_from_client_update,
@@ -48,12 +50,15 @@ from dynfed.selection import (
     _mode_link_events,
     _link_bandwidth,
     enumerate_candidates,
+    resolved_privacy_parameters,
 )
 from dynfed.split_learning import (
+    _protect_batched_average_gradient_dp,
     _protect_tensor_dp,
     _training_batches,
     apply_unified_dp,
     build_split_models,
+    clip_state_difference,
     split_local_train_lenet5,
 )
 from dynfed.privacy import OBJECT_SIZES, PRIVACY_ALPHA
@@ -64,7 +69,7 @@ def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
     config_path = (
         Path(__file__).resolve().parents[1]
         / "configs"
-        / "paper_v22_cifar10_resnet18.json"
+        / "paper_v25_cifar10_resnet18.json"
     )
     config = json.loads(config_path.read_text(encoding="utf-8"))
 
@@ -76,8 +81,9 @@ def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
         max_new_rounds=2,
     )
 
-    assert command[command.index("--rounds") + 1] == "200"
+    assert command[command.index("--rounds") + 1] == "100"
     assert command[command.index("--max-new-rounds") + 1] == "2"
+    assert "--trusted-edge-split-execution" in command
 
 
 def _flow_client(client_id: int) -> ClientFlowInput:
@@ -495,7 +501,7 @@ def test_random_policy_does_not_offer_unprotected_private_links() -> None:
                 assert mechanism != "none"
 
 
-def test_label_transport_does_not_reject_split_modes_as_privacy_risk() -> None:
+def test_split_modes_keep_labels_local() -> None:
     candidates = enumerate_candidates(
         config=SelectionConfig(risk_limit=0.5),
         client_id=0,
@@ -511,8 +517,227 @@ def test_label_transport_does_not_reject_split_modes_as_privacy_risk() -> None:
     for mode in {"LIE", "LIC", "LIEIIC", "LIEIIIC"}:
         mode_candidates = [candidate for candidate in candidates if candidate.mode == mode]
         assert mode_candidates
-        assert all(candidate.mechanisms["label"] == "none" for candidate in mode_candidates)
+        assert all("label" not in candidate.mechanisms for candidate in mode_candidates)
         assert all(candidate.feasible_risk for candidate in mode_candidates)
+        objects = {obj for obj, _count, _eligible in _mode_link_events(mode, 5, 3)}
+        assert "label" not in objects
+        assert {"emb", "logits", "grad", "emb_grad"}.issubset(objects)
+
+
+def test_output_gradient_dp_releases_clipped_batch_average() -> None:
+    tensor = torch.tensor([[3.0, 4.0], [0.0, 2.0]])
+    actual = _protect_batched_average_gradient_dp(
+        tensor,
+        mechanism="none",
+        clip_norm=1.0,
+        noise_multiplier=1.0,
+        rng=np.random.default_rng(1),
+        device=torch.device("cpu"),
+    )
+    expected = torch.tensor([[0.3, 0.4], [0.0, 0.5]])
+    torch.testing.assert_close(actual, expected)
+
+
+def test_record_privacy_horizon_uses_epochs_not_batch_link_count() -> None:
+    resolved = resolved_privacy_parameters(
+        SelectionConfig(rounds=200, L_block_cycles=5, privacy_local_epochs=3)
+    )
+    assert resolved["max_feature_events_per_round"] == 18
+    assert resolved["feature_horizon_events"] == 3600
+
+
+def test_trusted_edge_splitfed_uses_he_without_feature_dp() -> None:
+    candidates = enumerate_candidates(
+        config=SelectionConfig(risk_limit=0.5),
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(19),
+        policy="fixed_splitfed_trusted_edge",
+    )
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.mode == "LIEIIC"
+    assert candidate.link_mechanisms == {
+        "L_E_emb": "trusted",
+        "L_E_grad": "trusted",
+        "E_C_upd": "he3",
+    }
+    assert candidate.feature_dp_events == 0
+    assert candidate.update_dp_events == 0
+    assert candidate.feasible_risk
+
+
+def test_v25_trusted_edge_boundary_applies_to_all_policies() -> None:
+    config = SelectionConfig(
+        rounds=200,
+        risk_limit=0.5,
+        trusted_edge_split_execution=True,
+    )
+    candidates = enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(29),
+        policy="ours",
+    )
+
+    assert candidates
+    assert all(candidate.mode != "LIC" for candidate in candidates)
+    assert all(candidate.feature_dp_events == 0 for candidate in candidates)
+    assert all(
+        mechanism == "trusted"
+        for candidate in candidates
+        for link, mechanism in (candidate.link_mechanisms or {}).items()
+        if link.startswith("L_E_")
+    )
+    edge_split = [
+        candidate
+        for candidate in candidates
+        if candidate.mode in {"LIE", "LIEIIC", "LIEIIIC"}
+    ]
+    assert edge_split
+    assert all(
+        candidate.link_mechanisms.get("L_E_emb") == "trusted"
+        and candidate.link_mechanisms.get("L_E_grad") == "trusted"
+        for candidate in edge_split
+    )
+
+    resolved = resolved_privacy_parameters(config)
+    assert resolved["feature_dp_enabled"] is False
+    assert resolved["feature_horizon_events"] == 0
+    assert resolved["max_update_events_per_round"] == 1
+    assert resolved["update_horizon_events"] == 200
+
+
+def test_v25_fixed_splitfed_uses_shared_trusted_edge_boundary() -> None:
+    candidates = enumerate_candidates(
+        config=SelectionConfig(
+            rounds=200,
+            risk_limit=0.5,
+            trusted_edge_split_execution=True,
+        ),
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(31),
+        policy="fixed_splitfed",
+    )
+
+    assert candidates
+    assert {candidate.mode for candidate in candidates} == {"LIEIIC"}
+    assert all(candidate.link_mechanisms["L_E_emb"] == "trusted" for candidate in candidates)
+    assert all(candidate.link_mechanisms["L_E_grad"] == "trusted" for candidate in candidates)
+    assert {
+        candidate.link_mechanisms["E_C_upd"] for candidate in candidates
+    } == {"dp", "he3"}
+
+
+def test_fixed_splitfed_dp_diagnostic_forces_aggregate_dp_boundary() -> None:
+    candidates = enumerate_candidates(
+        config=SelectionConfig(
+            rounds=100,
+            risk_limit=0.5,
+            trusted_edge_split_execution=True,
+        ),
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(37),
+        policy="fixed_splitfed_dp",
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].mode == "LIEIIC"
+    assert candidates[0].link_mechanisms == {
+        "L_E_emb": "trusted",
+        "L_E_grad": "trusted",
+        "E_C_upd": "dp",
+    }
+    assert candidates[0].update_dp_events == 1
+
+
+def test_trusted_edge_aggregate_dp_is_not_applied_inside_client_training() -> None:
+    candidate = Candidate(
+        **{
+            **_candidate("LIEIIC").__dict__,
+            "mechanisms": {"upd": "he3_dp"},
+            "link_mechanisms": {
+                "L_E_emb": "trusted",
+                "L_E_grad": "trusted",
+                "E_C_upd": "he3_dp",
+            },
+        }
+    )
+
+    assert _candidate_uses_aggregate_update_dp(candidate)
+    assert not _should_apply_update_dp(
+        _candidate_training_mechanisms(candidate),
+        "upd_only",
+        candidate.mode,
+    )
+
+    dp_candidate = Candidate(
+        **{
+            **candidate.__dict__,
+            "mechanisms": {"upd": "dp"},
+            "link_mechanisms": {
+                **candidate.link_mechanisms,
+                "E_C_upd": "dp",
+            },
+        }
+    )
+    assert _candidate_uses_aggregate_update_dp(dp_candidate, True)
+    training_mechanisms = _candidate_training_mechanisms(
+        dp_candidate,
+        aggregate_cloud_update_dp=True,
+    )
+    assert training_mechanisms["upd"] == "none"
+    assert not _should_apply_update_dp(training_mechanisms, "upd_only", dp_candidate.mode)
+
+
+def test_aggregate_dp_uses_max_normalized_client_weight() -> None:
+    max_weight, sensitivity, noise_std = _aggregate_dp_release_parameters(
+        [200.0, 600.0, 800.0],
+        [1.0, 1.0, 0.0],
+        clip_norm=2.0,
+        noise_multiplier=3.0,
+    )
+
+    assert np.isclose(max_weight, 0.375)
+    assert np.isclose(sensitivity, 1.5)
+    assert np.isclose(noise_std, 4.5)
+
+
+def test_aggregate_dp_clips_one_complete_client_contribution() -> None:
+    diff = {
+        "end": {"a": torch.tensor([3.0, 4.0])},
+        "edge": {"b": torch.tensor([0.0, 12.0])},
+    }
+
+    clipped, original_norm, scale = clip_state_difference(
+        diff,
+        clip_norm=6.5,
+        device=torch.device("cpu"),
+    )
+
+    assert np.isclose(original_norm, 13.0)
+    assert np.isclose(scale, 0.5)
+    flat = torch.cat([clipped["end"]["a"], clipped["edge"]["b"]])
+    torch.testing.assert_close(torch.linalg.vector_norm(flat), torch.tensor(6.5))
 
 
 def test_feature_dp_noise_uses_replacement_sensitivity() -> None:
@@ -857,6 +1082,24 @@ def test_multilevel_dp_events_distinguish_client_and_edge_releases() -> None:
     assert feature_events == 0
     assert client_events == 3
     assert edge_events == 1
+
+
+def test_combined_he_dp_mechanism_consumes_update_budget() -> None:
+    candidate = Candidate(
+        **{
+            **_candidate("LIEIIC").__dict__,
+            "link_mechanisms": {"E_C_upd": "he3_dp"},
+        }
+    )
+
+    feature_events, client_events, edge_events = _candidate_dp_event_counts(
+        candidate,
+        SelectionConfig(trusted_edge_split_execution=True),
+    )
+
+    assert feature_events == 0
+    assert client_events == 1
+    assert edge_events == 0
 
 
 def test_update_dp_variance_uses_admitted_aggregation_size() -> None:
@@ -1207,4 +1450,4 @@ def test_paper_search_defaults_are_explicit() -> None:
     assert config.cloud_fusion_eps == 0.05
     assert OBJECT_SIZES["emb"] == 1.6
     assert OBJECT_SIZES["upd"] == 4.0
-    assert PRIVACY_ALPHA["he3"] == 24.01
+    assert PRIVACY_ALPHA["he3"] == 8.04
