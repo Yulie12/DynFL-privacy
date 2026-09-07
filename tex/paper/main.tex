@@ -699,10 +699,14 @@ A candidate satisfies the privacy constraint when
 After the candidate is selected, the corresponding RDP increments are added to
 the next round state \(R_{i,\mathrm{upd}}^{t+1}(\alpha)\).
 
-The selector uses resource profiles, topology, client data sizes, and fixed
-cost parameters declared before training. Across all rounds and cross domain
-DP links, the released update transcript satisfies
-\((\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\) client DP.
+The accountant records the Gaussian DP releases for each client. A zero
+accountant value means that no DP event has been recorded. HE protects update
+contents during encrypted aggregation; it does not establish DP for the
+decrypted result.
+An RDP bound applies to a complete update transcript when every release
+depending on the protected client satisfies the accounted conditional DP
+bound, with participation and aggregation weights fixed by public information
+or included in the privacy analysis~\cite{mironov2017rdp}.
 
 The total privacy target does not change with the number of training rounds.
 Let \(K_{\mathrm{upd}}^{\max}(T)\) be the largest possible number of update DP
@@ -1809,21 +1813,24 @@ terms by their squared weights, gives \equref{eq:global_omega}.
 \section{CKKS Implementation and Security Scope}
 \label{app:he_model}
 The HE path uses the CKKS approximate arithmetic scheme~\cite{cheon2017ckks}.
-Each policy run generates one key pair. Clients and edge nodes use the public
-key to encrypt every parameter of an HE protected update. The cloud evaluator
-does not hold the secret key and performs only ciphertext addition. A trusted
-coordinator holds the secret key and decrypts the final aggregate. The
+In the intended protocol, clients and edge nodes use the public key to encrypt
+an HE protected update. The cloud evaluator performs ciphertext addition,
+and a separate trusted coordinator holds the secret key and decrypts the
+aggregate. In the real CKKS execution path, each policy run generates one key
+pair. These roles are simulated within one process, without process isolation
+of the secret key. The
 implementation uses polynomial modulus degree 8192, coefficient modulus bits
 \([50,40]\), scale \(2^{40}\), and chunks of at most 4096 values. The
 same key pair is reused within one policy run.
 
-This protection hides selected update contents from the communication links
-and the cloud evaluator. It does not hide the final aggregate from the trusted
-coordinator and does not address malicious updates or collusion with the
-coordinator. The implementation provides a complete SEAL execution path for
-these roles. The validation experiment records ciphertext count, encrypted
+The intended protocol protects individual ciphertext inputs from an evaluator
+without the secret key. Its confidentiality assumption excludes collusion
+with the coordinator. The numerical validation does not establish this role
+separation in a deployed system. The validation experiment records ciphertext count, encrypted
 parameter count, operation time, and maximum absolute error against plaintext
-aggregation. The main utility experiments use the measured
+aggregation. In profiled execution, updates are aggregated in plaintext and
+CKKS costs are modeled. This execution mode measures training utility, not
+encrypted execution. The main utility experiments use the measured
 \(\alpha_{\mathrm{HE}}\) and \(T^P(\mathrm{HE})\) values to represent CKKS
 communication and computation costs without repeating the same cryptographic
 benchmark in every training round.

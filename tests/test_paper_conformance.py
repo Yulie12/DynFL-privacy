@@ -5,6 +5,7 @@ import random
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from dynfed.flow_executor import (
@@ -13,13 +14,18 @@ from dynfed.flow_executor import (
     summarize_mixed_round_flow,
 )
 from dynfed.fmnist_lenet5_dynamic import (
-    _aggregate_dp_release_parameters,
     _candidate_cloud_update_mechanism,
+    _apply_flat_update,
     _candidate_training_mechanisms,
-    _candidate_uses_aggregate_update_dp,
+    _candidate_uses_local_packet_update_dp,
+    _candidate_uses_cross_domain_update_dp,
+    _candidate_uses_secure_aggregate_update_dp,
+    _distributed_aggregate_dp_parameters,
+    _dp_update_release_parameters,
     _should_apply_update_dp,
     _aggregate_returned_client_models,
     _state_difference_from_client_update,
+    _state_difference_from_model,
     _training_base_state,
     _profiles_with_actual_samples,
     _feature_clip_excess_sq_by_client,
@@ -59,6 +65,8 @@ from dynfed.split_learning import (
     apply_unified_dp,
     build_split_models,
     clip_state_difference,
+    fedavg_split,
+    gaussian_state_difference,
     split_local_train_lenet5,
 )
 from dynfed.privacy import OBJECT_SIZES, PRIVACY_ALPHA
@@ -465,7 +473,7 @@ def test_incremental_full_buffer_latency_matches_event_executor() -> None:
 
 def test_proposed_policy_does_not_offer_unprotected_private_links() -> None:
     candidates = enumerate_candidates(
-        config=SelectionConfig(),
+        config=SelectionConfig(trusted_edge_split_execution=True),
         client_id=0,
         edge_factor=1.0,
         compute_factor=1.0,
@@ -477,14 +485,14 @@ def test_proposed_policy_does_not_offer_unprotected_private_links() -> None:
     )
 
     for candidate in candidates:
-        for obj, mechanism in candidate.mechanisms.items():
-            if obj != "label":
-                assert mechanism != "none"
+        for link_id, mechanism in (candidate.link_mechanisms or {}).items():
+            if link_id.endswith("_C_upd"):
+                assert mechanism in {"dp", "he3", "dp_he3"}
 
 
 def test_random_policy_does_not_offer_unprotected_private_links() -> None:
     candidates = enumerate_candidates(
-        config=SelectionConfig(),
+        config=SelectionConfig(trusted_edge_split_execution=True),
         client_id=0,
         edge_factor=1.0,
         compute_factor=1.0,
@@ -496,9 +504,9 @@ def test_random_policy_does_not_offer_unprotected_private_links() -> None:
     )
 
     for candidate in candidates:
-        for obj, mechanism in candidate.mechanisms.items():
-            if obj != "label":
-                assert mechanism != "none"
+        for link_id, mechanism in (candidate.link_mechanisms or {}).items():
+            if link_id.endswith("_C_upd"):
+                assert mechanism in {"dp", "he3", "dp_he3"}
 
 
 def test_split_modes_keep_labels_local() -> None:
@@ -524,7 +532,7 @@ def test_split_modes_keep_labels_local() -> None:
         assert {"emb", "logits", "grad", "emb_grad"}.issubset(objects)
 
 
-def test_output_gradient_dp_releases_clipped_batch_average() -> None:
+def test_unprotected_output_gradient_uses_ordinary_batch_average() -> None:
     tensor = torch.tensor([[3.0, 4.0], [0.0, 2.0]])
     actual = _protect_batched_average_gradient_dp(
         tensor,
@@ -534,16 +542,16 @@ def test_output_gradient_dp_releases_clipped_batch_average() -> None:
         rng=np.random.default_rng(1),
         device=torch.device("cpu"),
     )
-    expected = torch.tensor([[0.3, 0.4], [0.0, 0.5]])
+    expected = torch.tensor([[1.5, 2.0], [0.0, 1.0]])
     torch.testing.assert_close(actual, expected)
 
 
-def test_record_privacy_horizon_uses_epochs_not_batch_link_count() -> None:
+def test_feature_dp_horizon_is_disabled_for_trusted_split_execution() -> None:
     resolved = resolved_privacy_parameters(
         SelectionConfig(rounds=200, L_block_cycles=5, privacy_local_epochs=3)
     )
-    assert resolved["max_feature_events_per_round"] == 18
-    assert resolved["feature_horizon_events"] == 3600
+    assert resolved["max_feature_events_per_round"] == 0
+    assert resolved["feature_horizon_events"] == 0
 
 
 def test_trusted_edge_splitfed_uses_he_without_feature_dp() -> None:
@@ -571,7 +579,7 @@ def test_trusted_edge_splitfed_uses_he_without_feature_dp() -> None:
     assert candidate.feasible_risk
 
 
-def test_v25_trusted_edge_boundary_applies_to_all_policies() -> None:
+def test_trusted_edge_boundary_applies_to_all_policies() -> None:
     config = SelectionConfig(
         rounds=200,
         risk_limit=0.5,
@@ -609,6 +617,14 @@ def test_v25_trusted_edge_boundary_applies_to_all_policies() -> None:
         and candidate.link_mechanisms.get("L_E_grad") == "trusted"
         for candidate in edge_split
     )
+    for mode in {"LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"}:
+        assert {
+            candidate.link_mechanisms.get(
+                "L_C_upd" if mode == "LIIC" else "E_C_upd"
+            )
+            for candidate in candidates
+            if candidate.mode == mode
+        } == {"dp", "he3", "dp_he3"}
 
     resolved = resolved_privacy_parameters(config)
     assert resolved["feature_dp_enabled"] is False
@@ -617,7 +633,7 @@ def test_v25_trusted_edge_boundary_applies_to_all_policies() -> None:
     assert resolved["update_horizon_events"] == 200
 
 
-def test_v25_fixed_splitfed_uses_shared_trusted_edge_boundary() -> None:
+def test_fixed_splitfed_uses_shared_trusted_edge_boundary() -> None:
     candidates = enumerate_candidates(
         config=SelectionConfig(
             rounds=200,
@@ -640,10 +656,10 @@ def test_v25_fixed_splitfed_uses_shared_trusted_edge_boundary() -> None:
     assert all(candidate.link_mechanisms["L_E_grad"] == "trusted" for candidate in candidates)
     assert {
         candidate.link_mechanisms["E_C_upd"] for candidate in candidates
-    } == {"dp", "he3"}
+    } == {"dp", "he3", "dp_he3"}
 
 
-def test_fixed_splitfed_dp_diagnostic_forces_aggregate_dp_boundary() -> None:
+def test_fixed_splitfed_dp_diagnostic_forces_update_packet_dp() -> None:
     candidates = enumerate_candidates(
         config=SelectionConfig(
             rounds=100,
@@ -670,56 +686,165 @@ def test_fixed_splitfed_dp_diagnostic_forces_aggregate_dp_boundary() -> None:
     assert candidates[0].update_dp_events == 1
 
 
-def test_trusted_edge_aggregate_dp_is_not_applied_inside_client_training() -> None:
+def test_cross_domain_update_dp_is_applied_to_the_transmission_packet() -> None:
     candidate = Candidate(
         **{
             **_candidate("LIEIIC").__dict__,
-            "mechanisms": {"upd": "he3_dp"},
+            "mechanisms": {"upd": "dp"},
             "link_mechanisms": {
                 "L_E_emb": "trusted",
                 "L_E_grad": "trusted",
-                "E_C_upd": "he3_dp",
-            },
-        }
-    )
-
-    assert _candidate_uses_aggregate_update_dp(candidate)
-    assert not _should_apply_update_dp(
-        _candidate_training_mechanisms(candidate),
-        "upd_only",
-        candidate.mode,
-    )
-
-    dp_candidate = Candidate(
-        **{
-            **candidate.__dict__,
-            "mechanisms": {"upd": "dp"},
-            "link_mechanisms": {
-                **candidate.link_mechanisms,
                 "E_C_upd": "dp",
             },
         }
     )
-    assert _candidate_uses_aggregate_update_dp(dp_candidate, True)
+
+    assert _candidate_uses_cross_domain_update_dp(candidate, True)
+    assert _candidate_uses_local_packet_update_dp(candidate, True)
+    assert not _candidate_uses_secure_aggregate_update_dp(candidate, True)
     training_mechanisms = _candidate_training_mechanisms(
-        dp_candidate,
+        candidate,
         aggregate_cloud_update_dp=True,
     )
     assert training_mechanisms["upd"] == "none"
-    assert not _should_apply_update_dp(training_mechanisms, "upd_only", dp_candidate.mode)
+    assert not _should_apply_update_dp(training_mechanisms, "upd_only", candidate.mode)
 
 
-def test_aggregate_dp_uses_max_normalized_client_weight() -> None:
-    max_weight, sensitivity, noise_std = _aggregate_dp_release_parameters(
-        [200.0, 600.0, 800.0],
-        [1.0, 1.0, 0.0],
+def test_combined_update_packet_keeps_he_after_worker_dp_is_deferred() -> None:
+    candidate = Candidate(
+        **{
+            **_candidate("LIEIIC").__dict__,
+            "mechanisms": {"upd": "dp_he3"},
+            "link_mechanisms": {
+                "L_E_emb": "trusted",
+                "L_E_grad": "trusted",
+                "E_C_upd": "dp_he3",
+            },
+        }
+    )
+
+    assert _candidate_uses_cross_domain_update_dp(candidate, True)
+    assert not _candidate_uses_local_packet_update_dp(candidate, True)
+    assert _candidate_uses_secure_aggregate_update_dp(candidate, True)
+    training_mechanisms = _candidate_training_mechanisms(
+        candidate,
+        aggregate_cloud_update_dp=True,
+    )
+    assert training_mechanisms["upd"] == "he3"
+    assert not _should_apply_update_dp(training_mechanisms, "upd_only", candidate.mode)
+
+
+def test_fixed_dp_he_forces_combined_cross_domain_update_protection() -> None:
+    candidates = enumerate_candidates(
+        config=SelectionConfig(
+            rounds=100,
+            risk_limit=0.5,
+            trusted_edge_split_execution=True,
+        ),
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(41),
+        policy="fixed_dp_he",
+    )
+
+    cloud_candidates = [
+        candidate
+        for candidate in candidates
+        if "E_C_upd" in (candidate.link_mechanisms or {})
+        or "L_C_upd" in (candidate.link_mechanisms or {})
+    ]
+    assert cloud_candidates
+    assert all(
+        next(
+            mechanism
+            for link, mechanism in candidate.link_mechanisms.items()
+            if link in {"E_C_upd", "L_C_upd"}
+        )
+        == "dp_he3"
+        for candidate in cloud_candidates
+    )
+    assert all(candidate.update_dp_events == 1 for candidate in cloud_candidates)
+
+
+def test_update_packet_dp_uses_max_within_packet_client_fraction() -> None:
+    sensitivity, noise_std = _dp_update_release_parameters(
+        0.375,
         clip_norm=2.0,
         noise_multiplier=3.0,
     )
 
-    assert np.isclose(max_weight, 0.375)
     assert np.isclose(sensitivity, 1.5)
     assert np.isclose(noise_std, 4.5)
+
+
+def test_distributed_aggregate_dp_shares_match_release_noise() -> None:
+    normalized, max_weight, sensitivity, release_std, share_stds = (
+        _distributed_aggregate_dp_parameters(
+            [1.0, 1.0],
+            [0.5, 0.5],
+            clip_norm=2.0,
+            noise_multiplier=3.0,
+        )
+    )
+
+    np.testing.assert_allclose(normalized, [0.5, 0.5])
+    assert np.isclose(max_weight, 0.25)
+    assert np.isclose(sensitivity, 1.0)
+    assert np.isclose(release_std, 3.0)
+    assert np.isclose(
+        np.sqrt(sum((weight * std) ** 2 for weight, std in zip(normalized, share_stds))),
+        release_std,
+    )
+
+
+def test_distributed_aggregate_dp_is_disabled_without_combined_packets() -> None:
+    normalized, max_weight, sensitivity, release_std, share_stds = (
+        _distributed_aggregate_dp_parameters(
+            [2.0, 1.0],
+            [0.0, 0.0],
+            clip_norm=1.0,
+            noise_multiplier=4.0,
+        )
+    )
+
+    np.testing.assert_allclose(normalized, [2.0 / 3.0, 1.0 / 3.0])
+    assert max_weight == 0.0
+    assert sensitivity == 0.0
+    assert release_std == 0.0
+    assert share_stds == [0.0, 0.0]
+
+
+@pytest.mark.parametrize("weights,fractions,clip,sigma", [
+    ([-1.0, 2.0], [0.5, 0.5], 1.0, 3.0),
+    ([float("nan")], [1.0], 1.0, 3.0),
+    ([float("inf")], [1.0], 1.0, 3.0),
+    ([1.0], [1.1], 1.0, 3.0),
+    ([1.0], [float("nan")], 1.0, 3.0),
+    ([1.0], [1.0], 0.0, 3.0),
+    ([1.0], [1.0], 1.0, 0.0),
+    ([1.0], [1.0], 1.0, float("nan")),
+])
+def test_aggregate_dp_rejects_invalid_calibration(weights, fractions, clip, sigma) -> None:
+    with pytest.raises(ValueError):
+        _distributed_aggregate_dp_parameters(
+            weights, fractions, clip_norm=clip, noise_multiplier=sigma,
+        )
+
+
+def test_aggregate_dp_unequal_weights_with_unprotected_and_zero_weight_packets() -> None:
+    weights, maximum, sensitivity, std, shares = _distributed_aggregate_dp_parameters(
+        [2.0, 3.0, 5.0, 0.0], [0.5, 0.2, 0.0, 1.0],
+        clip_norm=2.0, noise_multiplier=3.0,
+    )
+    assert np.isclose(maximum, 0.1)
+    assert np.isclose(sensitivity, 0.4)
+    assert np.isclose(std, 1.2)
+    assert np.isclose(sum((w * s) ** 2 for w, s in zip(weights, shares)), std ** 2)
+    assert shares[2:] == [0.0, 0.0]
 
 
 def test_aggregate_dp_clips_one_complete_client_contribution() -> None:
@@ -738,6 +863,62 @@ def test_aggregate_dp_clips_one_complete_client_contribution() -> None:
     assert np.isclose(scale, 0.5)
     flat = torch.cat([clipped["end"]["a"], clipped["edge"]["b"]])
     torch.testing.assert_close(torch.linalg.vector_norm(flat), torch.tensor(6.5))
+
+
+@pytest.mark.parametrize("mode", ["LIIC", "LIEIIC"])
+def test_pretrained_dp_keeps_frozen_parameters_constant(monkeypatch, mode) -> None:
+    from torchvision.models import resnet18
+
+    monkeypatch.setattr(
+        "dynfed.split_learning._make_torchvision_resnet",
+        lambda *args, **kwargs: resnet18(weights=None),
+    )
+    device = torch.device("cpu")
+    end, edge, _full = build_split_models(
+        "resnet18_pretrained", device, input_channels=3, image_size=32,
+    )
+    base = {
+        part: {name: value.detach().clone() for name, value in model.state_dict().items()}
+        for part, model in (("end", end), ("edge", edge))
+    }
+    expected_names = {
+        part: {name for name, param in model.named_parameters() if param.requires_grad}
+        for part, model in (("end", end), ("edge", edge))
+    }
+    assert not expected_names["end"]
+    assert expected_names["edge"]
+    diff = split_local_train_lenet5(
+        mode, base["end"], base["edge"],
+        np.random.default_rng(7).normal(size=(4, 3 * 32 * 32)).astype(np.float32),
+        np.array([0, 1, 2, 3], dtype=np.int64),
+        epochs=1, lr=0.01, device=device, model_name="resnet18_pretrained",
+        input_shape=(3, 32, 32), local_steps=1, training_seed=7,
+    )
+    for part, names in expected_names.items():
+        assert set(diff[part]) == names
+    for saved_states in ({}, {0: base}):
+        relative = _state_difference_from_client_update(
+            client_id=0, state_diff=diff, client_model_states=saved_states,
+            global_end=end, global_edge=edge, device=device,
+        )
+        for part, names in expected_names.items():
+            assert set(relative[part]) == names
+    relative = _state_difference_from_model(base, end, edge, device)
+    noise = gaussian_state_difference(relative, 0.001, np.random.default_rng(7), device)
+    for part, names in expected_names.items():
+        assert set(noise[part]) == names
+    protected = apply_unified_dp(
+        diff, "dp", clip_norm=1.0, noise_multiplier=0.001,
+        rng=np.random.default_rng(7), device=device,
+    )
+    fedavg_split([protected], [1], end, edge, device)
+    # CKKS decodes a dense vector; even a nonzero frozen slice must be ignored.
+    size = sum(param.numel() for model in (end, edge) for param in model.parameters())
+    _apply_flat_update(torch.full((size,), 0.001), end, edge)
+    for part, model in (("end", end), ("edge", edge)):
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                torch.testing.assert_close(param, base[part][name], rtol=0, atol=0)
 
 
 def test_feature_dp_noise_uses_replacement_sensitivity() -> None:
@@ -868,8 +1049,13 @@ def test_liieiiic_update_upload_links_select_mechanisms_independently() -> None:
     assert assignments == {
         ("dp", "dp"),
         ("dp", "he3"),
+        ("dp", "dp_he3"),
         ("he3", "dp"),
         ("he3", "he3"),
+        ("he3", "dp_he3"),
+        ("dp_he3", "dp"),
+        ("dp_he3", "he3"),
+        ("dp_he3", "dp_he3"),
     }
     mixed = next(
         item
@@ -1084,11 +1270,11 @@ def test_multilevel_dp_events_distinguish_client_and_edge_releases() -> None:
     assert edge_events == 1
 
 
-def test_combined_he_dp_mechanism_consumes_update_budget() -> None:
+def test_edge_cloud_dp_packet_consumes_update_budget() -> None:
     candidate = Candidate(
         **{
             **_candidate("LIEIIC").__dict__,
-            "link_mechanisms": {"E_C_upd": "he3_dp"},
+            "link_mechanisms": {"E_C_upd": "dp"},
         }
     )
 

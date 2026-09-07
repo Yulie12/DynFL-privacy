@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from run_paper_config import DEFAULT_CONFIG, ROOT, build_command
-from dynfed.version import CURRENT_EXECUTION_REVISION
+from dynfed.version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
         for period in (1, 5, 10, 20):
             config = copy.deepcopy(base)
             config["training"]["selection_period"] = period
-            config["output_root"] = f"out/paper_v26_controlled/period/sp_{period}"
+            config["output_root"] = f"out/paper_v28_controlled/period/sp_{period}"
             cases.append(SweepCase("period", str(period), config, ["ours"]))
 
     if "privacy" in studies:
@@ -61,14 +61,14 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
             config["privacy"]["initial_epsilon"] = budget
             config["privacy"]["update_epsilon_budget"] = budget
             label = f"{budget:g}"
-            config["output_root"] = f"out/paper_v26_controlled/privacy/eps_{label}"
+            config["output_root"] = f"out/paper_v28_controlled/privacy/eps_{label}"
             cases.append(SweepCase("privacy", label, config, ["ours"]))
 
     if "scale" in studies:
         for clients in (20, 50, 100):
             config = copy.deepcopy(base)
             config["system"]["clients"] = clients
-            config["output_root"] = f"out/paper_v26_controlled/scale/clients_{clients}"
+            config["output_root"] = f"out/paper_v28_controlled/scale/clients_{clients}"
             cases.append(
                 SweepCase(
                     "scale",
@@ -80,7 +80,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
 
     if "ablation" in studies:
         config = copy.deepcopy(base)
-        config["output_root"] = "out/paper_v26_controlled/ablation"
+        config["output_root"] = "out/paper_v28_controlled/ablation"
         cases.append(
             SweepCase(
                 "ablation",
@@ -118,6 +118,8 @@ def completed_case_exists(
         if int(selection.get("rounds", -1)) != rounds:
             continue
         if training.get("execution_revision") != CURRENT_EXECUTION_REVISION:
+            continue
+        if training.get("update_parameter_scope") != CURRENT_UPDATE_PARAMETER_SCOPE:
             continue
         complete = True
         for policy in policies:
@@ -189,7 +191,7 @@ def main() -> None:
             if not args.dry_run and not skipped:
                 subprocess.run(command, cwd=ROOT, check=True)
 
-    manifest_path = ROOT / "out" / "paper_v26_controlled" / "sweep_manifest.json"
+    manifest_path = ROOT / "out" / "paper_v28_controlled" / "sweep_manifest.json"
     if not args.dry_run:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

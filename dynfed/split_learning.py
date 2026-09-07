@@ -557,6 +557,8 @@ def build_split_pair(
     end_cls, edge_cls, _full_cls = MODEL_BUILDERS[normalize_model_name(model_name)]
     end_model = end_cls(input_channels=input_channels, image_size=image_size).to(device)
     edge_model = edge_cls(embedding_dim=getattr(end_model, "embedding_dim", 32), num_classes=num_classes).to(device)
+    _prepare_model_for_training(end_model, model_name)
+    _prepare_model_for_training(edge_model, model_name)
     return end_model, edge_model
 
 
@@ -568,11 +570,13 @@ def build_full_model(
     num_classes: int = 10,
 ) -> nn.Module:
     _end_cls, _edge_cls, full_cls = MODEL_BUILDERS[normalize_model_name(model_name)]
-    return full_cls(
+    model = full_cls(
         input_channels=input_channels,
         image_size=image_size,
         num_classes=num_classes,
     ).to(device)
+    _prepare_model_for_training(model, model_name)
+    return model
 
 
 REAL_OBJECT_SIZES = {
@@ -741,7 +745,8 @@ def split_local_train_lenet5(
 
         diff = {}
         for name, param in model.named_parameters():
-            diff[name] = param.data - full_state[name]
+            if param.requires_grad:
+                diff[name] = param.data - full_state[name]
 
         # Split full diff into end and edge parts for uniform aggregation
         end_keys = set(global_end_state.keys())
@@ -819,8 +824,14 @@ def split_local_train_lenet5(
             torch.nn.utils.clip_grad_norm_(end_trainable, max_norm=5.0)
             end_opt.step()
 
-    end_diff = {name: param.data - global_end_state[name] for name, param in end.named_parameters()}
-    edge_diff = {name: param.data - global_edge_state[name] for name, param in edge.named_parameters()}
+    end_diff = {
+        name: param.data - global_end_state[name]
+        for name, param in end.named_parameters() if param.requires_grad
+    }
+    edge_diff = {
+        name: param.data - global_edge_state[name]
+        for name, param in edge.named_parameters() if param.requires_grad
+    }
     return {"end": end_diff, "edge": edge_diff}
 
 
@@ -833,14 +844,14 @@ def _protect_batched_average_gradient_dp(
     device: torch.device,
     epsilon: float = 1.0,
 ) -> torch.Tensor:
-    """Release the average of clipped per-record output gradients."""
+    """Release an averaged output gradient, with DP only when requested."""
     batch_size = max(1, int(tensor.shape[0]))
+    if mechanism != "dp":
+        return tensor / float(batch_size)
     flat = tensor.detach().reshape(batch_size, -1)
     norms = torch.linalg.vector_norm(flat, ord=2, dim=1, keepdim=True)
     scales = torch.clamp(float(clip_norm) / (norms + 1e-12), max=1.0)
     clipped = (flat * scales).reshape_as(tensor) / float(batch_size)
-    if mechanism != "dp":
-        return clipped
     std = 2.0 * float(clip_norm) * float(noise_multiplier) / float(batch_size)
     noise = rng.normal(0.0, std, size=tuple(tensor.shape)).astype(np.float32)
     return clipped + torch.from_numpy(noise).to(device=device, dtype=tensor.dtype)
@@ -937,7 +948,12 @@ def clip_state_difference(
     for values in diff.values():
         for value in values.values():
             if torch.is_floating_point(value) or torch.is_complex(value):
-                total_norm_sq += float(torch.sum(torch.abs(value) ** 2).item())
+                magnitude = value.detach().abs().to(dtype=torch.float64)
+                if not bool(torch.isfinite(magnitude).all()):
+                    raise ValueError("Cannot clip a non-finite client update")
+                total_norm_sq += float(torch.sum(magnitude.square()).item())
+    if not math.isfinite(total_norm_sq):
+        raise ValueError("Client update norm overflowed during clipping")
     original_norm = float(np.sqrt(max(total_norm_sq, 0.0)))
     scale = min(1.0, float(clip_norm) / max(original_norm, 1e-12))
     clipped: dict[str, dict[str, torch.Tensor]] = {}
@@ -1025,11 +1041,13 @@ def fedavg_split(
     # Aggregate end-side updates
     end_agg: dict[str, torch.Tensor] = {}
     for name, param in global_end.named_parameters():
-        end_agg[name] = torch.zeros_like(param.data, device=device)
+        if param.requires_grad:
+            end_agg[name] = torch.zeros_like(param.data, device=device)
 
     edge_agg: dict[str, torch.Tensor] = {}
     for name, param in global_edge.named_parameters():
-        edge_agg[name] = torch.zeros_like(param.data, device=device)
+        if param.requires_grad:
+            edge_agg[name] = torch.zeros_like(param.data, device=device)
 
     has_edge = False
     for diff, count in zip(state_diffs, sample_counts):

@@ -1,1 +1,2 @@
-CURRENT_EXECUTION_REVISION = "paper_flow_v26_aggregate_update_dp"
+CURRENT_EXECUTION_REVISION = "paper_flow_v28_he_secure_aggregate_dp"
+CURRENT_UPDATE_PARAMETER_SCOPE = "trainable_parameters_v1"

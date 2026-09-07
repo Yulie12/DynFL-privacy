@@ -21,7 +21,7 @@ from scipy import stats
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from dynfed.version import CURRENT_EXECUTION_REVISION
+from dynfed.version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
 
 POLICY_LABELS = {
     "ours": "Ours",
@@ -266,6 +266,8 @@ def discover_sources(
         if str(training.get("model_name")) != model:
             continue
         if str(training.get("execution_revision")) != CURRENT_EXECUTION_REVISION:
+            continue
+        if training.get("update_parameter_scope") != CURRENT_UPDATE_PARAMETER_SCOPE:
             continue
         if int(selection.get("rounds", -1)) != rounds:
             continue

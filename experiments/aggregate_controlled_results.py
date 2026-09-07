@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         description="Aggregate the versioned controlled paper experiments."
     )
     parser.add_argument(
-        "--root", type=Path, default=ROOT / "out" / "paper_v26_controlled"
+        "--root", type=Path, default=ROOT / "out" / "paper_v28_controlled"
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[40, 42, 44])
     parser.add_argument(
@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--edges", type=int, default=10)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v26_controlled_aggregate")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v28_controlled_aggregate")
     parser.add_argument("--paper-figure-dir", type=Path, default=ROOT / "tex" / "paper" / "figures")
     return parser.parse_args()
 

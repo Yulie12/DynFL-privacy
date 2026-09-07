@@ -9,6 +9,7 @@ from dynfed.privacy import (
     calibrate_gaussian_noise,
     mechanism_uses_dp,
     mechanism_uses_he,
+    privacy_execution_audit,
 )
 from dynfed.selection import SelectionConfig, resolved_privacy_parameters
 
@@ -45,7 +46,8 @@ def test_more_rounds_increase_noise_not_total_target() -> None:
     hundred = resolved_privacy_parameters(SelectionConfig(rounds=100, initial_epsilon=8.0))
     assert fifty["feature_budget"] == hundred["feature_budget"] == 8.0
     assert fifty["update_budget"] == hundred["update_budget"] == 8.0
-    assert hundred["feature_noise_multiplier"] > fifty["feature_noise_multiplier"]
+    assert fifty["feature_horizon_events"] == hundred["feature_horizon_events"] == 0
+    assert fifty["feature_noise_multiplier"] == hundred["feature_noise_multiplier"] == 1.0
     assert hundred["update_noise_multiplier"] > fifty["update_noise_multiplier"]
 
 
@@ -56,9 +58,53 @@ def test_update_dp_is_applied_on_the_tex_eligible_stage() -> None:
     assert not _should_apply_update_dp(mechanisms, "upd_only", "LIEIIIC")
 
 
-def test_combined_he_dp_is_accounted_but_not_noised_per_client() -> None:
-    mechanisms = {"upd": "he3_dp"}
+def test_dp_and_he_are_distinct_update_mechanisms() -> None:
+    assert mechanism_uses_dp("dp")
+    assert not mechanism_uses_he("dp")
+    assert mechanism_uses_he("he3")
+    assert not mechanism_uses_dp("he3")
 
-    assert mechanism_uses_dp("he3_dp")
-    assert mechanism_uses_he("he3_dp")
-    assert not _should_apply_update_dp(mechanisms, "upd_only", "LIEIIC")
+
+def test_combined_update_mechanism_uses_both_guarantees() -> None:
+    assert mechanism_uses_dp("dp_he3")
+    assert mechanism_uses_he("dp_he3")
+    mechanisms = {"upd": "dp_he3"}
+    assert _should_apply_update_dp(mechanisms, "upd_only", "LIEIIC")
+
+
+def test_zero_dp_events_and_profiled_he_do_not_imply_transcript_dp() -> None:
+    audit = privacy_execution_audit([{
+        "num_global_update_clients": 10,
+        "uniform_update_dp": False,
+        "max_update_epsilon": 0.0,
+        "he_execution_status": "profiled",
+    }])
+    assert audit["uniform_selected_update_dp"] is False
+    assert audit["end_to_end_dp_status"] == "not_established"
+    assert audit["end_to_end_epsilon"] is None
+    assert audit["he_real_execution_rounds"] == 0
+    assert audit["he_profiled_execution_rounds"] == 1
+
+
+def test_full_dp_coverage_is_not_a_privacy_proof() -> None:
+    audit = privacy_execution_audit([{
+        "num_global_update_clients": 10,
+        "uniform_update_dp": True,
+        "he_execution_status": "real",
+    }])
+    assert audit["uniform_selected_update_dp"] is True
+    assert audit["end_to_end_dp_status"] == "not_established"
+    assert audit["he_real_execution_rounds"] == 1
+
+
+def test_empty_and_legacy_audits_do_not_claim_full_coverage() -> None:
+    assert privacy_execution_audit([])["uniform_selected_update_dp"] is None
+    assert privacy_execution_audit([{"num_global_update_clients": 10}])["uniform_selected_update_dp"] is None
+
+
+def test_later_dp_does_not_erase_an_earlier_non_dp_release() -> None:
+    audit = privacy_execution_audit([
+        {"num_global_update_clients": 10, "uniform_update_dp": False},
+        {"num_global_update_clients": 10, "uniform_update_dp": True},
+    ])
+    assert audit["uniform_selected_update_dp"] is False

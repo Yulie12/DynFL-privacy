@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dynfed.nodes import build_profiles
+from dynfed.privacy import mechanism_uses_he
 from dynfed.selection import (
     Candidate,
     ProfileEvaluation,
@@ -43,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidates-per-client", type=int, default=4)
     parser.add_argument("--archive-size", type=int, default=16)
     parser.add_argument("--max-iters", type=int, default=50)
-    parser.add_argument("--output-dir", default="out/pareto_validation_v25")
+    parser.add_argument("--output-dir", default="out/pareto_validation_v27")
     return parser.parse_args()
 
 
@@ -71,7 +72,7 @@ def _candidate_pool(candidates: list[Candidate], limit: int) -> list[Candidate]:
             source,
             key=lambda item: (
                 not any(
-                    str(value).startswith("he")
+                    mechanism_uses_he(str(value))
                     for value in (item.link_mechanisms or item.mechanisms).values()
                 ),
                 item.time,

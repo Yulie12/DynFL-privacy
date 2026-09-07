@@ -1,6 +1,6 @@
 {
   "name": "paper_v26_cifar10_resnet18",
-  "execution_revision": "paper_flow_v26_aggregate_update_dp",
+  "execution_revision": "paper_flow_v26_trusted_update_packets",
   "output_root": "out/paper_v26_cifar10_resnet18",
   "seeds": [40, 41, 42, 43, 44],
   "policies": [

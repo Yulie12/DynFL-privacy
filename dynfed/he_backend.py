@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 
+from .privacy import mechanism_uses_he
+
 
 CKKS_POLY_MODULUS_DEGREE = 8192
 CKKS_COEFF_MOD_BIT_SIZES = (50, 40)
@@ -173,4 +175,4 @@ def _validate_seal_backend(seal: Any) -> float:
 
 
 def has_he_mechanism(mechanisms: dict[str, str]) -> bool:
-    return any(str(value).startswith("he") for value in mechanisms.values())
+    return any(mechanism_uses_he(str(value)) for value in mechanisms.values())

@@ -17,8 +17,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dynfed.version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
+
+
 TRAINING_PROCESS: subprocess.Popen | None = None
 ACTIVE_OUTPUT_ROOT: Path | None = None
 LAST_STOP_MESSAGE: str | None = None
@@ -376,6 +381,7 @@ def configured_preset(
     )
     args = [
         "experiments/run_fmnist_lenet5.py",
+        "--execution-revision", CURRENT_EXECUTION_REVISION,
         "--rounds", str(rounds),
         "--dataset", dataset,
         "--model", model,
@@ -415,6 +421,7 @@ def configured_preset(
         "--dp-noise-multiplier", dp_config["dp_noise_multiplier"],
         "--dp-update-mode", dp_config["dp_update_mode"],
         "--he-backend", he_backend,
+        "--he-execution", "real" if require_real_he else "profiled",
         "--he-aggregation-size", str(he_aggregation_size),
         "--executor", executor,
         "--client-heterogeneity", str(client_heterogeneity),
@@ -422,6 +429,7 @@ def configured_preset(
         "--device", device,
         "--require-feasible",
         "--require-edge-cloud-coverage",
+        "--trusted-edge-split-execution",
         "--enforce-cloud-dp-stability",
         "--cloud-dp-stability-threshold", "1.0",
         "--output-root", output_root,
@@ -1681,7 +1689,10 @@ def _expected_config_from_preset(preset: dict) -> dict:
             "dataset_name": _str_arg(args, "--dataset", "cifar10"),
             "model_name": _str_arg(args, "--model", "resnet18_pretrained"),
             "model_revision": "groupnorm_v2",
-            "execution_revision": "paper_flow_v26_aggregate_update_dp",
+            "update_parameter_scope": CURRENT_UPDATE_PARAMETER_SCOPE,
+            "execution_revision": _str_arg(
+                args, "--execution-revision", CURRENT_EXECUTION_REVISION
+            ),
             "local_epochs": _int_arg(args, "--local-epochs", 3),
             "learning_rate": _float_arg(args, "--lr", 0.01),
             "iid": iid,
@@ -1694,6 +1705,7 @@ def _expected_config_from_preset(preset: dict) -> dict:
             "executor_workers": _optional_int_arg(args, "--executor-workers"),
             "device": _str_arg(args, "--device", "cuda"),
             "he_backend": _str_arg(args, "--he-backend", "seal"),
+            "he_execution": _str_arg(args, "--he-execution", "profiled"),
             "he_local_deps": _str_arg(args, "--he-local-deps", ".he_deps"),
             "require_real_he": bool(args.get("--require-real-he", False)),
         },

@@ -25,20 +25,21 @@ from .privacy import (
     PRIVACY_BASE_TIME,
     calibrate_gaussian_noise,
     mechanism_uses_dp,
+    mechanism_uses_he,
     utility_penalty,
 )
 from .training import MODE_SPECS, ModeSpec
 
 
 MECHANISMS_BY_OBJECT = {
-    "emb": ("none", "dp"),
+    "emb": ("none",),
     "logits": ("none",),
-    "grad": ("none", "dp"),
+    "grad": ("none",),
     "emb_grad": ("none",),
-    "upd": ("none", "dp", "he3", "he3_dp"),
-    "weakemb": ("none", "dp"),
-    "strongemb": ("none", "dp"),
-    "pseudo_label": ("none", "dp"),
+    "upd": ("none", "dp", "he3", "dp_he3"),
+    "weakemb": ("none",),
+    "strongemb": ("none",),
+    "pseudo_label": ("none",),
 }
 
 OBJECT_RISK = {
@@ -56,7 +57,7 @@ MECHANISM_RISK = {
     "dp": 0.42,
     "he2": 0.18,
     "he3": 0.12,
-    "he3_dp": 0.06,
+    "dp_he3": 0.08,
 }
 
 # Only objects with an available privacy mechanism belong to the privacy-risk
@@ -232,7 +233,7 @@ def candidate_has_he(candidate: Candidate) -> bool:
         if candidate.link_mechanisms
         else candidate.mechanisms.values()
     )
-    return any(str(mechanism).startswith("he") for mechanism in mechanisms)
+    return any(mechanism_uses_he(str(mechanism)) for mechanism in mechanisms)
 
 
 def candidate_mechanism_label(candidate: Candidate) -> str:
@@ -282,11 +283,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
         )
         per_mode_counts.append((feature_events, update_events))
 
-    max_feature_events_per_round = (
-        0
-        if config.trusted_edge_split_execution
-        else max((item[0] for item in per_mode_counts), default=0)
-    )
+    max_feature_events_per_round = 0
     max_update_events_per_round = max((item[1] for item in per_mode_counts), default=0)
     feature_horizon_events = config.rounds * max_feature_events_per_round
     update_horizon_events = max(1, config.rounds * max_update_events_per_round)
@@ -333,7 +330,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
         "max_update_events_per_round": max_update_events_per_round,
         "feature_horizon_events": feature_horizon_events,
         "update_horizon_events": update_horizon_events,
-        "feature_dp_enabled": not config.trusted_edge_split_execution,
+        "feature_dp_enabled": False,
     }
 
 
@@ -368,7 +365,6 @@ class _ProfileOmegaStats:
     client_variance_by_edge: dict[int, float]
     edge_group_samples: dict[tuple[int, str, str], float]
     edge_group_components: dict[tuple[int, str, str], tuple[float, float]]
-    aggregate_dp_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -377,7 +373,6 @@ class _OmegaComponents:
     client_variance: float
     edge_bias: float = 0.0
     edge_variance: float = 0.0
-    aggregate_variance: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -807,7 +802,7 @@ def choose_candidate(
         if not best_feasible:
             return skipped_candidate()
         return max(best_feasible, key=lambda c: c.accuracy)
-    if policy in {"fixed_dp", "fixed_he"}:
+    if policy in {"fixed_dp", "fixed_he", "fixed_dp_he"}:
         return max(pool, key=lambda item: (item.accuracy, -item.time))
 
     # Legacy local selection path. The paper method uses the global Pareto
@@ -1547,7 +1542,7 @@ def _stable_cloud_candidate_pool(
 
     def has_update_he(candidate: Candidate) -> bool:
         return any(
-            mechanism.startswith("he")
+            mechanism_uses_he(mechanism)
             for mechanism in candidate_mechanisms_for_object(candidate, "upd")
         )
 
@@ -1574,16 +1569,27 @@ def _stable_cloud_candidate_pool(
 
     def candidate_update_ratio(candidate: Candidate) -> float:
         mechanisms = candidate_mechanisms_for_object(candidate, "upd")
-        if "he3_dp" in mechanisms or (
-            config.trusted_edge_split_execution and "dp" in mechanisms
+        if config.trusted_edge_split_execution and any(
+            mechanism_uses_dp(mechanism) for mechanism in mechanisms
         ):
             expected_admitted = max(
                 1.0,
                 float(config.num_clients) * float(config.aggregation_fraction),
             )
+            dimension_scale = math.sqrt(
+                max(float(config.omega_update_dimension), 1.0)
+            )
+            if any(
+                mechanism_uses_dp(mechanism) and mechanism_uses_he(mechanism)
+                for mechanism in mechanisms
+            ):
+                return update_ratio * dimension_scale / expected_admitted
+            if candidate.mode in CLOUD_DIRECT_MODES:
+                return update_ratio * dimension_scale / math.sqrt(expected_admitted)
             return (
                 update_ratio
-                * math.sqrt(max(float(config.omega_update_dimension), 1.0))
+                * dimension_scale
+                * math.sqrt(max(float(config.num_edges), 1.0))
                 / expected_admitted
             )
         return update_ratio
@@ -2544,7 +2550,6 @@ def _profile_omega_stats(
     client_variance_by_edge: dict[int, float] = {}
     edge_group_samples: dict[tuple[int, str, str], float] = {}
     edge_group_components: dict[tuple[int, str, str], tuple[float, float]] = {}
-    aggregate_dp_count = 0
     for client_id, candidate in profile.items():
         samples = max(float(client_samples.get(client_id, 1.0)), 0.0)
         edge_id = int(client_edges.get(client_id, -1))
@@ -2574,7 +2579,6 @@ def _profile_omega_stats(
                 components.edge_bias,
                 components.edge_variance,
             )
-        aggregate_dp_count += int(components.aggregate_variance > 0.0)
 
     return _ProfileOmegaStats(
         total_samples=total_samples,
@@ -2588,7 +2592,6 @@ def _profile_omega_stats(
         client_variance_by_edge=client_variance_by_edge,
         edge_group_samples=edge_group_samples,
         edge_group_components=edge_group_components,
-        aggregate_dp_count=aggregate_dp_count,
     )
 
 
@@ -2616,14 +2619,10 @@ def _replace_profile_omega_stats(
     client_variance_by_edge = dict(stats.client_variance_by_edge)
     edge_group_samples = dict(stats.edge_group_samples)
     edge_group_components = dict(stats.edge_group_components)
-    aggregate_dp_count = int(stats.aggregate_dp_count)
 
     def apply_candidate(candidate: Candidate, components: _OmegaComponents, sign: float) -> None:
-        nonlocal aggregate_dp_count
         if not _candidate_reaches_cloud(candidate):
             return
-        if components.aggregate_variance > 0.0:
-            aggregate_dp_count += int(sign)
         cloud_samples_by_edge[edge_id] = (
             cloud_samples_by_edge.get(edge_id, 0.0) + sign * samples
         )
@@ -2659,7 +2658,6 @@ def _replace_profile_omega_stats(
         client_variance_by_edge=client_variance_by_edge,
         edge_group_samples=edge_group_samples,
         edge_group_components=edge_group_components,
-        aggregate_dp_count=aggregate_dp_count,
     )
 
 
@@ -2716,15 +2714,6 @@ def _omega_from_profile_stats(
                 group_weight * group_bias
                 + group_weight * group_weight * group_variance
             )
-        if stats.aggregate_dp_count > 0:
-            weights = _cloud_client_aggregation_weights(
-                profile,
-                stats.client_samples,
-                client_edges,
-                tuple(profile),
-            )
-            weighted_local += _aggregate_dp_noise_cost(config, profile, weights)
-
     cloud_samples = sum(stats.cloud_samples_by_edge.values())
     cloud_fusion_ratio = cloud_samples / max(stats.total_samples, 1e-12)
     return (
@@ -2796,8 +2785,6 @@ def _global_omega_proxy_from_admitted(
             group_weight * group_bias
             + group_weight * group_weight * group_variance
         )
-    weighted_local += _aggregate_dp_noise_cost(config, profile, weights)
-
     admitted_cloud_samples = sum(
         max(float(client_samples.get(client_id, 1.0)), 0.0)
         for client_id in weights
@@ -2891,38 +2878,7 @@ def _local_omega_proxy(
         + components.client_variance / size
         + components.edge_bias
         + components.edge_variance
-        + components.aggregate_variance / (size * size)
     )
-
-
-def _aggregate_dp_noise_cost(
-    config: SelectionConfig,
-    profile: dict[int, Candidate],
-    weights: dict[int, float],
-) -> float:
-    protected_weights = [
-        max(float(weight), 0.0)
-        for client_id, weight in weights.items()
-        if _candidate_aggregate_update_dp_events(profile[client_id], config) > 0
-    ]
-    if not protected_weights:
-        return 0.0
-    privacy = resolved_privacy_parameters(config)
-    eta = max(float(config.omega_learning_rate), 1e-12)
-    local_cycles = max(float(config.L_block_cycles), 1.0)
-    update_variance = (
-        float(privacy["update_noise_multiplier"]) ** 2
-        * (2.0 * config.omega_update_clip_norm) ** 2
-        * config.omega_update_dimension
-        / (eta ** 2 * local_cycles ** 2)
-    )
-    variance_scale = (
-        max(float(config.omega_smoothness), 1e-12)
-        * eta
-        * local_cycles
-        / max(float(config.omega_mu), 1e-12)
-    )
-    return variance_scale * max(protected_weights) ** 2 * update_variance
 
 
 @lru_cache(maxsize=4096)
@@ -2930,7 +2886,6 @@ def _cached_local_omega_components(
     feature_dp_events: int,
     client_update_dp_events: int,
     edge_update_dp_events: int,
-    aggregate_update_dp_events: int,
     feature_clip_excess_sq: float,
     update_clip_excess_sq: float,
     config: SelectionConfig,
@@ -2984,7 +2939,6 @@ def _cached_local_omega_components(
         client_bias=(3.0 / (2.0 * mu)) * (
             feature_bias
             + float(client_update_dp_events) * update_clip_bias
-            + float(aggregate_update_dp_events) * update_clip_bias
         ),
         client_variance=variance_scale * (
             config.omega_local_variance
@@ -2996,9 +2950,6 @@ def _cached_local_omega_components(
         edge_variance=variance_scale
         * float(edge_update_dp_events)
         * update_variance,
-        aggregate_variance=variance_scale
-        * float(aggregate_update_dp_events)
-        * update_variance,
     )
 
 
@@ -3009,17 +2960,10 @@ def _local_omega_components(
     feature_events, client_update_events, edge_update_events = (
         _candidate_dp_event_counts(candidate, config)
     )
-    aggregate_update_events = _candidate_aggregate_update_dp_events(candidate, config)
-    if aggregate_update_events > 0:
-        if candidate.mode in EDGE_CLOUD_MODES:
-            edge_update_events = max(0, edge_update_events - aggregate_update_events)
-        else:
-            client_update_events = max(0, client_update_events - aggregate_update_events)
     return _cached_local_omega_components(
         feature_events,
         client_update_events,
         edge_update_events,
-        aggregate_update_events,
         _candidate_feature_clip_excess_sq(candidate, config),
         config.omega_update_clip_excess_sq,
         config,
@@ -3293,11 +3237,9 @@ def _mechanism_assignments(
         }]
         return [(_object_mechanism_summary(item, link_objects), item) for item in link_assignments]
     if policy == "fixed_splitfed_label_dp":
-        link_assignments = [{
-            link: ("dp" if link_objects[link] == "grad" else "none")
-            for link in links
-        }]
-        return [(_object_mechanism_summary(item, link_objects), item) for item in link_assignments]
+        raise ValueError(
+            "Feature DP diagnostics are not part of the trusted end-edge threat model."
+        )
     if policy == "fixed_splitfed_trusted_edge":
         link_assignments = [{
             link: (
@@ -3341,7 +3283,24 @@ def _mechanism_assignments(
         ]
         return [(_object_mechanism_summary(item, link_objects), item) for item in link_assignments]
     if policy == "fixed_he":
-        link_assignments = [{link: _prefer_he(link_objects[link]) for link in links}]
+        link_assignments = [{
+            link: (
+                "trusted" if link in trusted_links else _prefer_he(link_objects[link])
+            )
+            for link in links
+        }]
+        return [(_object_mechanism_summary(item, link_objects), item) for item in link_assignments]
+    if policy == "fixed_dp_he":
+        link_assignments = [{
+            link: (
+                "trusted"
+                if link in trusted_links
+                else "dp_he3"
+                if link_objects[link] == "upd"
+                else "none"
+            )
+            for link in links
+        }]
         return [(_object_mechanism_summary(item, link_objects), item) for item in link_assignments]
 
     def choices_for_link(link: str) -> tuple[str, ...]:
@@ -3352,14 +3311,11 @@ def _mechanism_assignments(
             and link_objects[link] == "upd"
             and link.endswith("_C_upd")
         ):
-            if spec.name in {"LIIC", "LIEIIC"}:
-                return ("dp", "he3")
-            return ("he3",)
+            return ("dp", "he3", "dp_he3") if allow_he else ("dp",)
         return tuple(
             mech
             for mech in MECHANISMS_BY_OBJECT[link_objects[link]]
-            if mech != "he3_dp"
-            and (allow_he or not mech.startswith("he"))
+            if (allow_he or not mechanism_uses_he(mech))
             and (
                 allow_none
                 or mech != "none"
@@ -3602,6 +3558,7 @@ def _estimate_candidate(
             for link_id, mech in actual_link_mechanisms.items()
             for obj in [_link_object(link_id, link_events)]
             if obj in PRIVACY_RISK_OBJECTS
+            and mech != "trusted"
         ),
         default=0.0,
     )
@@ -3668,33 +3625,6 @@ def _estimate_candidate(
         edge_aggregation_payload=edge_aggregation_payload,
         cloud_aggregation_payload=cloud_aggregation_payload,
         link_metrics=tuple(link_metrics),
-    )
-
-
-def _candidate_aggregate_update_dp_events(
-    candidate: Candidate,
-    config: SelectionConfig,
-) -> int:
-    spec = MODE_SPECS.get(candidate.mode)
-    if spec is None:
-        return 0
-    return sum(
-        count
-        for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
-            candidate.mode,
-            1,
-            max(int(spec.E_edge_loops), 1),
-        )
-        if privacy_eligible
-        and obj == "upd"
-        and (
-            candidate_link_mechanism(candidate, link_id, fallback_object=obj) == "he3_dp"
-            or (
-                config.trusted_edge_split_execution
-                and candidate_link_mechanism(candidate, link_id, fallback_object=obj) == "dp"
-                and link_id.endswith("_C_upd")
-            )
-        )
     )
 
 

@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from .nodes import build_profiles
+from .privacy import mechanism_uses_dp, mechanism_uses_he
 from .real_training import (
     RealTrainingConfig,
     _apply_privacy_to_update,
@@ -293,10 +294,9 @@ def _run_policy(
 
 
 def _update_mechanism(mechanisms: dict[str, str]) -> str:
-    if mechanisms.get("upd") == "dp":
-        return "dp"
-    if str(mechanisms.get("upd", "")).startswith("he"):
-        return mechanisms["upd"]
+    mechanism = str(mechanisms.get("upd", "none"))
+    if mechanism_uses_dp(mechanism) or mechanism_uses_he(mechanism):
+        return mechanism
     return "none"
 
 

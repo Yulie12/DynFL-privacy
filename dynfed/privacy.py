@@ -22,7 +22,7 @@ PRIVACY_ALPHA = {
     "dp": 1.0,
     "he2": 3.2,
     "he3": 8.04,
-    "he3_dp": 8.04,
+    "dp_he3": 8.04,
 }
 
 PRIVACY_BASE_TIME = {
@@ -31,7 +31,7 @@ PRIVACY_BASE_TIME = {
     "dp": 0.04,
     "he2": 0.35,
     "he3": 0.90,
-    "he3_dp": 0.94,
+    "dp_he3": 0.94,
 }
 
 _RDP_ALPHAS: list[float] = []
@@ -46,6 +46,48 @@ def _validate_dp_parameters(noise_multiplier: float, delta: float) -> None:
         raise ValueError("noise_multiplier must be finite and positive")
     if not math.isfinite(delta) or not 0.0 < delta < 1.0:
         raise ValueError("delta must be in (0, 1)")
+
+
+def training_privacy_diagnostics(row: dict[str, Any]) -> dict[str, Any]:
+    """Private diagnostic observations, not convergence or privacy guarantees."""
+    signal = float(row["pre_dp_global_update_norm"])
+    noise = float(row["update_dp_noise_norm"])
+    finite = all(math.isfinite(float(row[key])) for key in (
+        "train_loss", "test_loss", "train_accuracy", "test_accuracy",
+        "global_update_norm", "pre_dp_global_update_norm", "update_dp_noise_norm",
+    ))
+    ratio = noise / max(signal, 1e-12)
+    clipped = int(row.get("update_dp_clipped_clients", 0))
+    measured = int(row.get("update_dp_preclip_norm_count", 0))
+    return {
+        "training_health": (
+            "non_finite" if not finite else
+            "noise_dominates_update" if ratio > 1.0 else "finite"
+        ),
+        "update_dp_noise_to_signal_ratio": ratio,
+        "update_dp_clip_fraction": clipped / measured if measured else 0.0,
+        "noise_ratio_semantics": "measured_norm_ratio_not_a_convergence_threshold",
+    }
+
+
+def privacy_execution_audit(round_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report observed mechanism coverage, not a transcript privacy proof."""
+    cloud_rows = [row for row in round_rows if row.get("num_global_update_clients", 0) > 0]
+    coverage_known = bool(cloud_rows) and all("uniform_update_dp" in row for row in cloud_rows)
+    return {
+        "accountant_scope": "recorded_dp_events_only",
+        "uniform_selected_update_dp": (
+            all(bool(row["uniform_update_dp"]) for row in cloud_rows)
+            if coverage_known else None
+        ),
+        "end_to_end_dp_status": "not_established",
+        "end_to_end_epsilon": None,
+        "he_real_execution_rounds": sum(row.get("he_execution_status") == "real" for row in round_rows),
+        "he_profiled_execution_rounds": sum(row.get("he_execution_status") == "profiled" for row in round_rows),
+        "randomness_scope": "deterministic_experiment_seed",
+        "key_isolation_scope": "single_process_simulation",
+        "diagnostic_scope": "private_experiment_logs_not_public_dp_outputs",
+    }
 
 
 def gaussian_rdp(
@@ -287,11 +329,14 @@ def normalize_mechanism(mechanism: str) -> str:
 
 
 def mechanism_uses_dp(mechanism: str) -> bool:
-    return normalize_mechanism(mechanism) in {"dp", "he3_dp"}
+    return "dp" in normalize_mechanism(mechanism).split("_")
 
 
 def mechanism_uses_he(mechanism: str) -> bool:
-    return normalize_mechanism(mechanism).startswith("he")
+    return any(
+        component.startswith("he")
+        for component in normalize_mechanism(mechanism).split("_")
+    )
 
 
 def protected_size(objects: list[str], mechanism: str) -> float:
@@ -304,10 +349,15 @@ def privacy_processing_time(objects: list[str], mechanism: str, epsilon: float) 
     mechanism = normalize_mechanism(mechanism)
     if not objects:
         return 0.0
-    eps_factor = 1.0
+    eps_factor = 1.0 + 1.0 / max(float(epsilon), 1e-6)
+    if mechanism == "dp_he3":
+        return len(objects) * (
+            PRIVACY_BASE_TIME["he3"]
+            + PRIVACY_BASE_TIME["dp"] * eps_factor
+        )
     if mechanism_uses_dp(mechanism):
-        eps_factor = 1.0 + 1.0 / max(float(epsilon), 1e-6)
-    return len(objects) * PRIVACY_BASE_TIME[mechanism] * eps_factor
+        return len(objects) * PRIVACY_BASE_TIME[mechanism] * eps_factor
+    return len(objects) * PRIVACY_BASE_TIME[mechanism]
 
 
 def utility_penalty(mechanism: str, epsilon: float) -> float:
@@ -318,13 +368,15 @@ def utility_penalty(mechanism: str, epsilon: float) -> float:
         return 0.0
     if mechanism == "he2":
         return 0.018
-    if mechanism == "he3":
+    if mechanism_uses_he(mechanism):
         return 0.0
     return 0.0
 
 
 def privacy_score(mechanism: str, epsilon: float) -> float:
     mechanism = normalize_mechanism(mechanism)
+    if mechanism == "dp_he3":
+        return 0.94
     if mechanism_uses_dp(mechanism):
         return 1.0 / (1.0 + math.log1p(max(float(epsilon), 0.0)))
     if mechanism == "trusted":

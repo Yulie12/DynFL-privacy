@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "paper_v26_cifar10_resnet18.json"
+DEFAULT_CONFIG = ROOT / "configs" / "paper_v28_cifar10_resnet18.json"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -215,6 +215,14 @@ def validate_config(config: dict) -> None:
     if he.get("require_real_he") and he.get("execution", "real") != "real":
         raise ValueError("require_real_he is only valid with real HE execution")
     privacy = config["privacy"]
+    if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
+        raise ValueError(
+            "Formal configurations must protect cross-domain updates and secure aggregate releases"
+        )
+    if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
+        raise ValueError(
+            "Formal configurations must expose DP, HE, and combined DP plus HE candidates"
+        )
     if not bool(privacy.get("enforce_cloud_dp_stability")):
         raise ValueError(
             "Formal paper configurations must enable the cloud DP stability safeguard"
