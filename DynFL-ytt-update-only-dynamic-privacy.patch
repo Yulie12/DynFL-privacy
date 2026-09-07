@@ -1,0 +1,57 @@
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -3185,7 +3185,10 @@
+         ]
+         return [(_object_mechanism_summary(item, link_objects), item) for item in link_assignments]
+     if policy == "fixed_he":
+-        link_assignments = [{link: _prefer_he(link_objects[link]) for link in links}]
++        link_assignments = [{
++            link: ("trusted" if link in trusted_links else _prefer_he(link_objects[link]))
++            for link in links
++        }]
+         return [(_object_mechanism_summary(item, link_objects), item) for item in link_assignments]
+     def choices_for_link(link: str) -> tuple[str, ...]:
+         if link in trusted_links:
+@@ -3195,9 +3198,7 @@
+             and link_objects[link] == "upd"
+             and link.endswith("_C_upd")
+         ):
+-            if spec.name in {"LIIC", "LIEIIC"}:
+-                return ("dp", "he3")
+-            return ("he3",)
++            return ("dp", "he3") if allow_he else ("dp",)
+         return tuple(
+             mech
+             for mech in MECHANISMS_BY_OBJECT[link_objects[link]]
+@@ -3430,6 +3431,7 @@
+             for link_id, mech in actual_link_mechanisms.items()
+             for obj in [_link_object(link_id, link_events)]
+             if obj in PRIVACY_RISK_OBJECTS
++            and mech != "trusted"
+         ),
+         default=0.0,
+     )
+diff --git a/dynfed/split_learning.py b/dynfed/split_learning.py
+--- a/dynfed/split_learning.py
++++ b/dynfed/split_learning.py
+@@ -770,14 +770,16 @@
+     device: torch.device,
+     epsilon: float = 1.0,
+ ) -> torch.Tensor:
+-    """Release the average of clipped per-record output gradients."""
++    """Release an averaged output gradient, with DP only when requested."""
+     batch_size = max(1, int(tensor.shape[0]))
++    if mechanism != "dp":
++        # The upstream loss uses reduction="sum". Dividing by batch size
++        # reproduces the ordinary mean-loss gradient without DP clipping.
++        return tensor / float(batch_size)
+     flat = tensor.detach().reshape(batch_size, -1)
+     norms = torch.linalg.vector_norm(flat, ord=2, dim=1, keepdim=True)
+     scales = torch.clamp(float(clip_norm) / (norms + 1e-12), max=1.0)
+     clipped = (flat * scales).reshape_as(tensor) / float(batch_size)
+-    if mechanism != "dp":
+-        return clipped
+     std = 2.0 * float(clip_norm) * float(noise_multiplier) / float(batch_size)
+     noise = rng.normal(0.0, std, size=tuple(tensor.shape)).astype(np.float32)
+     return clipped + torch.from_numpy(noise).to(device=device, dtype=tensor.dtype)

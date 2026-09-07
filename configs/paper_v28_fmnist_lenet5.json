@@ -1,0 +1,85 @@
+{
+  "name": "paper_v28_fmnist_lenet5",
+  "execution_revision": "paper_flow_v28_he_secure_aggregate_dp",
+  "output_root": "out/paper_v28_fmnist_lenet5",
+  "seeds": [40, 41, 42, 43, 44],
+  "policies": [
+    "ours",
+    "individual_optimal",
+    "no_protection",
+    "random",
+    "fixed_fedavg",
+    "fixed_splitfed",
+    "fixed_hfl",
+    "nsga2"
+  ],
+  "training": {
+    "dataset": "fmnist",
+    "model": "lenet5",
+    "rounds": 100,
+    "train_limit": 12000,
+    "test_limit": 2000,
+    "partition_mode": "extreme_edge_label_skew",
+    "local_epochs": 1,
+    "learning_rate": 0.15,
+    "device": "cuda",
+    "executor": "serial",
+    "selection_period": 1
+  },
+  "system": {
+    "clients": 100,
+    "edges": 10,
+    "resource_limit": 1.35,
+    "memory_limit": 1.35,
+    "time_limit": 8.0,
+    "risk_limit": 0.5,
+    "aggregation_fraction": 1.0,
+    "client_heterogeneity": 2.0,
+    "edge_heterogeneity": 1.5,
+    "require_feasible": true,
+    "require_edge_cloud_coverage": true,
+    "min_edge_cloud_fusion_ratio": 0.5,
+    "trusted_edge_split_execution": true
+  },
+  "network": {
+    "end_edge_rate_mb_s": 5.0,
+    "end_cloud_rate_mb_s": 2.2,
+    "edge_cloud_rate_mb_s": 8.0,
+    "end_edge_base_latency_sec": 0.015,
+    "end_cloud_base_latency_sec": 0.04,
+    "edge_cloud_base_latency_sec": 0.01,
+    "periodic_amplitude": 0.2,
+    "period_rounds": 3.0,
+    "jitter": 0.25
+  },
+  "privacy": {
+    "protection_scope": "cross_domain_update_and_secure_aggregate",
+    "candidate_mechanisms": ["dp", "he3", "dp_he3"],
+    "accounting_mode": "rdp_auto",
+    "initial_epsilon": 8.0,
+    "update_epsilon_budget": 8.0,
+    "delta": 0.00001,
+    "clip_norm": 1.0,
+    "update_mode": "upd_only",
+    "enforce_cloud_dp_stability": true,
+    "cloud_dp_stability_threshold": 1.0
+  },
+  "he": {
+    "backend": "seal",
+    "execution": "profiled",
+    "require_real_he": false,
+    "aggregation_size": 0,
+    "workers": 4,
+    "poly_modulus_degree": 8192,
+    "coeff_modulus_bits": [50, 40],
+    "scale_bits": 40
+  },
+  "optimization": {
+    "pareto_archive_size": 16,
+    "pareto_beam_size": 4,
+    "pareto_max_iters": 50,
+    "pareto_neighbor_top_k": 0,
+    "cloud_fusion_xi": 0.2,
+    "cloud_fusion_eps": 0.05
+  }
+}
