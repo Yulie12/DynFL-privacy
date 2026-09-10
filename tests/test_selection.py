@@ -139,6 +139,13 @@ def test_pareto_archive_contains_only_coverage_feasible_profiles() -> None:
                 evaluation.profile[client_id].mode == "LIIC"
                 for client_id in edge_clients
             ) >= 1
+    assert diagnostics["candidate_pool_sizes_before_stability"] == diagnostics["candidate_pool_sizes"]
+    assert diagnostics["update_mechanism_counts_before_stability"] == {
+        "dp_only": 0,
+        "he_only": 8,
+        "dp_he": 0,
+        "neither": 0,
+    }
 
 
 def test_pareto_conflict_only_limits_search_clients() -> None:
@@ -355,6 +362,24 @@ def test_unstable_cloud_dp_is_removed_when_he_is_available() -> None:
     assert cloud_feature_dp not in stable
     assert cloud_update_he in stable
     assert edge_update_dp in stable
+
+
+def test_tex_stability_uses_coordinate_noise_not_dimension(monkeypatch) -> None:
+    monkeypatch.setattr(selection_module, "resolved_privacy_parameters", lambda config: {
+        "feature_noise_multiplier": 0.4, "update_noise_multiplier": 0.4,
+    })
+    dp = Candidate(**{**_candidate("LIIC", time=1.0).__dict__,
+                      "mechanisms": {"upd": "dp"}})
+    he = _candidate("LIIC", time=2.0)
+    config = SelectionConfig(trusted_edge_split_execution=True,
+                             omega_update_dimension=10_490_890,
+                             cloud_dp_stability_threshold=1.0)
+    assert _stable_cloud_candidate_pool(config, [dp, he]) == [dp, he]
+    monkeypatch.setattr(selection_module, "resolved_privacy_parameters", lambda config: {
+        "feature_noise_multiplier": 0.6, "update_noise_multiplier": 0.6,
+    })
+    assert _stable_cloud_candidate_pool(config, [dp, he]) == [he]
+    assert _stable_cloud_candidate_pool(config, [dp]) == [dp]
 
 
 def test_adaptive_baselines_share_cloud_dp_stability_filter() -> None:

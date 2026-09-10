@@ -1,6 +1,6 @@
 import csv
 
-from experiments.validate_privacy_paths import collect_result
+from experiments.validate_privacy_paths import collect_result, write_report
 
 
 def write_metrics(tmp_path, **changes):
@@ -36,3 +36,23 @@ def test_failed_metrics_not_reported_as_success(tmp_path):
 
 def test_missing_metrics_are_a_failure_even_with_zero_exit(tmp_path):
     assert collect_result(tmp_path, 0)["status"] == "failed_no_metrics"
+
+
+def test_noise_dominated_run_has_an_explicit_warning_status(tmp_path):
+    write_metrics(tmp_path, training_health="noise_dominates_update",
+                  update_dp_noise_to_signal_ratio="12")
+    result = collect_result(tmp_path, 0)
+    assert result["status"] == "completed_with_training_warning"
+
+
+def test_native_crash_after_noisy_round_stays_failed(tmp_path):
+    write_metrics(tmp_path, training_health="noise_dominates_update")
+    assert collect_result(tmp_path, 3221225477)["status"] == "failed"
+
+
+def test_report_writes_json_and_csv(tmp_path):
+    report = {"results": {"fixed_he": {"status": "short_run_finished",
+                                         "real_he_rounds": 2}}}
+    write_report(tmp_path, report)
+    assert (tmp_path / "validation_report.json").exists()
+    assert "fixed_he" in (tmp_path / "validation_summary.csv").read_text(encoding="utf-8-sig")

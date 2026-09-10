@@ -47,10 +47,32 @@ def collect_result(directory: Path, returncode: int) -> dict:
         logical_time_sec=number(last, "logical_time"),
         he_wall_time_sec=sum(number(row, "he_wall_time_sec") or 0 for row in rows),
         he_max_abs_error=max(number(row, "he_max_abs_error") or 0 for row in rows),
+        released_model_dp_coverage=last.get("released_model_dp_coverage", "not_audited"),
+        update_packets_without_dp_calibration=(
+            number(last, "update_packets_without_dp_calibration")
+            if "update_packets_without_dp_calibration" in last else None
+        ),
     )
     if any(row.get("training_health") == "non_finite" for row in rows):
         result["status"] = "failed_non_finite"
+    elif not returncode and result["final_health"] == "noise_dominates_update":
+        result["status"] = "completed_with_training_warning"
     return result
+
+
+def write_report(directory: Path, report: dict) -> None:
+    (directory / "validation_report.json").write_text(
+        json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    rows = []
+    for policy, result in report["results"].items():
+        rows.append({"policy": policy, **result})
+    if not rows:
+        return
+    fields = ["policy"] + sorted({key for row in rows for key in row if key != "policy"})
+    with (directory / "validation_summary.csv").open("w", newline="", encoding="utf-8-sig") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main():
@@ -76,11 +98,11 @@ def main():
         for policy, previous in list(report["results"].items()):
             result = collect_result(Path(previous["run_directory"]), previous["process_exit_code"])
             result["process_wall_time_sec"] = previous.get("process_wall_time_sec")
-            if result["status"] == "short_run_finished" and result["recorded_rounds"] < min(
+            if result["status"] in {"short_run_finished", "completed_with_training_warning"} and result["recorded_rounds"] < min(
                     report["max_new_rounds"], report["privacy_horizon"]):
                 result["status"] = "failed_incomplete"
             report["results"][policy] = result
-        report_path.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+        write_report(args.summarize_only.resolve(), report)
         print(f"Report {report_path}")
         return
     if args.max_new_rounds < 1 or args.he_workers < 1:
@@ -140,8 +162,7 @@ def main():
                 args.max_new_rounds, int(config["training"]["rounds"])):
             result["status"] = "failed_incomplete"
         report["results"][policy] = result
-        (output / "validation_report.json").write_text(
-            json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+        write_report(output, report)
         print(f"Validation {policy} {result['status']}", flush=True)
     print(f"Report {output / 'validation_report.json'}", flush=True)
     if any(item["status"].startswith("failed") for item in report["results"].values()):

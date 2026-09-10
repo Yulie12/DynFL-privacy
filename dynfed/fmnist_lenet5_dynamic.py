@@ -54,6 +54,7 @@ from .split_learning import (
 )
 from .nodes import build_profiles
 from .privacy import ClientPrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
+from .protection_rules import audit_update_release
 from .selection import (
     Candidate,
     ProfileEvaluation,
@@ -106,6 +107,7 @@ class Lenet5Config:
     dp_clip_norm: float = 1.0
     dp_noise_multiplier: float = 0.0002
     dp_update_mode: str = "upd_only"
+    dp_release_calibration: str = "tex_packet"
     test_size: float = 0.25
     device: str = "cpu"
     he_backend: str = "none"
@@ -297,6 +299,10 @@ def run_fmnist_lenet5_training(
 ) -> dict[str, Any]:
     if max_new_rounds is not None and max_new_rounds < 1:
         raise ValueError("max_new_rounds must be positive")
+    if train_config.dp_release_calibration not in {"tex_packet", "legacy_aggregate"}:
+        raise ValueError("Unknown DP release calibration")
+    if train_config.dp_release_calibration == "tex_packet" and train_config.execution_revision != CURRENT_EXECUTION_REVISION:
+        raise ValueError("TeX packet calibration requires the current execution revision")
     output_dir = Path(selection.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(train_config.device)
@@ -882,6 +888,8 @@ def _run_lenet5_policy(
                 "Start a new run so frozen parameter protection does not change mid-training."
             )
         saved_execution_revision = saved_training.get("execution_revision")
+        if saved_training.get("dp_release_calibration", "legacy_aggregate") != train_config.dp_release_calibration:
+            raise ValueError("Cannot resume a different DP release calibration")
         if saved_execution_revision != train_config.execution_revision:
             raise RuntimeError(
                 "Cannot resume across different training execution revisions: "
@@ -1019,6 +1027,7 @@ def _run_lenet5_policy(
         round_decision_rows_by_client: dict[int, dict[str, Any]] = {}
         infeasible = 0
         forced_feasibility_repair = False
+        selection_diagnostics: dict[str, Any] = {}
 
         for client in clients:
             rem = remaining_epsilon[client.client_id]
@@ -1164,6 +1173,7 @@ def _run_lenet5_policy(
                 previous_choices=prior_choices,
                 objective=objective,
                 search_method=search_method,
+                diagnostics=selection_diagnostics,
             )
             if policy == "ours":
                 global_pareto_selection_rounds += 1
@@ -1658,6 +1668,9 @@ def _run_lenet5_policy(
                     candidate,
                     effective_selection.trusted_edge_split_execution,
                 )
+                if train_config.dp_release_calibration == "tex_packet":
+                    local_packet_dp = local_packet_dp or secure_aggregate_dp
+                    secure_aggregate_dp = False
                 if local_packet_dp or secure_aggregate_dp:
                     relative_update, _original_norm, clip_scale = clip_state_difference(
                         relative_update,
@@ -1713,6 +1726,10 @@ def _run_lenet5_policy(
                 representative,
                 effective_selection.trusted_edge_split_execution,
             )
+            tex_packet = train_config.dp_release_calibration == "tex_packet"
+            if tex_packet:
+                local_packet_dp = local_packet_dp or secure_aggregate_dp
+                secure_aggregate_dp = False
             if local_packet_dp or secure_aggregate_dp:
                 clipped_updates = []
                 clipped_counts = []
@@ -1725,16 +1742,17 @@ def _run_lenet5_policy(
                         global_edge=global_edge,
                         device=torch.device("cpu"),
                     )
-                    clipped, _original_norm, clip_scale = clip_state_difference(
-                        relative_update,
-                        train_config.dp_clip_norm,
-                        torch.device("cpu"),
-                    )
+                    if tex_packet:
+                        clipped = relative_update
+                    else:
+                        clipped, _original_norm, clip_scale = clip_state_difference(
+                            relative_update, train_config.dp_clip_norm, torch.device("cpu"),
+                        )
+                        update_dp_clip_scales.append(clip_scale)
+                        update_dp_preclip_norms.append(float(_original_norm))
+                        update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
                     clipped_updates.append(clipped)
                     clipped_counts.append(sample_count)
-                    update_dp_clip_scales.append(clip_scale)
-                    update_dp_preclip_norms.append(float(_original_norm))
-                    update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
                 edge_update = _weighted_average_state_differences(
                     clipped_updates,
                     clipped_counts,
@@ -1744,6 +1762,14 @@ def _run_lenet5_policy(
                     (float(count) / group_total for count in clipped_counts),
                     default=0.0,
                 )
+                if tex_packet:
+                    edge_update, _original_norm, clip_scale = clip_state_difference(
+                        edge_update, train_config.dp_clip_norm, torch.device("cpu"),
+                    )
+                    update_dp_clip_scales.append(clip_scale)
+                    update_dp_preclip_norms.append(float(_original_norm))
+                    update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+                    max_client_fraction = 1.0
                 cloud_signal_updates.append(edge_update)
                 cloud_index = len(cloud_updates)
                 if local_packet_dp:
@@ -2034,6 +2060,38 @@ def _run_lenet5_policy(
                 client_model_states.pop(client_id, None)
         aggregation_wall_time_sec = time.perf_counter() - aggregation_wall_started_at
 
+        packet_dp_indices = {index for index, _std, _seed in local_dp_pending_components}
+        protection_releases = []
+        for packet_index, (_diff, _samples, candidate, client_ids) in enumerate(cloud_updates):
+            mechanism = _candidate_cloud_update_mechanism(candidate)
+            noise_location = (
+                "packet" if packet_index in packet_dp_indices else
+                "aggregate_share" if aggregate_dp_share_stds[packet_index] > 0.0 else "none"
+            )
+            packet_he = (
+                "real" if execute_real_he else "profiled"
+            ) if mechanism_uses_he(mechanism) else "not_selected"
+            audit = audit_update_release(
+                mechanism=mechanism, noise_location=noise_location,
+                he_execution=packet_he,
+                dp_budget_ok=all(
+                    privacy_ledgers[cid].update.current_epsilon()
+                    <= privacy_ledgers[cid].update.budget + 1e-12
+                    for cid in client_ids
+                ),
+                key_isolation_enforced=False,
+                aggregate_only_decryption_enforced=False,
+            )
+            protection_releases.append({
+                "round": round_idx, "packet_index": packet_index,
+                "source": "edge" if candidate and candidate.mode in EDGE_CLOUD_MODES else "end",
+                "destination": "cloud", "object": "model_update",
+                "client_ids": ";".join(str(cid) for cid in client_ids),
+                "source_domain": _cloud_update_edge(client_ids, client_edges),
+                "mode": candidate.mode if candidate else "none",
+                **audit,
+            })
+
         if round_real_he_used:
             real_he_rounds += 1
             real_he_aggregated_clients += round_real_he_clients
@@ -2101,6 +2159,10 @@ def _run_lenet5_policy(
                     round_wall_time_sec - training_wall_time_sec,
                 ),
                 "test_accuracy": test_accuracy,
+                "accuracy_change_from_previous": (
+                    test_accuracy - float(round_rows[-1]["test_accuracy"])
+                    if round_rows else 0.0
+                ),
                 "test_loss": test_loss,
                 "train_accuracy": train_accuracy,
                 "train_loss": train_loss,
@@ -2108,6 +2170,11 @@ def _run_lenet5_policy(
                     math.isfinite(train_loss) and math.isfinite(test_loss)
                 ),
                 "dp_parameter_scope": train_config.update_parameter_scope,
+                "dp_release_calibration": train_config.dp_release_calibration,
+                "dp_clipping_unit": (
+                    "released_packet" if train_config.dp_release_calibration == "tex_packet"
+                    else "client_contribution"
+                ),
                 "dp_parameter_count": int(effective_selection.omega_update_dimension),
                 "best_accuracy": best_accuracy,
                 "communication_volume": sum(item.communication_volume for item in flow_inputs if item.client_id in flow_result.selected_client_ids),
@@ -2210,6 +2277,54 @@ def _run_lenet5_policy(
                 ),
                 "protected_object": "cross_domain_model_update",
                 "privacy_mechanism_scope": "local_packet_or_secure_aggregate",
+                "protection_release_audit": json.dumps(protection_releases, sort_keys=True),
+                "update_packets_without_dp_calibration": sum(
+                    item["released_model_dp_status"] != "dp_coverage_pending_analysis"
+                    for item in protection_releases
+                ),
+                "update_packets_with_real_he_pending_isolation": sum(
+                    item["he_crypto_observed"] and not item["key_isolation_enforced"]
+                    for item in protection_releases
+                ),
+                "protection_rule_scope": "observed_operations_not_a_security_proof",
+                "released_model_dp_coverage": (
+                    "no_new_cloud_update" if not protection_releases else
+                    "all_contributions_pending_analysis" if all(
+                        item["released_model_dp_status"] == "dp_coverage_pending_analysis"
+                        for item in protection_releases
+                    ) else "some_contributions_without_dp_calibration"
+                ),
+                "selection_pool_candidates_before_stability": sum(
+                    selection_diagnostics.get(
+                        "candidate_pool_sizes_before_stability", {}
+                    ).values()
+                ),
+                "selection_pool_candidates_after_stability": sum(
+                    selection_diagnostics.get("candidate_pool_sizes", {}).values()
+                ),
+                "selection_stability_removed_candidates": max(
+                    0,
+                    sum(
+                        selection_diagnostics.get(
+                            "candidate_pool_sizes_before_stability", {}
+                        ).values()
+                    )
+                    - sum(
+                        selection_diagnostics.get("candidate_pool_sizes", {}).values()
+                    ),
+                ),
+                "selection_update_mechanisms_before_stability": json.dumps(
+                    selection_diagnostics.get(
+                        "update_mechanism_counts_before_stability", {}
+                    ),
+                    sort_keys=True,
+                ),
+                "selection_update_mechanisms_after_stability": json.dumps(
+                    selection_diagnostics.get(
+                        "update_mechanism_counts_after_stability", {}
+                    ),
+                    sort_keys=True,
+                ),
                 "update_dp_coverage": update_dp_coverage,
                 "update_he_coverage": update_he_coverage,
                 "uniform_update_dp": int(uniform_update_dp),
@@ -2370,6 +2485,10 @@ def _run_lenet5_policy(
         _write_live_status(output_dir / "live_status.json", live_payload)
         _write_live_status(parent_status_path, live_payload)
         _write_csv(output_dir / "round_metrics.csv", round_rows)
+        _write_csv(output_dir / "protection_releases.csv", [
+            release for row in round_rows
+            for release in json.loads(row.get("protection_release_audit", "[]"))
+        ])
         if current_round["training_health"] == "non_finite":
             failed_payload = dict(live_payload, status="failed", message=(
                 "Non-finite training metrics or updates detected. The last valid "
@@ -2412,7 +2531,9 @@ def _run_lenet5_policy(
         )
         print(
             f"  [{policy}] round {round_idx + 1:03d}/{selection.rounds} "
-            f"acc={test_accuracy:.4f} best={best_accuracy:.4f} "
+            f"acc={test_accuracy:.4f} "
+            f"acc_delta={current_round['accuracy_change_from_previous']:+.4f} "
+            f"best={best_accuracy:.4f} "
             f"logical_time={logical_time:.2f}s "
             f"wall_time={current_round['cumulative_wall_time_sec']:.2f}s {privacy_progress} "
             f"dp={num_update_dp_only_clients} he={num_update_he_only_clients} "
@@ -2428,7 +2549,11 @@ def _run_lenet5_policy(
             f"noise/signal={current_round['update_dp_noise_to_signal_ratio']:.6g} "
             f"clip_fraction={current_round['update_dp_clip_fraction']:.3f} "
             f"dp_releases={update_dp_release_count} "
+            f"candidate_filter="
+            f"{current_round['selection_pool_candidates_before_stability']}->"
+            f"{current_round['selection_pool_candidates_after_stability']} "
             f"he_wall={current_round.get('he_wall_time_sec', 0.0):.3f}s "
+            f"packets_without_dp_calibration={current_round['update_packets_without_dp_calibration']} "
             f"end_to_end_dp=not_established",
             flush=True,
         )

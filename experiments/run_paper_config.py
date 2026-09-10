@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "paper_v28_cifar10_resnet18.json"
+DEFAULT_CONFIG = ROOT / "configs" / "paper_v29_cifar10_resnet18.json"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -111,6 +111,7 @@ def build_command(
         "dp_delta": privacy["delta"],
         "dp_clip_norm": privacy["clip_norm"],
         "dp_update_mode": privacy["update_mode"],
+        "dp_release_calibration": privacy.get("release_calibration", "legacy_aggregate"),
         "cloud_dp_stability_threshold": privacy["cloud_dp_stability_threshold"],
         "he_backend": he["backend"],
         "he_execution": he.get("execution", "real"),
@@ -131,6 +132,7 @@ def build_command(
         values["dp_feature_epsilon_budget"] = feature_budget
     for name, value in values.items():
         _append_value(command, name, value)
+    command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
     if max_new_rounds is not None:
         _append_value(command, "max_new_rounds", max_new_rounds)
     if resume_from_run is not None:
@@ -219,14 +221,12 @@ def validate_config(config: dict) -> None:
         raise ValueError(
             "Formal configurations must protect cross-domain updates and secure aggregate releases"
         )
-    if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
+    if privacy.get("candidate_mechanisms") != ["dp", "he3"]:
         raise ValueError(
-            "Formal configurations must expose DP, HE, and combined DP plus HE candidates"
+            "TeX configurations must expose DP and HE as the update choices"
         )
-    if not bool(privacy.get("enforce_cloud_dp_stability")):
-        raise ValueError(
-            "Formal paper configurations must enable the cloud DP stability safeguard"
-        )
+    if privacy.get("release_calibration") != "tex_packet":
+        raise ValueError("TeX configurations require whole packet DP calibration")
     if float(privacy["cloud_dp_stability_threshold"]) <= 0.0:
         raise ValueError("The cloud DP stability threshold must be positive")
 

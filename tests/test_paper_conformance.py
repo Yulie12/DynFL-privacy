@@ -866,7 +866,8 @@ def test_aggregate_dp_clips_one_complete_client_contribution() -> None:
 
 
 @pytest.mark.parametrize("mode", ["LIIC", "LIEIIC"])
-def test_pretrained_dp_keeps_frozen_parameters_constant(monkeypatch, mode) -> None:
+@pytest.mark.parametrize("model_name", ["resnet18_pretrained", "resnet18_pretrained_head"])
+def test_pretrained_dp_keeps_frozen_parameters_constant(monkeypatch, mode, model_name) -> None:
     from torchvision.models import resnet18
 
     monkeypatch.setattr(
@@ -875,7 +876,7 @@ def test_pretrained_dp_keeps_frozen_parameters_constant(monkeypatch, mode) -> No
     )
     device = torch.device("cpu")
     end, edge, _full = build_split_models(
-        "resnet18_pretrained", device, input_channels=3, image_size=32,
+        model_name, device, input_channels=3, image_size=32,
     )
     base = {
         part: {name: value.detach().clone() for name, value in model.state_dict().items()}
@@ -887,11 +888,14 @@ def test_pretrained_dp_keeps_frozen_parameters_constant(monkeypatch, mode) -> No
     }
     assert not expected_names["end"]
     assert expected_names["edge"]
+    if model_name.endswith("_head"):
+        assert sum(p.numel() for p in edge.parameters() if p.requires_grad) == 5130
+        assert all(name.startswith(("classifier.", "fc.")) for name in expected_names["edge"])
     diff = split_local_train_lenet5(
         mode, base["end"], base["edge"],
         np.random.default_rng(7).normal(size=(4, 3 * 32 * 32)).astype(np.float32),
         np.array([0, 1, 2, 3], dtype=np.int64),
-        epochs=1, lr=0.01, device=device, model_name="resnet18_pretrained",
+        epochs=1, lr=0.01, device=device, model_name=model_name,
         input_shape=(3, 32, 32), local_steps=1, training_seed=7,
     )
     for part, names in expected_names.items():

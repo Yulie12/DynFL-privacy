@@ -486,6 +486,7 @@ MODEL_BUILDERS = {
     "resnet18": (ResNet18End, ResNetEdge, ResNet18Full),
     "resnet50": (ResNet50End, ResNetEdge, ResNet50Full),
     "resnet18pretrained": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
+    "resnet18pretrainedhead": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
     "resnet50pretrained": (TorchvisionResNet50End, TorchvisionResNet50Edge, TorchvisionResNet50Full),
 }
 
@@ -511,6 +512,7 @@ def normalize_model_name(model_name: str) -> str:
         "cifarresnet50": "resnet50",
         "res18pretrained": "resnet18pretrained",
         "resnet18pretrained": "resnet18pretrained",
+        "resnet18pretrainedhead": "resnet18pretrainedhead",
         "torchvisionresnet18": "resnet18pretrained",
         "driftraceres18": "resnet18pretrained",
         "res50pretrained": "resnet50pretrained",
@@ -595,7 +597,7 @@ def count_params(model: nn.Module) -> int:
 
 
 def _is_pretrained_resnet(model_name: str) -> bool:
-    return normalize_model_name(model_name) in {"resnet18pretrained", "resnet50pretrained"}
+    return normalize_model_name(model_name) in {"resnet18pretrained", "resnet50pretrained", "resnet18pretrainedhead"}
 
 
 def _prepare_model_for_training(model: nn.Module, model_name: str) -> None:
@@ -609,6 +611,8 @@ def _prepare_model_for_training(model: nn.Module, model_name: str) -> None:
             or name.startswith("fc.")
         )
         param.requires_grad_(trainable)
+        if normalize_model_name(model_name) == "resnet18pretrainedhead":
+            param.requires_grad_(name.startswith(("classifier.", "fc.")))
     for module in model.modules():
         if isinstance(module, nn.modules.batchnorm._BatchNorm):
             module.eval()
@@ -626,7 +630,7 @@ def _make_optimizer(
     if not trainable:
         return None
     normalized = normalize_model_name(model_name)
-    if normalized in {"resnet18", "resnet50", "resnet18pretrained", "resnet50pretrained"}:
+    if normalized in {"resnet18", "resnet50", "resnet18pretrained", "resnet50pretrained", "resnet18pretrainedhead"}:
         decay = 5e-4 if weight_decay is None else float(weight_decay)
         return torch.optim.SGD(trainable, lr=lr, momentum=0.9, weight_decay=decay)
     decay = 0.0 if weight_decay is None else float(weight_decay)
@@ -683,6 +687,7 @@ def split_local_train_lenet5(
         For no-split modes, only "end" contains the full model diff.
     """
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
+        "resnet18pretrainedhead",
         "resnet18",
         "resnet50",
         "resnet18pretrained",

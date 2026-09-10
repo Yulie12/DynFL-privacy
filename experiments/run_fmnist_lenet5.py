@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
             "resnet18",
             "resnet50",
             "resnet18_pretrained",
+            "resnet18_pretrained_head",
             "resnet50_pretrained",
         ],
     )
@@ -82,6 +83,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dp-update-noise-multiplier", type=float, default=None)
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
+    parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate"])
+    parser.add_argument("--update-mechanisms", nargs="+", choices=["dp", "he3", "dp_he3"], default=["dp", "he3"])
     parser.add_argument(
         "--trusted-edge-split-execution",
         action="store_true",
@@ -234,6 +237,7 @@ def main() -> None:
         cloud_dp_stability_threshold=args.cloud_dp_stability_threshold,
         assume_encoder_feasible=args.assume_encoder_feasible,
         output_dir=str(output_root),
+        update_mechanism_options=tuple(args.update_mechanisms),
     )
     train_config = Lenet5Config(
         execution_revision=args.execution_revision,
@@ -247,6 +251,7 @@ def main() -> None:
         dp_clip_norm=args.dp_clip_norm,
         dp_noise_multiplier=args.dp_noise_multiplier,
         dp_update_mode=args.dp_update_mode,
+        dp_release_calibration=args.dp_release_calibration,
         device=args.device,
         he_backend=args.he_backend,
         he_execution=args.he_execution,

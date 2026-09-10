@@ -8,6 +8,7 @@
 - NaN、Inf 更新不能进入裁剪流程。逐包 DP 的比例、裁剪阈值和噪声倍率必须有效，非法值显式报错。
 - 逐轮打印真实墙钟时间与模型时延，分别标为 wall_time 和 logical_time。
 - 打印损失、有效更新范数、实际噪声范数、噪声与更新之比、裁剪比例、DP 发布数和真实 HE 运算耗时。
+- 记录稳定性过滤前后的候选总数以及更新保护机制分布，用来解释 Ours 为什么没有选择某种机制。
 - 检测到非有限损失或更新时保存失败日志并终止该方法，不覆盖上一轮有效检查点。
 - 验证脚本隔离运行各方法，单个方法失败后继续检查其他方法，最后返回非零退出码并保留错误输出。
 
@@ -33,12 +34,14 @@ D:\soft\Python310\python.exe experiments\validate_privacy_paths.py --config conf
 | --- | --- |
 | effective_config.json | 实际实验参数，包含明确指定的规模覆盖 |
 | validation_report.json | 各方法的运行状态、精度、损失、噪声比、DP 事件、真实 HE 轮数与耗时 |
+| validation_summary.csv | 与 JSON 对应的单表汇总，可直接用表格软件检查 |
 | 方法目录中的 command.json | 该方法实际执行的完整命令 |
 | 方法目录中的 console.log | 标准输出和错误输出，包括原始异常 |
 | 子运行目录中的 round_metrics.csv | 全部逐轮诊断量 |
+| 子运行目录中的 protection_releases.csv | 每个实际云端更新包的来源、机制、加噪位置、HE 执行与保护规则审计 |
 | 子运行目录中的 checkpoint.pt | 由训练器按原有目录结构保存的检查点，非有限轮次不覆盖有效检查点 |
 
-`short_run_finished` 仅表示执行完设定的短程轮次。还必须检查 `final_health` 和损失。
+`short_run_finished` 表示执行完设定轮次且末轮数值有限、噪声没有超过更新。`completed_with_training_warning` 表示程序完成但末轮噪声已经主导更新，不能据此称训练正常。
 
 `finite` 表示已检查数值有限，不保证精度提高。`noise_dominates_update` 表示实测噪声范数大于聚合前更新范数，不是严格的不可训练阈值，也不会因此自动删除候选模式。`non_finite` 表示数值失效。
 
@@ -49,5 +52,7 @@ D:\soft\Python310\python.exe experiments\validate_privacy_paths.py --config conf
 ## 尚未完成
 
 本次没有降低噪声、改变预算或强制 Ours 选择 DP，也没有修改受信域和训练拓扑。共享边缘状态影响多个更新时的敏感度、选择器与实际噪声代价的一致性，以及统一保护目标下的候选集合，仍须继续处理。
+
+关于按位置配置保护，以及预算不足后是否能切换为 HE，见 [保护位置与规则](PROTECTION_LAYOUT_DESIGN_ZH.md)。
 
 不同方法可能选择不同协作拓扑，因此它们的精度差不能直接全部归因于 DP 或 HE。现有加密聚合单元测试使用相同输入更新比较明文与 CKKS，适合验证加密的数值误差。

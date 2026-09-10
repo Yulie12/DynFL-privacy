@@ -107,6 +107,7 @@ class SelectionConfig:
     privacy_local_epochs: int = 1
     trusted_edge_split_execution: bool = False
     allow_he: bool = True
+    update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3")
     assume_encoder_feasible: bool = False
     minibatch_reference_samples: float = 600.0
     edge_cpu_limit: float = 15.0  # per-edge CPU capacity
@@ -653,6 +654,7 @@ def enumerate_candidates(
             config.allow_he,
             policy_allow_none,
             trusted_edge_split_execution=config.trusted_edge_split_execution,
+            update_mechanism_options=config.update_mechanism_options,
         )
         for mechanisms, link_mechanisms in assignments:
             candidates.append(
@@ -938,6 +940,7 @@ def choose_global_pareto_profile(
     previous_choices = previous_choices or {}
     client_edges = client_edges or {}
     pools: dict[int, list[Candidate]] = {}
+    pools_before_stability: dict[int, list[Candidate]] = {}
     by_client: dict[int, tuple[Candidate, list[Candidate], float]] = {}
     for client_id, current, candidates, remaining in selected:
         by_client[client_id] = (current, candidates, remaining)
@@ -953,6 +956,7 @@ def choose_global_pareto_profile(
         if not pool:
             pool = [current if current.feasible_device else skipped_candidate()]
         pool = _dedupe_candidates(pool)
+        pools_before_stability[client_id] = list(pool)
         if config.enforce_cloud_dp_stability:
             pool = _stable_cloud_candidate_pool(config, pool)
         pools[client_id] = pool
@@ -1292,6 +1296,16 @@ def choose_global_pareto_profile(
                 "candidate_pool_sizes": {
                     client_id: len(pool) for client_id, pool in pools.items()
                 },
+                "candidate_pool_sizes_before_stability": {
+                    client_id: len(pool)
+                    for client_id, pool in pools_before_stability.items()
+                },
+                "update_mechanism_counts_before_stability": (
+                    _candidate_update_mechanism_population(pools_before_stability)
+                ),
+                "update_mechanism_counts_after_stability": (
+                    _candidate_update_mechanism_population(pools)
+                ),
                 "search_method": search_method,
             }
         )
@@ -1521,6 +1535,20 @@ def _profile_satisfies_edge_cloud_coverage(
     return True
 
 
+def _candidate_update_mechanism_population(
+    pools: dict[int, list[Candidate]],
+) -> dict[str, int]:
+    counts = {"dp_only": 0, "he_only": 0, "dp_he": 0, "neither": 0}
+    for pool in pools.values():
+        for candidate in pool:
+            mechanisms = candidate_mechanisms_for_object(candidate, "upd")
+            uses_dp = any(mechanism_uses_dp(item) for item in mechanisms)
+            uses_he = any(mechanism_uses_he(item) for item in mechanisms)
+            key = "dp_he" if uses_dp and uses_he else "dp_only" if uses_dp else "he_only" if uses_he else "neither"
+            counts[key] += 1
+    return counts
+
+
 def _stable_cloud_candidate_pool(
     config: SelectionConfig,
     candidates: list[Candidate],
@@ -1567,33 +1595,6 @@ def _stable_cloud_candidate_pool(
     feature_ratio = 2.0 * float(privacy["feature_noise_multiplier"])
     update_ratio = 2.0 * float(privacy["update_noise_multiplier"])
 
-    def candidate_update_ratio(candidate: Candidate) -> float:
-        mechanisms = candidate_mechanisms_for_object(candidate, "upd")
-        if config.trusted_edge_split_execution and any(
-            mechanism_uses_dp(mechanism) for mechanism in mechanisms
-        ):
-            expected_admitted = max(
-                1.0,
-                float(config.num_clients) * float(config.aggregation_fraction),
-            )
-            dimension_scale = math.sqrt(
-                max(float(config.omega_update_dimension), 1.0)
-            )
-            if any(
-                mechanism_uses_dp(mechanism) and mechanism_uses_he(mechanism)
-                for mechanism in mechanisms
-            ):
-                return update_ratio * dimension_scale / expected_admitted
-            if candidate.mode in CLOUD_DIRECT_MODES:
-                return update_ratio * dimension_scale / math.sqrt(expected_admitted)
-            return (
-                update_ratio
-                * dimension_scale
-                * math.sqrt(max(float(config.num_edges), 1.0))
-                / expected_admitted
-            )
-        return update_ratio
-
     def unstable(candidate: Candidate) -> bool:
         if not _candidate_reaches_cloud(candidate):
             return False
@@ -1606,7 +1607,7 @@ def _stable_cloud_candidate_pool(
             or (
                 update_he_alternative
                 and has_update_dp(candidate)
-                and candidate_update_ratio(candidate) > threshold
+                and update_ratio > threshold
             )
         )
 
@@ -3215,6 +3216,7 @@ def _mechanism_assignments(
     allow_he: bool = True,
     allow_none: bool = False,
     trusted_edge_split_execution: bool = False,
+    update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3"),
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     all_transmissions = _mode_link_transmissions(
         spec.name,
@@ -3311,7 +3313,11 @@ def _mechanism_assignments(
             and link_objects[link] == "upd"
             and link.endswith("_C_upd")
         ):
-            return ("dp", "he3", "dp_he3") if allow_he else ("dp",)
+            if not update_mechanism_options or any(
+                value not in {"dp", "he3", "dp_he3"} for value in update_mechanism_options
+            ):
+                raise ValueError("Invalid update mechanism options")
+            return tuple(value for value in update_mechanism_options if allow_he or not mechanism_uses_he(value))
         return tuple(
             mech
             for mech in MECHANISMS_BY_OBJECT[link_objects[link]]
