@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -32,7 +33,13 @@ def trajectory_noise_seed(seed: int, round_idx: int, stream: str = "seed_sequenc
     return int(np.random.SeedSequence([seed, round_idx, 10000]).generate_state(1, dtype=np.uint64)[0])
 
 
-def apply_vector_update(base, keys, vector):
+def validate_server_step(server_step: float) -> None:
+    if not math.isfinite(server_step) or not 0 < server_step <= 1:
+        raise ValueError("Diagnostic server step must be finite and in (0, 1]")
+
+
+def apply_vector_update(base, keys, vector, server_step: float = 1.0):
+    validate_server_step(server_step)
     expected = sum(base[p][k].numel() for p, k in keys)
     if vector.ndim != 1 or vector.numel() != expected or len(set(keys)) != len(keys):
         raise ValueError("Update layout mismatch")
@@ -42,7 +49,7 @@ def apply_vector_update(base, keys, vector):
     offset = 0
     for p, k in keys:
         size = state[p][k].numel()
-        state[p][k].add_(vector[offset:offset + size].reshape_as(state[p][k]))
+        state[p][k].add_(vector[offset:offset + size].reshape_as(state[p][k]), alpha=server_step)
         offset += size
     return state
 
@@ -59,13 +66,21 @@ def main():
     parser.add_argument("--epsilon", type=float, default=8)
     parser.add_argument("--delta", type=float, default=1e-5)
     parser.add_argument("--clip-norms", type=float, nargs="+", default=[0.1, 0.15])
+    parser.add_argument("--server-steps", type=float, nargs="+", default=[1.0])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--noise-stream", choices=["seed_sequence", "legacy_additive"],
                         default="seed_sequence", help="Legacy stream only for reproducing old diagnostics")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    parser.add_argument("--model", choices=["resnet18_pretrained_head", "resnet18_pretrained"],
+                        default="resnet18_pretrained_head",
+                        help="Independent-client utility reference, not the dynamic execution protocol")
     parser.add_argument("--output-root", default="out/trusted_aggregate_head_trajectory")
     args = parser.parse_args()
     trajectory_noise_seed(args.seed, 0, args.noise_stream)
+    for step in args.server_steps:
+        validate_server_step(step)
+    if len(set(args.server_steps)) != len(args.server_steps):
+        parser.error("Server steps must be unique")
     if min(args.rounds, args.clients, args.test_limit, args.local_epochs) < 1 or args.train_limit < args.clients:
         parser.error("Positive counts and nonempty client partitions required")
     if args.rounds > args.privacy_horizon or len(set(args.clip_norms)) != len(args.clip_norms):
@@ -75,7 +90,7 @@ def main():
     torch.set_num_threads(2)
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
-    model = "resnet18_pretrained_head"
+    model = args.model
     x, y, tx, ty, shape, _, classes = load_image_dataset_arrays(
         "cifar10", ROOT / "experiments/data/cifar10", args.train_limit, args.test_limit, args.seed)
     indices = np.array_split(np.random.default_rng(args.seed).permutation(len(y)), args.clients)
@@ -99,7 +114,7 @@ def main():
              for m in ("clip_only", "trusted_aggregate_dp")]
     print(f"Report {path}", flush=True)
     started = time.perf_counter()
-    for method, c in cases:
+    for step, method, c in [(step, m, c) for step in args.server_steps for m, c in cases]:
         state = initial
         cache = {}
         ledger = PrivacyAccountant(args.epsilon, args.delta)
@@ -131,14 +146,16 @@ def main():
             generator = torch.Generator(device=device).manual_seed(
                 trajectory_noise_seed(args.seed, round_idx, args.noise_stream))
             noise = torch.randn(mean.shape, generator=generator, device=device) * std
-            state = apply_vector_update(state, keys, mean + noise)
+            state = apply_vector_update(state, keys, mean + noise, server_step=step)
             if dp:
                 ledger.add_event(sigma)
             end.load_state_dict(state["end"])
             edge.load_state_dict(state["edge"])
             loss, accuracy = split_evaluate(end, edge, tx, ty, device, shape)
-            row = dict(method=method, clip_norm=c, round=round_idx + 1, accuracy=accuracy, loss=loss,
+            row = dict(method=method, clip_norm=c, server_step=step, round=round_idx + 1, accuracy=accuracy, loss=loss,
                        signal_norm=float(mean.norm()), noise_norm=float(noise.norm()),
+                       applied_signal_norm=float(mean.norm()) * step,
+                       applied_noise_norm=float(noise.norm()) * step, applied_noise_std=std * step,
                        noise_std=std, clipping_bias_norm=float((mean - raw_mean).norm()),
                        clipped_fraction=clipped_count / args.clients, dimensions=mean.numel(),
                        recorded_epsilon=ledger.current_epsilon() if dp else None,

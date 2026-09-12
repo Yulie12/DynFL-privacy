@@ -44,3 +44,18 @@ def test_noise_stream_separates_seed_and_round():
 def test_invalid_noise_stream_fails(seed, round_idx, stream):
     with pytest.raises(ValueError):
         trajectory_noise_seed(seed, round_idx, stream)
+
+
+@pytest.mark.parametrize("step", [1.0, 0.5, 0.2])
+def test_server_step_scales_complete_noisy_release(step):
+    initial = {"edge": {"h": torch.tensor([1.0])}}
+    signal, noise = torch.tensor([2.0]), torch.tensor([3.0])
+    updated = apply_vector_update(initial, [("edge", "h")], signal + noise, step)
+    assert updated["edge"]["h"].item() == pytest.approx(1 + 5 * step)
+    assert initial["edge"]["h"].item() == 1
+
+
+@pytest.mark.parametrize("step", [0.0, -1.0, 1.1, float("nan"), float("inf")])
+def test_invalid_server_steps_fail(step):
+    with pytest.raises(ValueError, match="server step"):
+        apply_vector_update({"edge": {"h": torch.zeros(1)}}, [("edge", "h")], torch.ones(1), step)
