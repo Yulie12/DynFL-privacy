@@ -42,6 +42,9 @@ def main():
     parser.add_argument("--delta", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    parser.add_argument("--model", choices=["resnet18_pretrained_head", "resnet18_pretrained_adapter"],
+                        default="resnet18_pretrained_head",
+                        help="Low dimensional independent-client diagnostic scopes only")
     parser.add_argument("--dp-release", choices=["edge_local", "distributed_he"], default="edge_local",
                         help="Distributed HE is conditional on all edges online and unknown noise shares")
     parser.add_argument("--he-custody", choices=["arithmetic_harness", "trusted_edge"],
@@ -67,7 +70,7 @@ def main():
     torch.set_num_threads(2)
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
-    model = "resnet18_pretrained_head"
+    model = args.model
     x, y, tx, ty, shape, _, classes = load_image_dataset_arrays(
         "cifar10", ROOT / "experiments/data/cifar10", args.train_limit, args.test_limit, args.seed)
     indices = np.array_split(np.random.default_rng(args.seed).permutation(len(y)), args.clients)
@@ -87,7 +90,7 @@ def main():
                   adjacency="whole_client_replacement_fixed_public_counts_and_roster",
                   trust="associated_edge_trusted_cloud_honest_but_curious",
                   noise_location="each_edge_before_cloud", he_execution="not_used",
-                  scope="private_fixed_independent_client_head_diagnostic",
+                  scope="private_fixed_independent_client_low_dimensional_diagnostic",
                   full_protocol_dp="not_established", transport_security_implemented=False,
                   diagnostic_outputs="internal_only_not_protected_public_outputs",
                   randomness="seeded_research_noise_not_production_private_randomness",

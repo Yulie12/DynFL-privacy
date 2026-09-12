@@ -433,6 +433,36 @@ class TorchvisionResNet50Full(TorchvisionResNetFull):
     version = "50"
 
 
+class FixedProjectionAdapter(nn.Module):
+    """Public fixed features with a zero-initialized trainable residual."""
+
+    def __init__(self, width: int = 512, rank: int = 8) -> None:
+        super().__init__()
+        generator = torch.Generator().manual_seed(1729)
+        projection = torch.randn(rank, width, generator=generator) / width ** 0.5
+        self.register_buffer("projection", projection)
+        # Preserve the classifier initialization and the caller's RNG stream.
+        with torch.random.fork_rng(devices=[]):
+            self.up = nn.Linear(rank, width)
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.up(F.relu(F.linear(x, self.projection)))
+
+
+class TorchvisionResNet18AdapterEdge(TorchvisionResNet18Edge):
+    def __init__(self, embedding_dim: int = 512, num_classes: int = 10) -> None:
+        super().__init__(embedding_dim, num_classes)
+        self.classifier = nn.Sequential(FixedProjectionAdapter(), self.classifier)
+
+
+class TorchvisionResNet18AdapterFull(TorchvisionResNet18Full):
+    def __init__(self, input_channels: int = 3, image_size: int = 32, num_classes: int = 10) -> None:
+        super().__init__(input_channels, image_size, num_classes)
+        self.classifier = nn.Sequential(FixedProjectionAdapter(), self.classifier)
+
+
 class TinyResNetEnd(nn.Module):
     def __init__(self, input_channels: int = 1, image_size: int = 28) -> None:
         super().__init__()
@@ -479,6 +509,7 @@ class TinyResNetFull(nn.Module):
 
 
 MODEL_BUILDERS = {
+    "resnet18pretrainedadapter": (TorchvisionResNet18End, TorchvisionResNet18AdapterEdge, TorchvisionResNet18AdapterFull),
     "lenet5": (EndNet, EdgeNet, FullNet),
     "smallcnn": (SmallCNNEnd, SmallCNNEdge, SmallCNNFull),
     "avgcnn": (DriftRaceAvgCNNEnd, DriftRaceAvgCNNEdge, DriftRaceAvgCNNFull),
@@ -487,6 +518,7 @@ MODEL_BUILDERS = {
     "resnet50": (ResNet50End, ResNetEdge, ResNet50Full),
     "resnet18pretrained": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
     "resnet18pretrainedhead": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
+    "resnet18pretrainedlayer4head": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
     "resnet50pretrained": (TorchvisionResNet50End, TorchvisionResNet50Edge, TorchvisionResNet50Full),
 }
 
@@ -494,6 +526,7 @@ MODEL_BUILDERS = {
 def normalize_model_name(model_name: str) -> str:
     value = str(model_name).strip().lower().replace("-", "").replace("_", "")
     aliases = {
+        "resnet18pretrainedadapter": "resnet18pretrainedadapter",
         "lenet": "lenet5",
         "lenet5": "lenet5",
         "cnn": "smallcnn",
@@ -513,6 +546,7 @@ def normalize_model_name(model_name: str) -> str:
         "res18pretrained": "resnet18pretrained",
         "resnet18pretrained": "resnet18pretrained",
         "resnet18pretrainedhead": "resnet18pretrainedhead",
+        "resnet18pretrainedlayer4head": "resnet18pretrainedlayer4head",
         "torchvisionresnet18": "resnet18pretrained",
         "driftraceres18": "resnet18pretrained",
         "res50pretrained": "resnet50pretrained",
@@ -597,7 +631,13 @@ def count_params(model: nn.Module) -> int:
 
 
 def _is_pretrained_resnet(model_name: str) -> bool:
-    return normalize_model_name(model_name) in {"resnet18pretrained", "resnet50pretrained", "resnet18pretrainedhead"}
+    return normalize_model_name(model_name) in {
+        "resnet18pretrainedadapter",
+        "resnet18pretrained",
+        "resnet50pretrained",
+        "resnet18pretrainedhead",
+        "resnet18pretrainedlayer4head",
+    }
 
 
 def _prepare_model_for_training(model: nn.Module, model_name: str) -> None:
@@ -610,9 +650,12 @@ def _prepare_model_for_training(model: nn.Module, model_name: str) -> None:
             or name.startswith("classifier.")
             or name.startswith("fc.")
         )
+        normalized = normalize_model_name(model_name)
+        if normalized in {"resnet18pretrainedhead", "resnet18pretrainedadapter"}:
+            trainable = name.startswith(("classifier.", "fc."))
+        elif normalized == "resnet18pretrainedlayer4head":
+            trainable = name.startswith(("layer4.", "classifier.", "fc."))
         param.requires_grad_(trainable)
-        if normalize_model_name(model_name) == "resnet18pretrainedhead":
-            param.requires_grad_(name.startswith(("classifier.", "fc.")))
     for module in model.modules():
         if isinstance(module, nn.modules.batchnorm._BatchNorm):
             module.eval()
@@ -630,7 +673,15 @@ def _make_optimizer(
     if not trainable:
         return None
     normalized = normalize_model_name(model_name)
-    if normalized in {"resnet18", "resnet50", "resnet18pretrained", "resnet50pretrained", "resnet18pretrainedhead"}:
+    if normalized in {
+        "resnet18pretrainedadapter",
+        "resnet18",
+        "resnet50",
+        "resnet18pretrained",
+        "resnet50pretrained",
+        "resnet18pretrainedhead",
+        "resnet18pretrainedlayer4head",
+    }:
         decay = 5e-4 if weight_decay is None else float(weight_decay)
         return torch.optim.SGD(trainable, lr=lr, momentum=0.9, weight_decay=decay)
     decay = 0.0 if weight_decay is None else float(weight_decay)
@@ -687,7 +738,9 @@ def split_local_train_lenet5(
         For no-split modes, only "end" contains the full model diff.
     """
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
+        "resnet18pretrainedadapter",
         "resnet18pretrainedhead",
+        "resnet18pretrainedlayer4head",
         "resnet18",
         "resnet50",
         "resnet18pretrained",

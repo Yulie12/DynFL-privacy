@@ -188,3 +188,89 @@ D:\soft\Python310\python.exe experiments\validate_edge_dp_trajectory.py --dp-rel
 还没有完成网络部署认证、独立边缘进程、生产随机性、有限精度DP论证、动态候选的数据依赖分析或完整训练参数规模验证。受信保管者拥有完整私钥是明确假设，不是被密码学禁止解密单个贡献。TeX主结果未替换。
 
 原始结果为 out/trusted_custodian_dp_he_100rounds_seed42/2026-09-12_17-13-35_edge_dp_trajectory/report.json。
+
+## 三种可训练范围的效用参考诊断
+
+用户新增 resnet18_pretrained_layer4_head，保持其实现，不替换用户补丁。已检查模型构造、冻结策略、优化器与批大小，补充单轮诊断入口支持和实际本地训练测试。新范围只更新layer4与分类头，冻结参数和BatchNorm缓冲区在测试训练中保持不变。
+
+| 范围 | 实际可训练参数 | 同标准差下噪声范数均方根 |
+| --- | --- | --- |
+| 仅分类头 | 5130 | 约0.990 |
+| layer4与分类头 | 8393738 | 约40.04 |
+| layer3、layer4与分类头 | 10490890 | 约44.77 |
+
+均方根使用每坐标标准差0.0138224乘以维度平方根。中间范围参数减少约20%，整体噪声均方根仅减少约10.6%。这是矩计算，不是效用定理。三种范围同时改变了可优化层与参数维度，不能把精度差异全部归因于维度。
+
+### 同条件第5轮对照
+
+三个范围均为CIFAR10、100客户端、6000训练样本、200测试样本、固定随机划分、seed42、3本地epoch、学习率0.01、C=0.1、100轮预算8。此处使用全局受信聚合的效用参考，不使用HE，也不作为部署安全证据。分类头取已有100轮同配置轨迹的前5轮，预算校准相同；不能与分布式噪声不同随机实现的五轮23.0%混淆。
+
+| 范围 | 无保护精度 | 仅裁剪精度 | 聚合DP精度 | 聚合DP损失 |
+| --- | --- | --- | --- | --- |
+| 仅分类头 | 39.0% | 29.5% | 24.5% | 2.0377 |
+| layer4与分类头 | 48.0% | 38.5% | 14.5% | 3.0159 |
+| layer3、layer4与分类头 | 52.0% | 39.0% | 10.5% | 3.6867 |
+
+三种DP路径第5轮累计epsilon均约1.605。中间范围噪声范数实测约40.05，原范围约44.77。中间范围DP损失从约2.562升至3.016，原范围从约2.498升至3.687。新范围有一定改善，但五轮不足以认定可稳定学习或彻底失败。
+
+已有正式范围单轮三噪声试验的聚合DP精度为12.5%至15.5%。无保护32.5%、仅裁剪13.0%。该单轮参考的随机流与多轮轨迹不同，不将它们拼接成同一条曲线。
+
+多轮参考脚本新增可选 --methods，用于只延长所需路径；默认仍运行全部对照。保持参数不变，将中间范围DP路径单独验证20轮，不重复训练对照。
+
+```powershell
+D:\soft\Python310\python.exe experiments\validate_trusted_aggregate_trajectory.py --model resnet18_pretrained_layer4_head --methods trusted_aggregate_dp --rounds 20 --privacy-horizon 100 --clients 100 --train-limit 6000 --test-limit 200 --local-epochs 3 --lr 0.01 --epsilon 8 --delta 1e-5 --clip-norms 0.1 --seed 42 --device cuda --output-root out/layer4_head_scope_dp_20rounds_seed42
+```
+
+原始记录位于 out/full_trainable_scope_dp_single_round/2026-09-12_18-10-43_trusted_aggregate/report.json、out/full_trainable_scope_dp_5rounds_seed42/2026-09-12_18-12-04_trajectory/report.json 和 out/layer4_head_scope_dp_5rounds_seed42/2026-09-12_21-37-31_trajectory/report.json。未修改TeX和正式实验配置。
+
+### 中间范围20轮结果
+
+中间范围聚合DP单独完成20轮。最终精度17.5%，损失14.2031，累计epsilon约3.3146，每轮噪声范数约40.05。前5轮与短程诊断一致。所有记录维度均为8393738，事件数与轮次一致。
+
+这组结果表明新增范围没有解决当前配置下的效用问题，但不证明所有参数或其他隐私机制下都无法训练。代码中的冻结范围、BatchNorm状态、本地训练实际更新键与维度检查通过；相关测试合计92项通过。没有把原范围的私有更新留在模型中而只对分类头加噪，也没有为了提高精度放宽预算。
+
+该诊断不使用HE，不能归因为加密误差。它同时改变训练范围和维度，不构成纯维度效应的因果验证。新范围可保留为训练范围对照点，不直接替换正式模型或默认配置。进一步改变可训练参数化需要用户选择；尚未引入低秩适配器或改变任何基线。
+
+结果位于 out/layer4_head_scope_dp_20rounds_seed42/2026-09-12_21-40-11_trajectory/report.json。
+
+## 低维固定投影适配模块诊断
+
+### 100轮真实HE补充结果
+
+适配模块已接入 `validate_edge_dp_trajectory.py` 的独立模型选项，默认仍为head。使用分布式噪声、真实SEAL、指定受信edge0保管完整私钥，完成100轮。预算、C、客户端与数据规模沿用20轮诊断，未放宽隐私目标。
+
+最终精度38.5%，最好42.5%，最后10轮均值37.7%，最终loss1.8682，累计epsilon8。每轮10个边缘各加密9738个参数值，最多解密误差4.136e-8。整条轨迹实测264.06秒，其中HE接口42.83秒已包含在总时间中，不能重复相加。这是单机诊断时间，不是正式系统时延基准。
+
+没有出现高维实验中的严重损失爆炸，但后段有回退。此前相同受信保管流程的head参考最终43.0%、最好48.5%、最后10轮44.7%。当前结果不支持适配模块优于head，不自动替换正式模型。不同维度的噪声实现也不同，单种子不能证明普遍排序。上一条全局可信聚合20轮40.5%与此次分布式噪声路径不共享同一噪声样本，不能将差异归因于HE。
+
+冻结参数实际训练检查等相关测试95项通过。完整私钥保管者必须受信；独立云进程并不提供同主机恶意进程下的OS隔离。噪声种子与诊断信息仍仅用于内部研究，动态模式尚未接入此隐私发布协议。
+
+结果位于 `out/adapter_trusted_custodian_dp_he_100rounds_seed42/2026-09-12_22-15-20_edge_dp_trajectory/report.json`。
+
+```powershell
+D:\soft\Python310\python.exe experiments\validate_edge_dp_trajectory.py --model resnet18_pretrained_adapter --rounds 100 --privacy-horizon 100 --dp-release distributed_he --he-custody trusted_edge --methods distributed_dp_he --output-root out/adapter_trusted_custodian_dp_he_100rounds_seed42
+```
+
+### 初始20轮配对诊断
+
+用户同意低维私有微调方向后，新增独立选项 `resnet18_pretrained_adapter`，没有替换正式配置。公开预训练骨干与 BatchNorm 状态冻结，在池化后加入残差模块 `x + U relu(Px) + b`。P 是与私有数据无关、种子1729生成的固定8维投影；U和b零初始化，与分类头一起训练，共9738个参数。模块不是现成论文方法的完整复现，不声称增加新的隐私定理或算法创新。
+
+所有可训练参数的客户端差分共同裁剪与加噪，固定投影不更新。拆分与完整前向、冻结范围、零初始化恒等映射、随机数状态检查通过，相关回归测试94项通过。该配置的终端骨干冻结，尚未证明它保留正式动态协作各模式的全部训练价值。
+
+配对诊断使用100客户端、6000训练样本、200测试样本、seed42、20轮、隐私校准周期100轮、epsilon8、delta1e-5、C0.1、学习率0.01和本地3轮。三条轨迹从同一个初始模型独立运行。
+
+| 路径 | 第20轮精度 | 第20轮损失 |
+| --- | --- | --- |
+| 无保护 | 46.0% | 1.4607 |
+| 仅裁剪 | 46.0% | 1.5347 |
+| 聚合DP | 40.5% | 1.7618 |
+
+DP累计epsilon为3.3146，事件数20，单坐标噪声标准差0.0138224，第20轮噪声范数1.3769。此次诊断未使用HE。结果支持继续进行长期及真实HE验证，不证明多种子优势、100轮稳定收敛或正式动态协议隐私闭合。所有控制结果、原始范数和可复现噪声种子均属于内部诊断，不应当作联合公开的DP输出。
+
+结果位于 `out/adapter_scope_dp_20rounds_seed42/2026-09-12_22-09-33_trajectory/report.json`。
+
+复现命令如下。
+
+```powershell
+D:\soft\Python310\python.exe experiments\validate_trusted_aggregate_trajectory.py --model resnet18_pretrained_adapter --rounds 20 --privacy-horizon 100 --clip-norms 0.1 --output-root out/adapter_scope_dp_20rounds_seed42
+```

@@ -71,11 +71,15 @@ def main():
     parser.add_argument("--noise-stream", choices=["seed_sequence", "legacy_additive"],
                         default="seed_sequence", help="Legacy stream only for reproducing old diagnostics")
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
-    parser.add_argument("--model", choices=["resnet18_pretrained_head", "resnet18_pretrained"],
+    parser.add_argument("--model", choices=["resnet18_pretrained_adapter", "resnet18_pretrained_head", "resnet18_pretrained_layer4_head", "resnet18_pretrained"],
                         default="resnet18_pretrained_head",
                         help="Independent-client utility reference, not the dynamic execution protocol")
+    parser.add_argument("--methods", nargs="+", choices=["no_protection", "clip_only", "trusted_aggregate_dp"],
+                        help="Optional subset of diagnostic paths; default retains all controls")
     parser.add_argument("--output-root", default="out/trusted_aggregate_head_trajectory")
     args = parser.parse_args()
+    if args.methods is not None and len(set(args.methods)) != len(args.methods):
+        parser.error("Methods must be unique")
     trajectory_noise_seed(args.seed, 0, args.noise_stream)
     for step in args.server_steps:
         validate_server_step(step)
@@ -112,6 +116,8 @@ def main():
     path = output / "report.json"
     cases = [("no_protection", None)] + [(m, c) for c in args.clip_norms
              for m in ("clip_only", "trusted_aggregate_dp")]
+    if args.methods is not None:
+        cases = [(m, c) for m, c in cases if m in args.methods]
     print(f"Report {path}", flush=True)
     started = time.perf_counter()
     for step, method, c in [(step, m, c) for step in args.server_steps for m, c in cases]:

@@ -1,0 +1,110 @@
+--- a/dynfed/split_learning.py
++++ b/dynfed/split_learning.py
+@@ -487,6 +487,7 @@
+     "resnet50": (ResNet50End, ResNetEdge, ResNet50Full),
+     "resnet18pretrained": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
+     "resnet18pretrainedhead": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
++    "resnet18pretrainedlayer4head": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
+     "resnet50pretrained": (TorchvisionResNet50End, TorchvisionResNet50Edge, TorchvisionResNet50Full),
+ }
+ 
+@@ -513,6 +514,7 @@
+         "res18pretrained": "resnet18pretrained",
+         "resnet18pretrained": "resnet18pretrained",
+         "resnet18pretrainedhead": "resnet18pretrainedhead",
++        "resnet18pretrainedlayer4head": "resnet18pretrainedlayer4head",
+         "torchvisionresnet18": "resnet18pretrained",
+         "driftraceres18": "resnet18pretrained",
+         "res50pretrained": "resnet50pretrained",
+@@ -597,7 +599,12 @@
+ 
+ 
+ def _is_pretrained_resnet(model_name: str) -> bool:
+-    return normalize_model_name(model_name) in {"resnet18pretrained", "resnet50pretrained", "resnet18pretrainedhead"}
++    return normalize_model_name(model_name) in {
++        "resnet18pretrained",
++        "resnet50pretrained",
++        "resnet18pretrainedhead",
++        "resnet18pretrainedlayer4head",
++    }
+ 
+ 
+ def _prepare_model_for_training(model: nn.Module, model_name: str) -> None:
+@@ -610,9 +617,12 @@
+             or name.startswith("classifier.")
+             or name.startswith("fc.")
+         )
++        normalized = normalize_model_name(model_name)
++        if normalized == "resnet18pretrainedhead":
++            trainable = name.startswith(("classifier.", "fc."))
++        elif normalized == "resnet18pretrainedlayer4head":
++            trainable = name.startswith(("layer4.", "classifier.", "fc."))
+         param.requires_grad_(trainable)
+-        if normalize_model_name(model_name) == "resnet18pretrainedhead":
+-            param.requires_grad_(name.startswith(("classifier.", "fc.")))
+     for module in model.modules():
+         if isinstance(module, nn.modules.batchnorm._BatchNorm):
+             module.eval()
+@@ -630,7 +640,14 @@
+     if not trainable:
+         return None
+     normalized = normalize_model_name(model_name)
+-    if normalized in {"resnet18", "resnet50", "resnet18pretrained", "resnet50pretrained", "resnet18pretrainedhead"}:
++    if normalized in {
++        "resnet18",
++        "resnet50",
++        "resnet18pretrained",
++        "resnet50pretrained",
++        "resnet18pretrainedhead",
++        "resnet18pretrainedlayer4head",
++    }:
+         decay = 5e-4 if weight_decay is None else float(weight_decay)
+         return torch.optim.SGD(trainable, lr=lr, momentum=0.9, weight_decay=decay)
+     decay = 0.0 if weight_decay is None else float(weight_decay)
+@@ -688,6 +705,7 @@
+     """
+     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
+         "resnet18pretrainedhead",
++        "resnet18pretrainedlayer4head",
+         "resnet18",
+         "resnet50",
+         "resnet18pretrained",
+--- a/experiments/validate_trusted_aggregate_trajectory.py
++++ b/experiments/validate_trusted_aggregate_trajectory.py
+@@ -71,7 +71,7 @@
+     parser.add_argument("--noise-stream", choices=["seed_sequence", "legacy_additive"],
+                         default="seed_sequence", help="Legacy stream only for reproducing old diagnostics")
+     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+-    parser.add_argument("--model", choices=["resnet18_pretrained_head", "resnet18_pretrained"],
++    parser.add_argument("--model", choices=["resnet18_pretrained_head", "resnet18_pretrained_layer4_head", "resnet18_pretrained"],
+                         default="resnet18_pretrained_head",
+                         help="Independent-client utility reference, not the dynamic execution protocol")
+     parser.add_argument("--output-root", default="out/trusted_aggregate_head_trajectory")
+--- a/tests/test_pretrained_training_scope.py
++++ b/tests/test_pretrained_training_scope.py
+@@ -8,16 +8,21 @@
+ from dynfed.split_learning import _prepare_model_for_training, clip_state_difference
+ 
+ 
+-@pytest.mark.parametrize("name,expected", [("resnet18_pretrained_head", 5130),
+-                                           ("resnet18_pretrained", 10490890)])
+-def test_trainable_scope_and_batchnorm_are_explicit(name, expected):
++@pytest.mark.parametrize(
++    "name,expected,prefixes",
++    [
++        ("resnet18_pretrained_head", 5130, ("fc.",)),
++        ("resnet18_pretrained_layer4_head", 8393738, ("layer4.", "fc.")),
++        ("resnet18_pretrained", 10490890, ("layer3.", "layer4.", "fc.")),
++    ],
++)
++def test_trainable_scope_and_batchnorm_are_explicit(name, expected, prefixes):
+     with torch.random.fork_rng(devices=[]):
+         model = resnet18(weights=None, num_classes=10)
+     model.train()
+     _prepare_model_for_training(model, name)
+     parameters = {k: p for k, p in model.named_parameters() if p.requires_grad}
+     assert sum(p.numel() for p in parameters.values()) == expected
+-    prefixes = ("fc.",) if name.endswith("_head") else ("layer3.", "layer4.", "fc.")
+     assert all(k.startswith(prefixes) for k in parameters)
+     for module in model.modules():
+         if isinstance(module, torch.nn.BatchNorm2d):

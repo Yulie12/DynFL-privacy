@@ -45,7 +45,8 @@ def main():
     parser.add_argument("--local-epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--model", default="resnet18_pretrained",
-                        choices=["resnet18_pretrained", "resnet18_pretrained_head"])
+                        choices=["resnet18_pretrained", "resnet18_pretrained_head",
+                                 "resnet18_pretrained_layer4_head", "resnet18_pretrained_adapter"])
     parser.add_argument("--privacy-horizon", type=int, default=100)
     parser.add_argument("--epsilon", type=float, default=8)
     parser.add_argument("--delta", type=float, default=1e-5)
