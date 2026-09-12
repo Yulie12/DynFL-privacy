@@ -56,6 +56,8 @@ from .nodes import build_profiles
 from .privacy import ClientPrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
 from .protection_rules import audit_update_release
 from .selection import (
+    candidate_meets_update_goal,
+    validate_update_protection_goal,
     Candidate,
     ProfileEvaluation,
     SelectionConfig,
@@ -299,6 +301,8 @@ def run_fmnist_lenet5_training(
 ) -> dict[str, Any]:
     if max_new_rounds is not None and max_new_rounds < 1:
         raise ValueError("max_new_rounds must be positive")
+    for policy in policies:
+        validate_update_protection_goal(selection, policy)
     if train_config.dp_release_calibration not in {"tex_packet", "legacy_aggregate"}:
         raise ValueError("Unknown DP release calibration")
     if train_config.dp_release_calibration == "tex_packet" and train_config.execution_revision != CURRENT_EXECUTION_REVISION:
@@ -1204,6 +1208,8 @@ def _run_lenet5_policy(
         previous_choices = {client_id: candidate for client_id, candidate, _candidates, _rem in selected}
 
         for client_id, candidate, _candidates, rem in selected:
+            if not candidate_meets_update_goal(effective_selection, candidate):
+                raise ValueError("Selected or reused candidate violates the result DP coverage gate")
             round_comm += candidate.communication_volume
             round_risk = max(round_risk, candidate.risk)
             infeasible += int(not candidate.feasible)
@@ -1212,11 +1218,15 @@ def _run_lenet5_policy(
                 candidate.feature_dp_events,
                 candidate.update_dp_events,
             )
+            if (effective_selection.update_protection_goal == "released_model_dp"
+                    and not ledger.can_apply(projection)):
+                raise ValueError("Selected DP release exceeds the recorded event budget")
             rem = ledger.remaining_budget
             row = {
                     "policy": policy,
                     "round": round_idx,
                     "client_id": client_id,
+                    "update_protection_goal": effective_selection.update_protection_goal,
                     "edge_id": client_by_id[client_id].edge_id,
                     "mode": candidate.mode,
                     "mechanisms": candidate_mechanism_label(candidate),

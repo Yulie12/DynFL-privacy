@@ -85,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
     parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate"])
     parser.add_argument("--update-mechanisms", nargs="+", choices=["dp", "he3", "dp_he3"], default=["dp", "he3"])
+    parser.add_argument("--update-protection-goal", choices=["packet_protection", "released_model_dp"], default="packet_protection")
     parser.add_argument(
         "--trusted-edge-split-execution",
         action="store_true",
@@ -238,6 +239,7 @@ def main() -> None:
         assume_encoder_feasible=args.assume_encoder_feasible,
         output_dir=str(output_root),
         update_mechanism_options=tuple(args.update_mechanisms),
+        update_protection_goal=args.update_protection_goal,
     )
     train_config = Lenet5Config(
         execution_revision=args.execution_revision,

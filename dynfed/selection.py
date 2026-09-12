@@ -108,6 +108,7 @@ class SelectionConfig:
     trusted_edge_split_execution: bool = False
     allow_he: bool = True
     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3")
+    update_protection_goal: str = "packet_protection"
     assume_encoder_feasible: bool = False
     minibatch_reference_samples: float = 600.0
     edge_cpu_limit: float = 15.0  # per-edge CPU capacity
@@ -637,6 +638,7 @@ def enumerate_candidates(
     allow_none: bool = False,
     privacy_ledger: ClientPrivacyLedger | None = None,
 ) -> list[Candidate]:
+    validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
     for mode, spec in MODE_SPECS.items():
         if config.trusted_edge_split_execution and mode == "LIC":
@@ -686,6 +688,8 @@ def _apply_policy_candidate_filters(
     candidates: list[Candidate],
 ) -> list[Candidate]:
     """Apply shared admissibility rules before an adaptive policy selects."""
+    validate_update_protection_goal(config, policy)
+    candidates = [c for c in candidates if candidate_meets_update_goal(config, c)]
     fixed_mode = {
         "fixed_fedavg": "LIIC",
         "fixed_splitfed": "LIEIIC",
@@ -717,6 +721,32 @@ def _mode_reaches_cloud(spec: ModeSpec) -> bool:
 def _candidate_reaches_cloud(candidate: Candidate) -> bool:
     spec = MODE_SPECS.get(candidate.mode)
     return bool(spec and _mode_reaches_cloud(spec))
+
+
+def validate_update_protection_goal(config: SelectionConfig, policy: str) -> None:
+    if config.update_protection_goal not in {"packet_protection", "released_model_dp"}:
+        raise ValueError("Unknown update protection goal")
+    if config.update_protection_goal == "released_model_dp":
+        if not config.trusted_edge_split_execution:
+            raise ValueError("Released model DP gate currently requires the trusted edge domain")
+        if policy in {"no_protection", "fixed_he", "fixed_splitfed_no_protection",
+                      "fixed_splitfed_trusted_edge"}:
+            raise ValueError(f"{policy} is a control without result DP; use packet_protection separately")
+
+
+def candidate_meets_update_goal(config: SelectionConfig, candidate: Candidate) -> bool:
+    """Necessary cloud update coverage only, not a transcript privacy proof."""
+    if config.update_protection_goal == "packet_protection":
+        return True
+    if config.update_protection_goal != "released_model_dp":
+        raise ValueError("Unknown update protection goal")
+    if not _candidate_reaches_cloud(candidate):
+        return True
+    cloud_links = {
+        key: value for key, value in (candidate.link_mechanisms or {}).items()
+        if key.endswith("_C_upd")
+    }
+    return bool(cloud_links) and all(mechanism_uses_dp(m) for m in cloud_links.values())
 
 
 def choose_candidate(

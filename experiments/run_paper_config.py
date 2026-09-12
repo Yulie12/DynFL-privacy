@@ -105,6 +105,7 @@ def build_command(
         "edge_cloud_base_latency_sec": network["edge_cloud_base_latency_sec"],
         "min_edge_cloud_fusion_ratio": system["min_edge_cloud_fusion_ratio"],
         "dp_accounting_mode": privacy["accounting_mode"],
+        "update_protection_goal": privacy.get("update_protection_goal", "packet_protection"),
         "initial_epsilon": privacy["initial_epsilon"],
         "dp_upd_epsilon": privacy["update_epsilon_budget"],
         "dp_update_epsilon_budget": privacy["update_epsilon_budget"],
