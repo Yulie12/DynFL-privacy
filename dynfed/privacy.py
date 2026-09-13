@@ -74,8 +74,16 @@ def privacy_execution_audit(round_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Report observed mechanism coverage, not a transcript privacy proof."""
     cloud_rows = [row for row in round_rows if row.get("num_global_update_clients", 0) > 0]
     coverage_known = bool(cloud_rows) and all("uniform_update_dp" in row for row in cloud_rows)
+    fused = bool(round_rows) and all(bool(row.get("mainline_fusion", 0)) for row in round_rows)
+    release_count = max((int(row.get("global_release_count", 0)) for row in round_rows), default=0)
+    release_epsilon = max((float(row.get("global_release_epsilon", 0.0)) for row in round_rows), default=0.0)
     return {
-        "accountant_scope": "recorded_dp_events_only",
+        "accountant_scope": (
+            "one_global_release_per_round_fixed_public_roster"
+            if fused else "recorded_dp_events_only"
+        ),
+        "global_release_count": release_count if fused else None,
+        "global_release_epsilon": release_epsilon if fused else None,
         "uniform_selected_update_dp": (
             all(bool(row["uniform_update_dp"]) for row in cloud_rows)
             if coverage_known else None
@@ -85,7 +93,11 @@ def privacy_execution_audit(round_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "he_real_execution_rounds": sum(row.get("he_execution_status") == "real" for row in round_rows),
         "he_profiled_execution_rounds": sum(row.get("he_execution_status") == "profiled" for row in round_rows),
         "randomness_scope": "deterministic_experiment_seed",
-        "key_isolation_scope": "single_process_simulation",
+        "key_isolation_scope": (
+            "trusted_custodian_and_separate_cloud_process_not_OS_sandbox"
+            if fused and all(row.get("he_custody") == "trusted_edge" for row in round_rows)
+            else "single_process_simulation"
+        ),
         "diagnostic_scope": "private_experiment_logs_not_public_dp_outputs",
     }
 

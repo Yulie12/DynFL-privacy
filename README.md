@@ -1,3 +1,25 @@
+# Current formal Method 2 integration
+
+The default `experiments/run_paper_config.py` now uses
+`configs/paper_v30_cifar10_resnet18.json`: pretrained ResNet 18 classification
+head only (5130 trainable coordinates), client clip norm 0.1, 100-round RDP
+horizon, real SEAL, and one global DP release per round. Ordinary modes execute
+three local epochs; multilevel modes execute three private stages (nine epochs)
+without same-round cross-client aggregate feedback. The seven-mode taxonomy is
+retained; LIC keeps the existing trust-model exclusion.
+
+Use `--max-new-rounds 2` for a short run retaining the 100-round privacy horizon.
+Each release uses the tested Method 2 trusted custodian and ciphertext-only cloud
+worker. The execution revision is `paper_flow_v30_mainline_fusion_method2`;
+checkpoints from earlier fusion semantics must not be resumed under this revision.
+The Fashion-MNIST/LeNet configuration remains a separate model setting, not a
+validated pretrained classifier-only Method 2 reproduction.
+
+The notes below describe historical v25 workflows and are not the current formal
+configuration. See `PAPER_CONFORMANCE.md` for the current contract.
+
+---
+
 # Dynamic Cloud-Edge-End Collaboration Reconfiguration
 
 This repository contains the simulator, real model training path, privacy

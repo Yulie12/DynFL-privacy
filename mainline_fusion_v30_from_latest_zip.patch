@@ -1,0 +1,3368 @@
+diff --git a/CODE_TEX_CONSISTENCY_CHECKLIST.md b/CODE_TEX_CONSISTENCY_CHECKLIST.md
+index 6032d8f..c4d8488 100644
+--- a/CODE_TEX_CONSISTENCY_CHECKLIST.md
++++ b/CODE_TEX_CONSISTENCY_CHECKLIST.md
+@@ -1,80 +1,61 @@
+-# 代码—论文一致性检查清单
+-
+-基准文档：`tex/paper/main.tex`。主真实训练路径：
+-`experiments/run_fmnist_lenet5.py` ->
+-`dynfed/fmnist_lenet5_dynamic.py`。当前执行版本为 `paper_flow_v10_baseline_stability`；旧版本
+-checkpoint 不允许自动续训。
+-
+-状态定义：`PASS` 为公式、selection、actual execution、日志证据闭环；
+-`APPROX` 为论文已允许或需明确披露的近似；`FAIL` 为当前不一致；
+-`EVIDENCE` 为实现存在但日志不足。
+-
+-## 当前审计结果
+-
+-| ID | 检查点 | TeX 对应逻辑 | Selection / Actual / 日志 | 当前状态 | 通过标准或后续动作 |
+-| --- | --- | --- | --- | --- | --- |
+-| 1 | 七种模式集合 | `H={LIE,...,LIIEIIIC}` | `MODE_SPECS`、flow mode sets | PASS | 三处集合完全相同 |
+-| 2 | `LIEIIC` 拓扑 | `B_E*L_B -> A_c`，云聚合前无 `A_e` | 已改为 `CLOUD_DIRECT_MODES` | PASS | flow 中只有 `cloud_aggregate_direct` |
+-| 3 | 多级模式拓扑 | 仅 `LIEIIIC/LIIEIIIC` 先边聚合再上云 | 两种模式执行 `E_B` 次训练—边聚合—返回 | PASS | `multi_edge_loop_client_cycles` 与事件日志可证明 |
+-| 4 | 真实计算单元 | 端、边、云是逻辑执行层 | 子模型在同一宿主进程/GPU 内顺序执行 | APPROX | 论文需明确“逻辑仿真，不是物理分布式部署” |
+-| 5 | `N_lambda` 统一 | 通信、隐私预算、时延共用链路执行次数 | `_mode_link_events` 同时驱动通信和 DP 计数 | PASS | 每个 mode 的事件表必须有回归测试 |
+-| 6 | `L_B/E_B` 真实执行 | link block 与 edge loop 重复执行 | 每周期严格 `L_B` optimizer steps，多级模式执行 `E_B` 周期 | PASS | 不能只在时延公式中乘次数 |
+-| 7 | 传输大小默认值 | `S_emb=1.6MB`、`S_upd=4.0MB`、`alpha_HE=6` | `OBJECT_SIZES`、`PRIVACY_ALPHA` 已统一 | PASS | config 与 TeX 表一致 |
+-| 8 | 返回链路通信量 | return link 计通信、不计 DP/HE | event 表显式加入返回 update，机制固定 `none` | PASS | return volume 必须出现在 candidate communication |
+-| 9 | 链路速率矩阵 | 每条有向链路使用 `R_uv^t` | 每个 client-round-link 确定性生成一次，所有候选复用并写入 `link_state.csv` | PASS | 正式实验需声明速率 profile 的来源或校准方法 |
+-| 10 | 聚合时延 | `beta*sum(S_tilde)+T_fix` | selection/actual 共用 flow executor，按实际 admitted 有效载荷逐事件计算 | PASS | 日志必须保留 payload、beta、fixed 与 aggregation_time |
+-| 11 | Buffered admission | 按 pre-aggregation arrival 取前 `ceil(rho*N)`，触发时并列全收 | selection 与 executor 均含 tie 规则 | PASS | objective IDs 必须等于 actual IDs |
+-| 12 | 宿主机调度隔离 | 逻辑时延不应受单 CPU 串行排队影响 | wall-clock 仅记录，arrival 使用逻辑路径时间 | PASS | serial/process_pool 不得改变 admitted set |
+-| 13 | `S_P` 更新周期 | 非更新轮复用旧 profile | 可行时复用；预算失效时触发 feasibility repair | PASS | TeX 伪代码已加入 `x^(t-1) in X^t` 条件 |
+-| 14 | Feature-DP | clip 后按 replacement sensitivity `Delta_z=2C` 加高斯噪声 | `_protect_tensor_dp` 使用自动校准的 `sigma_feat*2C` | PASS | record-level RDP 单独记账 |
+-| 15 | Update-DP | 全局向量 L2 clip，再加 `N(0,sigma_u^2*C_u^2 I)` | `apply_unified_dp` | PASS | 禁止按 tensor 独立裁剪作为默认实现 |
+-| 16 | DP 事件预算 | 每个 protected link 按 `N_lambda*alpha/(2*sigma^2)` 在 RDP 空间组合 | feature 与 update 的实际扰动阶段按 event 表执行 | PASS | decision log 必须记录两类事件和转换后的 epsilon |
+-| 17 | Per-link policy | `pi_i(lambda)` 可对同类型不同链路选不同机制 | candidate 按 directed link 保存机制，`LIIEIIIC` 两条 update 链路可独立选择 | PASS | 决策、DP 账本、HE 执行和日志必须共用 link key |
+-| 18 | 真实 HE | HE update 用 CKKS，服务端只解密聚合结果 | SEAL/TenSEAL 真实密文聚合并有数值测试 | PASS | `require_real_he=true` 时后端缺失必须失败 |
+-| 19 | 混合 HE/DP 聚合 | 每客户端按其 link policy 执行 | SEAL/TenSEAL 分别累加 ciphertext 与 plaintext/DP 加权和，再在密文域合并 | PASS | 保留 mixed encrypted/plaintext 数值等价测试 |
+-| 20 | Privacy accounting | feature/update 不同邻接单位独立记账，HE 的 RDP 增量为 0 | 两个 per-client RDP ledger、候选投影硬约束 | PASS | 跨客户端报告 max，不得求和 |
+-| 21 | 内存约束 | `M_mem=s_state*m_i+a_i <= Q_mem,i` | mode requirement 与异构 client capacity 均进入候选可行性并写入决策日志 | PASS | profile 值来源需在实验设置中披露 |
+-| 22 | 资源/risk 可行集 | TeX 的 `X^t` 当前仅含资源与 DP budget | 代码额外把 risk、edge/cloud CPU 作为硬约束；已修正 `label:none` 将所有 split mode 误判为 risk=1 的问题 | FAIL | 选择：补入 TeX 公式，或从 proposed feasible set 移除 |
+-| 23 | 近似 Pareto search | bounded archive、邻域扩展、理想点 Tchebycheff | `choose_global_pareto_profile` | PASS | archive 与增量 Omega 回归测试均需保留 |
+-| 23A | 小规模 exact solver | TeX 描述枚举 `prod_i abs(S_i)` 个全局 profile | 当前没有全局穷举 solver | FAIL | 增加仅用于小 N 验证的 exact implementation |
+-| 23B | 可选 reference point | TeX 允许指定 reference 或使用 ideal point | 当前只实现 archive ideal point | FAIL | 增加显式 reference 参数或从 TeX 删除该选项 |
+-| 23C | selection-only 仿真的 `S_P` | 所有 proposed-method 仿真应按周期搜索 | 真实训练遵守；`run_selection_experiment` 仍每轮搜索 | FAIL | 在 `SelectionConfig` 和纯 selection runner 中实现复用/修复 |
+-| 24 | `Omega_hat` | clipping/noise/local variance + cloud fusion penalty | 每个客户端按当前模型和本地数据实测 feature clipping excess；其余平滑度、方差等统计量仍为常数 profile | APPROX | 保留 clipping profile 回归测试；论文披露其余 profile 来源与校准方法 |
+-| 25 | DP aggregation size | update-noise variance依赖实际 aggregation set | 直接云/边组按 admitted count；多级 final update 仍受 object-shared policy 限制 | APPROX | per-link policy 完成后按 endpoint 分组重算 K |
+-| 26 | Cloud fusion | selector 使用全 profile 的样本占比 | 同时记录 selector ratio、actual population ratio、actual admitted share | PASS | 不得把三者混成一个字段 |
+-| 27 | Switching cost | mode change + placement-state distance | 已加入 path time，但 placement 由工作量 proxy 估算 | APPROX | 用真实分层 state bytes 替换 proxy |
+-| 28 | 训练拓扑与聚合 | edge-only 不进入 cloud FedAvg；cloud mode 同步全局模型 | returned client states、rebasing、edge/cloud aggregation | PASS | 每种模式需单独 topology test |
+-| 29 | GPU/执行器 | GPU用于真实模型训练，不应改变仿真语义 | CUDA+serial 可用；process_pool 仅 CPU | PASS | 日志分别记录 device/executor/wall time |
+-| 30 | Baseline 公平性 | Appendix baseline semantics | 主路径均复用相同数据、模型、划分 | APPROX | 还需逐 baseline 固定候选域与隐私机制测试 |
+-| 31 | 实验表格可复现性 | TeX 表格必须来自当前执行版本和 `T=100` 主设置 | 现有表格是旧版 50 轮输出且早于 `paper_flow_v10_baseline_stability` | FAIL | 用当前严格可行、逐链路隐私、阶段化时延、共享稳定候选集和 admitted-payload 聚合版本重跑 100 轮多 seed，再重建图表与表格 |
+-| 32 | TeX 唯一规范源 | 实现只能对应一个明确版本 | `main.tex` 为规范源；`main_with_changes.tex` 是旧审稿快照 | PASS | 禁止用旧快照反向校验当前代码 |
+-| 33 | 固定 seed 可复现性 | 同一 seed 的模型初始化和客户端 batch 顺序一致 | PyTorch/CUDA 全局 seed、确定性 cuDNN、按 round/client/stage 派生 DataLoader seed | PASS | 保留固定 seed 的本地训练回归测试，并对正式实验执行多 seed |
+-
+-## 第 80 轮下降的证据
+-
+-被检查运行使用 `T=100`、`S_P=10`、`epsilon_0=4.0`、
+-`epsilon_upd=0.05`。CSV 第 79 个零基 round 后所有客户端剩余预算约为
+-`5.84e-15`；第 80 个零基 round 的机制由 `upd:dp` 全部切换为
+-`upd:he3`。因此临界点恰好满足 `4.0/0.05=80`。
+-
+-DP 路径包含 `C_u=1.0` 的 update clipping；HE 路径保留原始更新而不做
+-DP clipping。在 `lr=0.15` 与 extreme edge label skew 下，去掉 clipping
+-会放大 client drift。该现象不应通过“给 HE 偷加 DP clipping”掩盖。上述证据
+-只解释旧标量账本为什么在第 80 轮产生强制切换，不能作为正式 DP 保证。
+-当前实现固定总目标，并根据 `T*N_lambda` 自动校准噪声；50/100/200 轮比较时
+-不再按轮数放大 epsilon。
+-
+-## 每次修改后的固定核对顺序
+-
+-1. 从 TeX 找到变量、公式、mode/link 定义和默认参数。
+-2. 检查 candidate 枚举、可行性筛选、`N_lambda`、预算和目标值。
+-3. 检查 actual training 是否执行同一 mode、机制、次数和 admitted set。
+-4. 检查 round/client/flow 日志能否独立证明前三步。
+-5. 运行 conformance、SEAL、resume 测试和最小真实训练 smoke run。
+-6. 只有当前 execution revision 的多 seed 完整运行可写回论文图表。
+-
+-## 修改优先级
+-
+-- P0：当前无未完成项；继续保留内存、per-link、混合 HE/DP 与 staged-latency 回归测试。
+-- P1：为 link-specific `R_uv^t` 和 aggregation beta/fixed 提供可复现校准来源；按 endpoint 完善 `Omega_hat` 的 K；使用真实 state bytes 校准 switching profile。
+-- P2：baseline 语义测试、完整 100 轮多 seed 重跑、论文图表重建。
++# 代码—论文一致性检查清单（v30 主线融合）
++
++规范源为 `tex/paper/main.tex`，正式执行版本为
++`paper_flow_v30_mainline_fusion`。旧的 per-link DP/HE 动态替换语义仅保留在
++legacy/ablation 路径中，不属于 v30 正式主线。
++
++## v30 固定契约
++
++- 七种基础协作模式仍保留在 taxonomy：`LIE`、`LIC`、`LIIE`、`LIIC`、
++  `LIEIIC`、`LIEIIIC`、`LIIEIIIC`。
++- 当前 honest-but-curious cloud threat model 下，`LIC` 因直接暴露中间表示而
++  不进入 executable set；正式 selector 在其余六种 mode 中动态选择。
++- selector 决定协作/执行/资源路径，不决定是否启用结果 DP。
++- 每个正式 round 的 client contribution 都从上一轮已发布 global model 出发，
++  不能接收同轮其他客户端的未发布 private aggregate。
++- 每个 client contribution 先做 client-level L2 clipping；正式 release 使用
++  replacement sensitivity `2 * C * max_i(w_i)`。
++- 每轮只产生一个 formal global DP release event。Local epochs/内部 trusted-edge
++  执行阶段不会增加 release count。
++- distributed Gaussian noise 在 cloud 可获得可解 aggregate 之前加入；cloud 只
++  聚合 ciphertext；trusted custodian 只解密 already-noisy aggregate。
++- HE 是 cloud-path confidentiality layer，不可替代结果 DP。
++- 正式主线要求：`aggregation_fraction=1.0`、`dp_accounting_mode=rdp_auto`、
++  real HE、`he_aggregation_size=0`，并禁用旧的 DP-vs-HE stability switching。
++- 当前只声明上述 aggregate-release mechanism 在固定公共 roster/weights 假设下的
++  client-level accounting；`end_to_end_dp_status=not_established` 保持不变。
++
++## 一致性矩阵
++
++| ID | 检查点 | TeX | 代码 | 状态 |
++| --- | --- | --- | --- | --- |
++| F1 | 7 basic / 6 executable modes | `H_base` 与 `H=H_base\{LIC}` | `MODE_SPECS` + fused candidate enumeration | PASS |
++| F2 | 动态 selector 只选 mode | `x=h_N`，`pi_i` 为 singleton induced map | `SelectionConfig.mainline_fusion` | PASS |
++| F3 | 固定 DP + HE release contract | Privacy Budget Accounting | fused branch in `fmnist_lenet5_dynamic.py` | PASS |
++| F4 | client-replacement sensitivity | `S_t=2 C_u max_i q_i^t` | `IndependentReleaseAccount` + aggregate calibration | PASS |
++| F5 | 一轮一次 accounting | one formal release per round | `IndependentReleaseAccount.reserve` | PASS |
++| F6 | private same-round feedback 禁止 | independent contribution text | `_training_base_state(..., mainline_fusion=True)` and disabled shared-state loop | PASS |
++| F7 | HE 不替代 DP | fixed confidentiality layer | `_reported_release_mechanism(...)=dp_he3` in fusion | PASS |
++| F8 | selector utility 不因固定 HE 人为变化 | common privacy-noise term | fusion candidate accuracy removes mechanism penalty/jitter | PASS |
++| F9 | aggregate DP-noise cost 使用同一 horizon | one release/round | `resolved_privacy_parameters` + `_fusion_aggregate_noise_cost` | PASS |
++| F10 | formal policy set 不含 privacy-bypass controls | No Protection 仅独立 control | v30 configs / runner policy validation | PASS |
++| F11 | full-update HE | full protected update | `he_aggregation_size=0` required | PASS |
++| F12 | 审计字段描述 global release | release-level accounting language | `global_release_*`, fused reporting scope | PASS |
++| F13 | 完整协议端到端 DP | 明确不声明 | `end_to_end_dp_status=not_established` | PASS |
++
++## Legacy 路径边界
++
++`fixed_dp`、`fixed_he`、`privacy_only`、`no_protection` 以及旧 packet-level
++mechanism selection 仍可用于历史兼容或单独消融，但不得和
++`mainline_fusion=True` 混在同一 formal run 中。论文主结果的动态 mode 选择不能
++通过 pure HE 绕过 global DP release gate。
++
++## 修改后固定核对顺序
++
++1. `tests/test_mainline_fusion.py`：融合契约、CLI、配置、accounting、reporting。
++2. `tests/test_result_dp_selection.py`：结果 DP gate 与 legacy 兼容性。
++3. `tests/test_independent_release.py`：固定 roster、horizon、resume/accounting。
++4. `tests/test_paper_conformance.py`：流、聚合、Pareto/TeX 数学一致性。
++5. 全量 `pytest -q`。
++6. `git diff --check` 与 patch replay `git apply --check`。
++7. 真实 SEAL 5-round smoke 后，才进入 100-round multi-seed 正式实验。
+diff --git a/PAPER_CONFORMANCE.md b/PAPER_CONFORMANCE.md
+index 711a41e..b7d8432 100644
+--- a/PAPER_CONFORMANCE.md
++++ b/PAPER_CONFORMANCE.md
+@@ -1,93 +1,78 @@
+-# Paper to Code Conformance
++# Paper-to-Code Conformance — v30 Mainline Fusion
+ 
+-The normative specification is `tex/paper/main.tex`. Current training outputs
+-record `training.execution_revision=paper_flow_v25_trusted_edge_domain`. Earlier
+-results and checkpoints are intentionally excluded because the trust boundary,
+-DP protection object, feasible mode set, and result semantics changed in
+-revision v25.
++The normative specification is `tex/paper/main.tex`. The formal execution revision is
++`paper_flow_v30_mainline_fusion`. Earlier packet-level privacy-selection revisions remain
++available only for controls/compatibility experiments and are not the v30 paper method.
+ 
+-## Directly implemented
++## Formal mainline contract
+ 
+-| Paper element | Implementation and evidence |
++1. The paper keeps seven basic collaboration modes, while `LIC` is structurally excluded
++   under the honest-but-curious cloud threat model. The dynamic selector therefore searches
++   six executable modes.
++2. The selector chooses collaboration/resource placement. It does not choose whether the
++   released model is protected by DP.
++3. Every client contribution in a formal round starts from the previously released global
++   model and that client's private data plus the public execution schedule. Same-round
++   private aggregate feedback is forbidden in the fused path.
++4. Each client contribution is L2 clipped. The formal weighted aggregate uses
++   client-replacement sensitivity `2 * C * max_i(w_i)` with the actual public normalized
++   release weights.
++5. One formal global Gaussian release is accounted per completed FL round. The total noise
++   multiplier is calibrated for the fixed round horizon with RDP.
++6. Distributed noise shares are introduced before HE cloud aggregation/decryption. Real
++   CKKS protects cloud-side confidentiality; it cannot replace DP.
++7. Formal runs require full participation, `rdp_auto`, real HE, and full-update encryption
++   (`he_aggregation_size=0`). Legacy DP-vs-HE stability substitution is disabled.
++8. The supported privacy statement is the aggregate-release mechanism under the stated
++   fixed public roster/weight assumptions. The implementation intentionally reports
++   `end_to_end_dp_status=not_established` for the complete adaptive protocol.
++
++## Direct implementation map
++
++| Paper element | Implementation |
+ | --- | --- |
+-| Seven collaboration modes and directed link flows | `dynfed/training.py`, `dynfed/selection.py`, and `dynfed/flow_executor.py` |
+-| Resource, memory, and privacy feasible candidate sets | `dynfed/selection.py::enumerate_candidates` |
+-| Candidate specific event flow, admission, staleness, and return paths | `dynfed/flow_executor.py::execute_mixed_round_flow` and `dynfed/selection.py::evaluate_global_profile` |
+-| Shared link event counts for communication and DP accounting | `dynfed/selection.py::_mode_link_events` |
+-| Edge and cloud aggregation time over the admitted payload | `dynfed/flow_executor.py::execute_mixed_round_flow` |
+-| Actual edge normalized cloud aggregation weights | `dynfed/fmnist_lenet5_dynamic.py::_edge_normalized_cloud_weights` and `dynfed/selection.py::_global_omega_proxy_from_admitted` |
+-| Estimated convergence error cost with admitted client and edge terms | `dynfed/selection.py::_local_omega_components` and `dynfed/selection.py::_global_omega_proxy_from_admitted` |
+-| Client replacement update DP with sensitivity `2 C_u` | `dynfed/split_learning.py::apply_unified_dp` |
+-| Trusted split execution inside each end to edge domain | `dynfed/selection.py::enumerate_candidates` and `dynfed/fmnist_lenet5_dynamic.py` |
+-| Update RDP ledger with a fixed total target | `dynfed/privacy.py`, `dynfed/selection.py::resolved_privacy_parameters`, and per round output fields |
+-| Full update CKKS aggregation with every protected participant encrypted | `dynfed/fmnist_lenet5_dynamic.py::fedavg_split_seal` |
+-| CKKS key reuse and operation metrics | `dynfed/fmnist_lenet5_dynamic.py` summary and per round HE fields |
+-| Bounded Pareto archive, exploration beam, and deterministic Tchebycheff choice | `dynfed/selection.py::choose_global_pareto_profile` |
+-| Edge and cloud coverage included in the global feasible set | `dynfed/selection.py::_profile_satisfies_edge_cloud_coverage` |
+-| Exact small scale Pareto comparison | `experiments/validate_pareto_search.py` |
+-| Fixed FedAvg, SplitFed, and HFL topology references | `dynfed/selection.py` policy topology mappings |
+-| Standard NSGA II optimizer reference | `dynfed/selection.py::_run_nsga2_search` |
+-| Modeled workflow time, measured decision time, accounted system time, and host wall time | `dynfed/fmnist_lenet5_dynamic.py` round and summary metrics |
+-| Mean, standard deviation, 95 percent confidence intervals, paired tests, and effect sizes | `experiments/aggregate_multiseed_results.py` |
+-| Raw unsmoothed paper curves | `experiments/aggregate_multiseed_results.py` and `experiments/aggregate_controlled_results.py` |
+-| Versioned main and second setting configurations | `configs/paper_v25_cifar10_resnet18.json`, `configs/paper_v25_fmnist_lenet5.json`, and `experiments/run_paper_config.py` |
+-| Versioned controlled experiment runner | `experiments/run_controlled_sweeps.py` |
+-| Error cost calibration analysis | `experiments/calibrate_convergence_cost.py` |
+-| Exact data partitions, device profiles, model split, and runtime environment | Per run reproducibility files generated by `dynfed/fmnist_lenet5_dynamic.py` |
++| Seven-mode taxonomy / six executable fused modes | `dynfed/training.py`, `dynfed/selection.py` |
++| Dynamic mode/Pareto search | `dynfed/selection.py::choose_global_pareto_profile` |
++| Mode-specific logical flow and timing | `dynfed/flow_executor.py` |
++| Fixed global release accountant | `dynfed/independent_release.py::IndependentReleaseAccount` |
++| Independent fused training base | `dynfed/fmnist_lenet5_dynamic.py::_training_base_state` |
++| Client clipping and distributed aggregate noise | fused release branch in `dynfed/fmnist_lenet5_dynamic.py` |
++| Real CKKS aggregate path | `dynfed/he_backend.py` and `fedavg_split_seal` path |
++| Fused privacy/result-DP validation | `_validate_mainline_fusion` |
++| Fixed formal release reporting | `_reported_release_mechanism`, `_privacy_reporting_scope`, `global_release_*` |
++| Common aggregate privacy-noise objective | `dynfed/selection.py::_fusion_aggregate_noise_cost` |
++| v30 formal configurations | `configs/paper_v30_cifar10_resnet18.json`, `configs/paper_v30_fmnist_lenet5.json` |
++| Versioned runner | `experiments/run_paper_config.py`, `experiments/run_fmnist_lenet5.py` |
+ 
+-## Required output evidence
++## Required evidence for a paper run
+ 
+ Each accepted run must contain `summary.json`, `round_metrics.csv`,
+-`client_decisions.csv`, `link_state.csv`, and `flow_events.csv`. Its parent run
+-directory must also contain `data_partition.json`, `device_profiles.csv`,
+-`edge_profiles.csv`, `model_partition.json`, and `runtime_environment.json`. The summary
+-records the execution revision, training and privacy parameters, CKKS security
+-parameters, ciphertext volume, CKKS operation time, numerical aggregation
+-error, logical latency, accounted system time, and measured host wall time.
++`client_decisions.csv`, `flow_events.csv`, and the reproducibility artifacts emitted by the
++training runner. For v30, the summary/round logs must expose at least:
+ 
+-The main aggregation script accepts revision v25 only. Its curve bands are 95
+-percent confidence intervals across seeds. `paired_comparisons.csv` reports
+-paired differences, paired confidence intervals, Cohen dz, paired t test
+-values, and Wilcoxon values.
++- `mainline_fusion=true`;
++- `global_release_count` and `global_release_epsilon`;
++- fixed global release contract metadata;
++- aggregate sensitivity/noise metrics;
++- real HE execution metrics and numerical aggregation error;
++- mode distribution, switching, communication, modeled system time, selection time, and
++  host wall time;
++- `end_to_end_dp_status=not_established`.
+ 
+-## Explicit modeling boundaries
++## Baseline boundary
+ 
+-1. Directed link rates, computation rates, switching coefficients, and
+-   aggregation coefficients are reproducible analytical scenario profiles.
+-   They are not measurements from separate physical end, edge, and cloud
+-   devices.
+-2. Training executes on one host. The event flow models logical placement and
+-   communication. Accounted system time adds measured decision time to this
+-   model, while host wall time describes the sequential local implementation.
+-3. The estimated convergence error cost follows the assumptions stated in the
+-   paper appendix. It is a decision metric rather than a convergence theorem
+-   for nonconvex ResNet training.
+-4. CKKS protects selected update contents from communication links and the
+-   cloud evaluator. A trusted coordinator holds the secret key and observes the
+-   decrypted aggregate. CKKS and DP provide different protection semantics and
+-   are reported separately.
+-5. Fixed topology references reproduce their collaboration structures inside
+-   the shared engine. They are not full source code reproductions of every
+-   component in the cited systems.
++Protected methods such as Ours, Individual Optimal, Random, Fixed FedAvg, Fixed SplitFed,
++Fixed HFL, and NSGA-II can share the same fused release contract. `no_protection`, pure HE,
++and legacy packet-DP policies are controls and must be run under a separate configuration;
++they are intentionally rejected inside a formal fused run.
+ 
+ ## Work still required before submission
+ 
+-1. The revision v25 trusted edge validation is complete for five rounds. Ours
+-   and Fixed SplitFed reached 30.05 and 30.15 percent test accuracy, confirming
+-   that the previous failure was caused by feature perturbation rather than the
+-   split execution path.
+-2. Rerun every reported table and figure with revision v25. Old numerical
+-   results cannot be reused or resumed.
+-3. Run the empirical calibration script and insert its generated values in the
+-   paper.
+-4. Run the main comparison and key ablations with the declared seeds and report
+-   the generated confidence intervals and paired effects.
+-5. Run the prepared Fashion MNIST and LeNet 5 configuration and insert its
+-   generated values in the paper.
+-6. Attach the supplementary artifact named in the paper or insert a permanent
+-   anonymous artifact URL before submission.
+-7. Add at least one source released resource aware or privacy aware FL system
+-   if the venue requires a full external system reproduction. Fixed topology
+-   references and NSGA II do not reproduce such a system end to end.
+-8. Avoid claims about physical deployment efficiency until a real deployment
+-   or a calibrated network emulation experiment is available.
++1. Run the complete regression suite and a fresh real-SEAL smoke on the merged v30 path.
++2. Freeze the final dataset/model/DP hyperparameters used for the paper tables.
++3. Run the main comparison and key ablations with the declared multi-seed protocol.
++4. Rebuild every table/figure from v30 outputs; do not reuse pre-v30 numerical results.
++5. Report system-profile provenance and keep the single-host/logical-placement limitation
++   explicit.
++6. Keep the aggregate-release privacy claim narrower than a full adaptive-protocol DP claim
++   unless a separate end-to-end proof is added.
+diff --git a/PAPER_EXPERIMENT_READINESS_ZH.md b/PAPER_EXPERIMENT_READINESS_ZH.md
+index e97198f..41160b0 100644
+--- a/PAPER_EXPERIMENT_READINESS_ZH.md
++++ b/PAPER_EXPERIMENT_READINESS_ZH.md
+@@ -1,73 +1,42 @@
+-# 正式补充实验启动门槛
+-
+-更新于2026年9月13日。当前状态为未就绪，不能把固定独立客户端诊断改名为Ours后提交。
+-
+-## 已确认的推进方向
+-
+-### 用户100轮结果与发布模块接入
+-
+-已读取最新 `out/method2_100r_*` 六组报告。这是两种分区乘三种保护设置，不是六种协作模式。IID无保护57.2%、仅裁剪57.3%、DP和HE43.9%；非IID分别55.0%、47.25%、23.4%。非IID DP从20轮14.7%升至100轮23.4%，最后10轮均值24.555%，最好25.3%，最终loss2.9246。支持继续学习而非完全失效，但不证明延长轮数必然更好。
+-
+-已有实验每轮包含3轮本地训练，只对最终全局发布记一次DP事件。增加本地计算并不必然增加DP事件，但不能暴露未保护的中间更新。增加全局发布轮数则需要重新校准完整周期，不能继续使用已耗尽epsilon8的100轮账本。
+-
+-新增 `dynfed/independent_release.py`，固定公共计数和参与集合，校准真实权重敏感度，拒绝跳轮/重放/更换参与集合，并在解密发布前保守记账。已接入诊断路径，尚未接入正式动态训练器。20项相关测试通过，真实SEAL两轮回归与历史相同条件精度一致（8.5%、11.5%），结果位于 `out/method2_account_integration_smoke/2026-09-13_13-44-03_edge_dp_trajectory/report.json`。
+-
+-本模块不证明训练依赖独立，也不授权私有数据相关选择。下一步仍需独立贡献执行器与选择器的信息边界检查，不能直接复用原共享状态循环。
+-
+-用户已确认以第二条路线作为实验主线。每轮从此前公开DP模型独立训练，各客户端完整可训练贡献裁剪，跨客户端聚合只发生在该轮贡献完成之后；噪声在受信边界内、解密发布之前加入。原论文结构仅作为兼容性审计，不要求退回原共享训练流程。
+-
+-这不等于七种模式已经兼容。LIEIIIC和LIIEIIIC的私有共享状态回传后继续训练不能直接保留；改成独立本地多步也不能仍宣称原层级聚合语义。LIC把embedding交给诚实但好奇云执行的路径亦需单独检查，更新DP不能追溯保护已暴露的embedding。边缘本地模式的私有状态若影响后续全球发布，也必须纳入依赖分析。尚不直接启用这些模式的正式实验。
+-
+-## 已完成验证
+-
+-- Head固定架构下，seed40、42、44各100轮真实SEAL和聚合DP验证完成。
+-- 完整私钥由指定受信边缘保管，云端使用独立密文进程；已测试错误聚合、轮次重放和单包替换拒绝。
+-- 低维适配模块已验证，当前没有优于head的证据。
+-- 正式极端标签分区、12000训练样本、2000测试样本和客户端20%留出已接入可选诊断入口，旧默认不变。
+-
+-## 必须先解决
+-
+-正式数据条件的20轮配对诊断已完成，seed42、head、C0.1、100轮会计周期。无保护41.65%（loss1.7139），仅裁剪28.45%（loss2.0250），分布式DP和真实HE14.70%（loss2.6718，epsilon3.3146）。结果位于 `out/head_formal_data_20rounds/2026-09-13_08-46-22_edge_dp_trajectory/report.json`。这里仍固定独立训练，并未接入动态选择。不能将此前IID诊断的46.67%当作正式非IID精度。极端分区下裁剪和噪声均影响学习，尚未达到正式批量运行门槛。
+-
+-1. 协作依赖与敏感度。采用已确认的独立贡献路线实现新执行路径并同步论文，原路径保留复现。不能只修改模式名字或敏感度数值而保留私有状态共享。
+-2. 动态决策可见信息。需确认选择器使用和公开的统计是否来自公开资源、此前DP结果或经过单独保护的私有统计，不能只保护模型而遗漏决策信息。
+-3. 隐私机制定位。最终结果DP不可被纯HE替代；正式候选可行性和对照组标记必须与这一要求一致。不能为展示混合比例强行选择不满足目标的机制。
+-4. 实验效用。正式非IID条件必须重新验证，旧IID诊断精度不能作为正式条件有效的证据。
+-5. TeX对应。可训练范围、信任边界、敏感度、会计事件、模式执行及时间口径需与最终冻结版本对应。
+-
+-## 解锁后的执行顺序
+-
+-### 本地1轮对照
+-
+-仅将本地训练3轮改为1轮，其余保持head、正式分区、C0.1、学习率0.01及100轮隐私周期，完成20轮三条轨迹。无保护与仅裁剪均为18.95%（loss2.1778），DP和真实HE为11.85%（loss2.9453，epsilon3.3146），低于原3轮的41.65%、28.45%、14.70%。该对照没有支持采用本地1轮作为默认。
+-
+-第20轮DP轨迹客户端裁剪前更新范数均值约0.05，DP裁剪比例0，全局信号范数0.00845、噪声范数1.035。固定通信轮数下本地计算量同时减少，不构成客户端漂移影响的纯因果验证。当前还应区分本地优化器梯度裁剪与发布前DP更新裁剪，不能只调后者。
+-
+-结果位于 `out/head_formal_data_local1_20rounds/2026-09-13_10-05-43_edge_dp_trajectory/report.json`。保持正式默认不变，未放宽预算，仍未达到正式实验启动门槛。
+-
+-### 裁剪阈值补充对照
+-
+-### Adapter正式分区对照及信号日志
+-
+-在相同正式分区、seed42、20轮、C0.1条件下，adapter无保护41.55%、仅裁剪28.45%、真实HE和DP17.85%（loss2.4662）。对应head为41.65%、28.45%、14.70%。单种子的3.15个百分点差异不能证明稳定优势，更不能认定已找到合格工作点。
+-
+-新增逐轮内部诊断包括裁剪前范数均值和最大值、裁剪比例、全局裁剪前后信号范数、裁剪偏差、噪声范数及噪声信号比。使用加权向量再取范数，不对边缘范数求平均。噪声范数计算为加权加噪包与独立重算信号之差，包含微小浮点求和残差，不包含HE解密误差；控制组出现接近机器精度的小值不代表加了DP噪声。
+-
+-第20轮adapter裁剪前均值0.2802，裁剪比例100%，全局信号范数0.0130，噪声范数1.4238，比例109.55。不能以比例大于1作为通用不可训练阈值。这些私有诊断不参与选择器，也不作为受保护的公开结果。
+-
+-结果位于 `out/adapter_formal_data_20rounds/2026-09-13_09-23-08_edge_dp_trajectory/report.json`。105项相关测试通过。尚未修改正式配置或宣称动态协议已闭合。
+-
+-### Head裁剪阈值对照结果
+-
+-在同一正式数据条件与seed42下，将C从0.1提高到0.3，预算和会计周期保持不变，真实HE路径完成20轮。仅裁剪恢复到41.65%（loss1.7139），而DP和HE最终13.75%（loss4.7667）。云端噪声标准差按敏感度同步从0.014460提高到0.043380，累计epsilon仍3.3146。该对照未解决效用问题，不采用C0.3作为默认。说明单独放宽裁剪不能同时解决偏斜条件下的裁剪损失和噪声损失，不代表所有低维训练参数均不可用。
+-
+-结果位于 `out/head_formal_data_clip03_20rounds/2026-09-13_09-14-28_edge_dp_trajectory/report.json`。更新后的诊断日志会明确标注独立贡献协议和未启用动态选择；此次运行启动在日志字段修改前，原报告不追溯改写。
+-
+-1. 冻结配置与版本，全部方法做短程可行性和隐私日志检查，不混用旧版本结果。
+-2. 主结果各方法采用同一训练范围、分区、预训练、优化器和随机种子集合，从头独立运行。
+-3. 决策时间与规模、策略更新周期、隐私预算和消融分别只改目标变量，保存所有配置。
+-4. 小规模精确解与近似解验证、真实HE数值误差及墙钟分项验证。
+-5. 第二数据集验证。具体覆盖和种子数对照评审要求后定稿，不预先宣称已经满足。
+-6. 汇总原始曲线、均值和样本标准差，明确模拟时延与实际墙钟时间，更新图表、可复现参数与TeX。
+-
+-本清单不是正式启动授权。结构方向已确认，执行协议、模式兼容和非IID效用门槛仍未全部通过。
++# v30 正式实验准备度
++
++当前主线已经从“独立 Method 2 诊断路径”推进到
++`paper_flow_v30_mainline_fusion`：动态协作 mode/Pareto 选择和固定的 Method 2
++全局发布契约在同一个正式训练路径中对齐。后续不应再把旧 per-link DP/HE
++机制选择当作论文主方法。
++
++## 已闭合的主线语义
++
++- 7 个 basic modes 保留；`LIC` 因 threat model 排除，实际动态候选为 6 个。
++- selector 只动态选择协作/资源路径，不动态关闭结果 DP。
++- 所有 fused mode 的 client contribution 从上一轮已发布 global model 独立产生。
++- per-client clipping、真实权重敏感度 `2*C*max(w_i)`、distributed noise、real HE
++  cloud aggregation、trusted custodian decrypt 形成统一 release gate。
++- 一轮一个 formal release/accounting event；local epochs 不增加 release count。
++- 正式融合要求 full participation、`rdp_auto`、real HE、full-update encryption。
++- 旧 DP-vs-HE stability switching 在 formal fusion 中禁用。
++- `no_protection`、pure HE、旧 packet-DP 作为单独 control/compatibility 路径，不能
++  混入 v30 formal policy set。
++- 报告继续保留 `end_to_end_dp_status=not_established`，不把 aggregate-release
++  accounting 夸大成完整自适应协议的端到端 DP。
++
++## 仍需完成的投稿前门槛
++
++1. **全量回归**：必须 fresh `pytest -q` 全绿，不能只依赖 focused tests。
++2. **真实 HE smoke**：使用正式 v30 配置完成短程 real-SEAL 运行，核对
++   `global_release_count`、epsilon、noise std、HE numerical error 和 mode logs。
++3. **实验参数冻结**：CIFAR-10/ResNet-18 的模型 scope、clip norm、local epochs、
++   partition、epsilon/delta、round horizon 必须在正式批量实验前一次性冻结。
++4. **多 seed 主实验**：protected dynamic/static policies 使用同一 v30 release
++   contract；No Protection 等 control 使用单独匹配配置。
++5. **图表重建**：所有主表、收敛图、reconfiguration 图、系统成本图都只使用
++   v30 输出，旧 revision 结果不能混用。
++6. **论文边界**：明确资源/链路 profile 是逻辑/分析场景、训练仍在单宿主机执行，
++   不宣称物理 cloud-edge-end 部署隔离已经验证。
++
++## 推荐的下一批实验顺序
++
++先做 5-round real-HE smoke，然后做 20-round semantic validation，最后才开启
++100-round multi-seed。正式主实验至少比较 Ours、Individual Optimal、Random、
++Fixed FedAvg、Fixed SplitFed、Fixed HFL、NSGA-II；No Protection 和 privacy
++ablations 单独运行并在论文中明确它们不属于 mandatory-release candidate set。
+diff --git a/configs/paper_v30_cifar10_resnet18.json b/configs/paper_v30_cifar10_resnet18.json
+new file mode 100644
+index 0000000..480cc86
+--- /dev/null
++++ b/configs/paper_v30_cifar10_resnet18.json
+@@ -0,0 +1,98 @@
++{
++  "name": "paper_v30_cifar10_resnet18",
++  "execution_revision": "paper_flow_v30_mainline_fusion",
++  "output_root": "out/paper_v30_cifar10_resnet18",
++  "seeds": [
++    40,
++    41,
++    42,
++    43,
++    44
++  ],
++  "policies": [
++    "ours",
++    "individual_optimal",
++    "random",
++    "fixed_fedavg",
++    "fixed_splitfed",
++    "fixed_hfl",
++    "nsga2"
++  ],
++  "training": {
++    "dataset": "cifar10",
++    "model": "resnet18_pretrained",
++    "rounds": 100,
++    "train_limit": 12000,
++    "test_limit": 2000,
++    "partition_mode": "extreme_edge_label_skew",
++    "local_epochs": 3,
++    "learning_rate": 0.01,
++    "device": "cuda",
++    "executor": "serial",
++    "selection_period": 1
++  },
++  "system": {
++    "clients": 100,
++    "edges": 10,
++    "resource_limit": 1.35,
++    "memory_limit": 1.35,
++    "time_limit": 8,
++    "risk_limit": 0.5,
++    "aggregation_fraction": 1.0,
++    "client_heterogeneity": 2,
++    "edge_heterogeneity": 1.5,
++    "require_feasible": true,
++    "require_edge_cloud_coverage": true,
++    "min_edge_cloud_fusion_ratio": 0.5,
++    "trusted_edge_split_execution": true,
++    "mainline_fusion": true
++  },
++  "network": {
++    "end_edge_rate_mb_s": 5,
++    "end_cloud_rate_mb_s": 2.2,
++    "edge_cloud_rate_mb_s": 8,
++    "end_edge_base_latency_sec": 0.015,
++    "end_cloud_base_latency_sec": 0.04,
++    "edge_cloud_base_latency_sec": 0.01,
++    "periodic_amplitude": 0.2,
++    "period_rounds": 3,
++    "jitter": 0.25
++  },
++  "privacy": {
++    "protection_scope": "global_release_dp_plus_he_confidentiality",
++    "candidate_mechanisms": [
++      "he3"
++    ],
++    "accounting_mode": "rdp_auto",
++    "initial_epsilon": 8,
++    "update_epsilon_budget": 8,
++    "delta": 1e-05,
++    "clip_norm": 1,
++    "update_mode": "upd_only",
++    "enforce_cloud_dp_stability": false,
++    "cloud_dp_stability_threshold": 1,
++    "release_calibration": "tex_packet",
++    "update_protection_goal": "released_model_dp"
++  },
++  "he": {
++    "backend": "seal",
++    "execution": "real",
++    "require_real_he": true,
++    "aggregation_size": 0,
++    "workers": 4,
++    "poly_modulus_degree": 8192,
++    "coeff_modulus_bits": [
++      50,
++      40
++    ],
++    "scale_bits": 40
++  },
++  "optimization": {
++    "pareto_archive_size": 16,
++    "pareto_beam_size": 4,
++    "pareto_max_iters": 50,
++    "pareto_neighbor_top_k": 0,
++    "cloud_fusion_xi": 0.2,
++    "cloud_fusion_eps": 0.05
++  }
++}
+diff --git a/configs/paper_v30_fmnist_lenet5.json b/configs/paper_v30_fmnist_lenet5.json
+new file mode 100644
+index 0000000..0e1a913
+--- /dev/null
++++ b/configs/paper_v30_fmnist_lenet5.json
+@@ -0,0 +1,98 @@
++{
++  "name": "paper_v30_fmnist_lenet5",
++  "execution_revision": "paper_flow_v30_mainline_fusion",
++  "output_root": "out/paper_v30_fmnist_lenet5",
++  "seeds": [
++    40,
++    41,
++    42,
++    43,
++    44
++  ],
++  "policies": [
++    "ours",
++    "individual_optimal",
++    "random",
++    "fixed_fedavg",
++    "fixed_splitfed",
++    "fixed_hfl",
++    "nsga2"
++  ],
++  "training": {
++    "dataset": "fmnist",
++    "model": "lenet5",
++    "rounds": 100,
++    "train_limit": 12000,
++    "test_limit": 2000,
++    "partition_mode": "extreme_edge_label_skew",
++    "local_epochs": 1,
++    "learning_rate": 0.15,
++    "device": "cuda",
++    "executor": "serial",
++    "selection_period": 1
++  },
++  "system": {
++    "clients": 100,
++    "edges": 10,
++    "resource_limit": 1.35,
++    "memory_limit": 1.35,
++    "time_limit": 8,
++    "risk_limit": 0.5,
++    "aggregation_fraction": 1.0,
++    "client_heterogeneity": 2,
++    "edge_heterogeneity": 1.5,
++    "require_feasible": true,
++    "require_edge_cloud_coverage": true,
++    "min_edge_cloud_fusion_ratio": 0.5,
++    "trusted_edge_split_execution": true,
++    "mainline_fusion": true
++  },
++  "network": {
++    "end_edge_rate_mb_s": 5,
++    "end_cloud_rate_mb_s": 2.2,
++    "edge_cloud_rate_mb_s": 8,
++    "end_edge_base_latency_sec": 0.015,
++    "end_cloud_base_latency_sec": 0.04,
++    "edge_cloud_base_latency_sec": 0.01,
++    "periodic_amplitude": 0.2,
++    "period_rounds": 3,
++    "jitter": 0.25
++  },
++  "privacy": {
++    "protection_scope": "global_release_dp_plus_he_confidentiality",
++    "candidate_mechanisms": [
++      "he3"
++    ],
++    "accounting_mode": "rdp_auto",
++    "initial_epsilon": 8,
++    "update_epsilon_budget": 8,
++    "delta": 1e-05,
++    "clip_norm": 1,
++    "update_mode": "upd_only",
++    "enforce_cloud_dp_stability": false,
++    "cloud_dp_stability_threshold": 1,
++    "release_calibration": "tex_packet",
++    "update_protection_goal": "released_model_dp"
++  },
++  "he": {
++    "backend": "seal",
++    "execution": "real",
++    "require_real_he": true,
++    "aggregation_size": 0,
++    "workers": 4,
++    "poly_modulus_degree": 8192,
++    "coeff_modulus_bits": [
++      50,
++      40
++    ],
++    "scale_bits": 40
++  },
++  "optimization": {
++    "pareto_archive_size": 16,
++    "pareto_beam_size": 4,
++    "pareto_max_iters": 50,
++    "pareto_neighbor_top_k": 0,
++    "cloud_fusion_xi": 0.2,
++    "cloud_fusion_eps": 0.05
++  }
++}
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index f4fee46..324feef 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -31,6 +31,7 @@ from .dynamic_training import _distribution, _mechanism_label, _policy_offset, _
+ from .fmnist_dynamic_training import FmnistDynamicConfig as _FmnistDynamicConfig
+ from .fmnist_dynamic_training import load_fmnist_arrays
+ from .flow_executor import EDGE_CLOUD_MODES, EDGE_ONLY_MODES, ClientFlowInput, execute_mixed_round_flow
++from .independent_release import IndependentReleaseAccount
+ from .he_backend import (
+     CKKS_COEFF_MOD_BIT_SIZES,
+     CKKS_POLY_MODULUS_DEGREE,
+@@ -122,6 +123,68 @@ class Lenet5Config:
+     executor_workers: int | None = None
+ 
+ 
++def _validate_mainline_fusion(selection: SelectionConfig, train_config: Lenet5Config) -> None:
++    if not selection.mainline_fusion:
++        return
++    if not selection.trusted_edge_split_execution:
++        raise ValueError("Mainline fusion requires trusted-edge split execution")
++    if abs(float(selection.aggregation_fraction) - 1.0) > 1e-12:
++        raise ValueError("Mainline fusion requires aggregation_fraction=1.0")
++    if selection.update_protection_goal != "released_model_dp":
++        raise ValueError("Mainline fusion requires released_model_dp protection goal")
++    if selection.dp_accounting_mode != "rdp_auto":
++        raise ValueError("Mainline fusion requires dp_accounting_mode=rdp_auto")
++    if selection.enforce_cloud_dp_stability:
++        raise ValueError(
++            "Mainline fusion disables the legacy cloud-DP stability DP-vs-HE switch"
++        )
++    if train_config.he_execution != "real" or not train_config.require_real_he:
++        raise ValueError("Mainline fusion formal runs require real HE and --require-real-he")
++    if int(train_config.he_aggregation_size) != 0:
++        raise ValueError("Mainline fusion requires he_aggregation_size=0 for full-update encryption")
++
++
++
++def _privacy_reporting_scope(mainline_fusion: bool) -> dict[str, str]:
++    if mainline_fusion:
++        return {
++            "dp_accountant_scope": "one_global_release_per_round_fixed_public_roster",
++            "privacy_policy_scope": "dynamic_mode_fixed_global_release",
++            "protected_object": "global_aggregate_release",
++            "privacy_mechanism_scope": "fixed_client_dp_plus_he_cloud_confidentiality",
++            "privacy_guarantee": "fixed_global_release_dp_plus_he",
++        }
++    return {
++        "dp_accountant_scope": "recorded_dp_events_only",
++        "privacy_policy_scope": "per_link",
++        "protected_object": "cross_domain_model_update",
++        "privacy_mechanism_scope": "local_packet_or_secure_aggregate",
++        "privacy_guarantee": "legacy_per_link_mechanisms",
++    }
++
++
++def _global_release_summary(
++    release_account: IndependentReleaseAccount | None,
++) -> dict[str, float | int | None]:
++    if release_account is None:
++        return {
++            "global_release_count": 0,
++            "global_release_epsilon": 0.0,
++            "global_release_target_epsilon": None,
++            "global_release_sensitivity": None,
++            "global_release_noise_multiplier": None,
++            "global_release_noise_std": None,
++        }
++    return {
++        "global_release_count": int(release_account.next_round),
++        "global_release_epsilon": float(release_account.ledger.current_epsilon()),
++        "global_release_target_epsilon": float(release_account.ledger.budget),
++        "global_release_sensitivity": float(release_account.sensitivity),
++        "global_release_noise_multiplier": float(release_account.multiplier),
++        "global_release_noise_std": float(release_account.noise_std),
++    }
++
++
+ def _should_apply_update_dp(
+     mechanisms: dict[str, str],
+     update_mode: str,
+@@ -197,6 +260,17 @@ def _candidate_edge_update_mechanism(candidate: Candidate | None) -> str:
+     return candidate_link_mechanism(candidate, "L_E_upd")
+ 
+ 
++def _reported_release_mechanism(
++    candidate: Candidate | None,
++    *,
++    mainline_fusion: bool,
++) -> str:
++    """Return the protection applied at the formal global release boundary."""
++    if mainline_fusion:
++        return "dp_he3"
++    return _candidate_cloud_update_mechanism(candidate)
++
++
+ def _candidate_uses_cross_domain_update_dp(
+     candidate: Candidate | None,
+     trusted_edge_split_execution: bool = False,
+@@ -831,8 +905,22 @@ def _run_lenet5_policy(
+         omega_feature_clip_norm=train_config.dp_clip_norm,
+         omega_update_clip_norm=train_config.dp_clip_norm,
+     )
++    _validate_mainline_fusion(effective_selection, train_config)
++    privacy_reporting_scope = _privacy_reporting_scope(effective_selection.mainline_fusion)
+     emit_stage_status("Preparing privacy accountant", stage="privacy_accounting")
+     privacy_parameters = resolved_privacy_parameters(effective_selection)
++    release_account = None
++    if effective_selection.mainline_fusion:
++        release_counts = [int(len(indices)) for indices in train_client_indices]
++        if not release_counts or min(release_counts) <= 0:
++            raise ValueError("Mainline fusion requires a non-empty fixed client roster")
++        release_account = IndependentReleaseAccount(
++            release_counts,
++            train_config.dp_clip_norm,
++            float(privacy_parameters["update_budget"]),
++            float(privacy_parameters["delta"]),
++            int(selection.rounds),
++        )
+ 
+     model_name = normalize_model_name(train_config.model_name)
+     emit_stage_status("Building split model", stage="model_build")
+@@ -949,6 +1037,11 @@ def _run_lenet5_policy(
+             client_id: ledger.remaining_budget
+             for client_id, ledger in privacy_ledgers.items()
+         }
++        if effective_selection.mainline_fusion:
++            saved_release_account = checkpoint.get("mainline_release_account")
++            if saved_release_account is None or release_account is None:
++                raise RuntimeError("Cannot resume a fused run without its global release account")
++            release_account.load_state_dict(saved_release_account)
+         round_rows = list(checkpoint.get("round_rows", []))
+         decision_rows = list(checkpoint.get("decision_rows", []))
+         flow_event_rows = list(checkpoint.get("flow_event_rows", []))
+@@ -1230,9 +1323,17 @@ def _run_lenet5_policy(
+                     "edge_id": client_by_id[client_id].edge_id,
+                     "mode": candidate.mode,
+                     "mechanisms": candidate_mechanism_label(candidate),
+-                    "update_mechanism": "/".join(
+-                        sorted(set(candidate_mechanisms_for_object(candidate, "upd")))
+-                    ) or "none",
++                    "update_mechanism": (
++                        _reported_release_mechanism(
++                            candidate,
++                            mainline_fusion=effective_selection.mainline_fusion,
++                        )
++                        if effective_selection.mainline_fusion
++                        else "/".join(
++                            sorted(set(candidate_mechanisms_for_object(candidate, "upd")))
++                        ) or "none"
++                    ),
++                    "global_release_required": int(candidate.global_release_required),
+                     "time": candidate.time,
+                     "pre_aggregation_time": candidate.pre_aggregation_time,
+                     "risk": candidate.risk,
+@@ -1401,6 +1502,10 @@ def _run_lenet5_policy(
+         flow_wall_time_sec = time.perf_counter() - flow_wall_started_at
+         for event in flow_result.flow_events:
+             flow_event_rows.append({"policy": policy, **event})
++        if effective_selection.mainline_fusion:
++            expected_ids = {client.client_id for client in clients}
++            if set(flow_result.selected_client_ids) != expected_ids:
++                raise ValueError("Mainline fusion fixed-roster release requires all clients every round")
+ 
+         aggregation_wall_started_at = time.perf_counter()
+         emit_stage_status(
+@@ -1449,7 +1554,8 @@ def _run_lenet5_policy(
+             key = (int(client_by_id[client_id].edge_id), candidate.mode)
+             multi_edge_groups.setdefault(key, []).append(client_id)
+ 
+-        for (_edge_id, mode), client_ids in multi_edge_groups.items():
++        multi_edge_iter = () if effective_selection.mainline_fusion else multi_edge_groups.items()
++        for (_edge_id, mode), client_ids in multi_edge_iter:
+             loop_count = max(1, int(MODE_SPECS[mode].E_edge_loops))
+             returned_state: dict[str, dict[str, torch.Tensor]] | None = None
+             for edge_loop_idx in range(loop_count):
+@@ -1601,7 +1707,10 @@ def _run_lenet5_policy(
+         global_updates = [
+             (client_id, state_diff, sample_count, candidate)
+             for client_id, state_diff, sample_count, candidate in admitted_updates
+-            if _mode_reaches_cloud(candidate.mode if candidate else "")
++            if (
++                effective_selection.mainline_fusion
++                or _mode_reaches_cloud(candidate.mode if candidate else "")
++            )
+         ]
+         cross_domain_update_clients = len(global_updates)
+         update_dp_coverage = (
+@@ -1635,6 +1744,18 @@ def _run_lenet5_policy(
+             )
+             == cross_domain_update_clients
+         )
++        if effective_selection.mainline_fusion:
++            num_update_dp_clients = cross_domain_update_clients
++            num_he_clients = cross_domain_update_clients
++            num_update_dp_only_clients = 0
++            num_update_he_only_clients = 0
++            num_update_dp_he_clients = cross_domain_update_clients
++            update_dp_coverage = 1.0 if cross_domain_update_clients else 0.0
++            update_he_coverage = 1.0 if cross_domain_update_clients else 0.0
++            uniform_update_dp = cross_domain_update_clients > 0
++            uniform_local_update_dp = False
++            uniform_secure_aggregate_dp = cross_domain_update_clients > 0
++            all_cross_domain_updates_protected = cross_domain_update_clients > 0
+         total_profile_samples = max(1, sum(int(client.samples) for client in clients))
+         actual_cloud_samples = sum(item[2] for item in global_updates)
+         actual_admitted_samples = max(1, sum(item[2] for item in admitted_updates))
+@@ -1651,99 +1772,39 @@ def _run_lenet5_policy(
+         local_dp_packet_sensitivities: list[float] = []
+         local_dp_pending_components: list[tuple[int, float, int]] = []
+         edge_cloud_groups: dict[tuple[int, str, str], list[tuple[int, Any, int, Candidate | None]]] = {}
+-        for client_id, state_diff, sample_count, candidate in global_updates:
+-            if candidate is not None and candidate.mode in EDGE_CLOUD_MODES:
+-                key = (
+-                    int(client_by_id[client_id].edge_id),
+-                    candidate.mode,
+-                    _candidate_cloud_update_mechanism(candidate),
+-                )
+-                edge_cloud_groups.setdefault(key, []).append(
+-                    (client_id, state_diff, sample_count, candidate)
+-                )
+-            else:
++        if effective_selection.mainline_fusion:
++            for client_id, state_diff, sample_count, candidate in global_updates:
+                 relative_update = _state_difference_from_client_update(
+                     client_id=client_id,
+                     state_diff=state_diff,
+-                    client_model_states=client_model_states,
++                    client_model_states={},
+                     global_end=global_end,
+                     global_edge=global_edge,
+                     device=torch.device("cpu"),
+                 )
+-                local_packet_dp = _candidate_uses_local_packet_update_dp(
+-                    candidate,
+-                    effective_selection.trusted_edge_split_execution,
+-                )
+-                secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
+-                    candidate,
+-                    effective_selection.trusted_edge_split_execution,
++                relative_update, original_norm, clip_scale = clip_state_difference(
++                    relative_update,
++                    train_config.dp_clip_norm,
++                    torch.device("cpu"),
+                 )
+-                if train_config.dp_release_calibration == "tex_packet":
+-                    local_packet_dp = local_packet_dp or secure_aggregate_dp
+-                    secure_aggregate_dp = False
+-                if local_packet_dp or secure_aggregate_dp:
+-                    relative_update, _original_norm, clip_scale = clip_state_difference(
+-                        relative_update,
+-                        train_config.dp_clip_norm,
+-                        torch.device("cpu"),
+-                    )
+-                    update_dp_clip_scales.append(clip_scale)
+-                    update_dp_preclip_norms.append(float(_original_norm))
+-                    update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
++                update_dp_clip_scales.append(clip_scale)
++                update_dp_preclip_norms.append(float(original_norm))
++                update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+                 cloud_signal_updates.append(relative_update)
+-                cloud_index = len(cloud_updates)
+-                if local_packet_dp:
+-                    sensitivity, noise_std = _dp_update_release_parameters(
+-                        1.0,
+-                        clip_norm=train_config.dp_clip_norm,
+-                        noise_multiplier=float(
+-                            privacy_parameters["update_noise_multiplier"]
+-                        ),
+-                    )
+-                    local_dp_packet_client_fractions.append(1.0)
+-                    local_dp_packet_sensitivities.append(sensitivity)
+-                    local_dp_pending_components.append(
+-                        (
+-                            cloud_index,
+-                            noise_std,
+-                            _dp_noise_seed(
+-                                selection.seed,
+-                                round_idx,
+-                                client_id,
+-                                10_000,
+-                            ),
+-                        )
++                cloud_updates.append((relative_update, sample_count, candidate, [client_id]))
++                secure_aggregate_dp_client_fractions.append(1.0)
++        else:
++            for client_id, state_diff, sample_count, candidate in global_updates:
++                if candidate is not None and candidate.mode in EDGE_CLOUD_MODES:
++                    key = (
++                        int(client_by_id[client_id].edge_id),
++                        candidate.mode,
++                        _candidate_cloud_update_mechanism(candidate),
+                     )
+-                cloud_updates.append(
+-                    (
+-                        relative_update,
+-                        sample_count,
+-                        candidate,
+-                        [client_id],
++                    edge_cloud_groups.setdefault(key, []).append(
++                        (client_id, state_diff, sample_count, candidate)
+                     )
+-                )
+-                secure_aggregate_dp_client_fractions.append(
+-                    1.0 if secure_aggregate_dp else 0.0
+-                )
+-
+-        for edge_id, updates in edge_cloud_groups.items():
+-            representative = updates[0][3]
+-            local_packet_dp = _candidate_uses_local_packet_update_dp(
+-                representative,
+-                effective_selection.trusted_edge_split_execution,
+-            )
+-            secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
+-                representative,
+-                effective_selection.trusted_edge_split_execution,
+-            )
+-            tex_packet = train_config.dp_release_calibration == "tex_packet"
+-            if tex_packet:
+-                local_packet_dp = local_packet_dp or secure_aggregate_dp
+-                secure_aggregate_dp = False
+-            if local_packet_dp or secure_aggregate_dp:
+-                clipped_updates = []
+-                clipped_counts = []
+-                for client_id, state_diff, sample_count, _candidate in updates:
++                else:
+                     relative_update = _state_difference_from_client_update(
+                         client_id=client_id,
+                         state_diff=state_diff,
+@@ -1752,91 +1813,173 @@ def _run_lenet5_policy(
+                         global_edge=global_edge,
+                         device=torch.device("cpu"),
+                     )
+-                    if tex_packet:
+-                        clipped = relative_update
+-                    else:
+-                        clipped, _original_norm, clip_scale = clip_state_difference(
+-                            relative_update, train_config.dp_clip_norm, torch.device("cpu"),
++                    local_packet_dp = _candidate_uses_local_packet_update_dp(
++                        candidate,
++                        effective_selection.trusted_edge_split_execution,
++                    )
++                    secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
++                        candidate,
++                        effective_selection.trusted_edge_split_execution,
++                    )
++                    if train_config.dp_release_calibration == "tex_packet":
++                        local_packet_dp = local_packet_dp or secure_aggregate_dp
++                        secure_aggregate_dp = False
++                    if local_packet_dp or secure_aggregate_dp:
++                        relative_update, _original_norm, clip_scale = clip_state_difference(
++                            relative_update,
++                            train_config.dp_clip_norm,
++                            torch.device("cpu"),
+                         )
+                         update_dp_clip_scales.append(clip_scale)
+                         update_dp_preclip_norms.append(float(_original_norm))
+                         update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+-                    clipped_updates.append(clipped)
+-                    clipped_counts.append(sample_count)
+-                edge_update = _weighted_average_state_differences(
+-                    clipped_updates,
+-                    clipped_counts,
++                    cloud_signal_updates.append(relative_update)
++                    cloud_index = len(cloud_updates)
++                    if local_packet_dp:
++                        sensitivity, noise_std = _dp_update_release_parameters(
++                            1.0,
++                            clip_norm=train_config.dp_clip_norm,
++                            noise_multiplier=float(
++                                privacy_parameters["update_noise_multiplier"]
++                            ),
++                        )
++                        local_dp_packet_client_fractions.append(1.0)
++                        local_dp_packet_sensitivities.append(sensitivity)
++                        local_dp_pending_components.append(
++                            (
++                                cloud_index,
++                                noise_std,
++                                _dp_noise_seed(
++                                    selection.seed,
++                                    round_idx,
++                                    client_id,
++                                    10_000,
++                                ),
++                            )
++                        )
++                    cloud_updates.append(
++                        (
++                            relative_update,
++                            sample_count,
++                            candidate,
++                            [client_id],
++                        )
++                    )
++                    secure_aggregate_dp_client_fractions.append(
++                        1.0 if secure_aggregate_dp else 0.0
++                    )
++
++            for edge_id, updates in edge_cloud_groups.items():
++                representative = updates[0][3]
++                local_packet_dp = _candidate_uses_local_packet_update_dp(
++                    representative,
++                    effective_selection.trusted_edge_split_execution,
+                 )
+-                group_total = max(float(sum(clipped_counts)), 1e-12)
+-                max_client_fraction = max(
+-                    (float(count) / group_total for count in clipped_counts),
+-                    default=0.0,
++                secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
++                    representative,
++                    effective_selection.trusted_edge_split_execution,
+                 )
++                tex_packet = train_config.dp_release_calibration == "tex_packet"
+                 if tex_packet:
+-                    edge_update, _original_norm, clip_scale = clip_state_difference(
+-                        edge_update, train_config.dp_clip_norm, torch.device("cpu"),
++                    local_packet_dp = local_packet_dp or secure_aggregate_dp
++                    secure_aggregate_dp = False
++                if local_packet_dp or secure_aggregate_dp:
++                    clipped_updates = []
++                    clipped_counts = []
++                    for client_id, state_diff, sample_count, _candidate in updates:
++                        relative_update = _state_difference_from_client_update(
++                            client_id=client_id,
++                            state_diff=state_diff,
++                            client_model_states=client_model_states,
++                            global_end=global_end,
++                            global_edge=global_edge,
++                            device=torch.device("cpu"),
++                        )
++                        if tex_packet:
++                            clipped = relative_update
++                        else:
++                            clipped, _original_norm, clip_scale = clip_state_difference(
++                                relative_update, train_config.dp_clip_norm, torch.device("cpu"),
++                            )
++                            update_dp_clip_scales.append(clip_scale)
++                            update_dp_preclip_norms.append(float(_original_norm))
++                            update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
++                        clipped_updates.append(clipped)
++                        clipped_counts.append(sample_count)
++                    edge_update = _weighted_average_state_differences(
++                        clipped_updates,
++                        clipped_counts,
+                     )
+-                    update_dp_clip_scales.append(clip_scale)
+-                    update_dp_preclip_norms.append(float(_original_norm))
+-                    update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+-                    max_client_fraction = 1.0
+-                cloud_signal_updates.append(edge_update)
+-                cloud_index = len(cloud_updates)
+-                if local_packet_dp:
+-                    sensitivity, noise_std = _dp_update_release_parameters(
+-                        max_client_fraction,
+-                        clip_norm=train_config.dp_clip_norm,
+-                        noise_multiplier=float(
+-                            privacy_parameters["update_noise_multiplier"]
+-                        ),
++                    group_total = max(float(sum(clipped_counts)), 1e-12)
++                    max_client_fraction = max(
++                        (float(count) / group_total for count in clipped_counts),
++                        default=0.0,
+                     )
+-                    local_dp_packet_client_fractions.append(max_client_fraction)
+-                    local_dp_packet_sensitivities.append(sensitivity)
+-                    local_dp_pending_components.append(
+-                        (
+-                            cloud_index,
+-                            noise_std,
+-                            _dp_noise_seed(
+-                                selection.seed,
+-                                round_idx,
+-                                edge_id,
+-                                10_000,
++                    if tex_packet:
++                        edge_update, _original_norm, clip_scale = clip_state_difference(
++                            edge_update, train_config.dp_clip_norm, torch.device("cpu"),
++                        )
++                        update_dp_clip_scales.append(clip_scale)
++                        update_dp_preclip_norms.append(float(_original_norm))
++                        update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
++                        max_client_fraction = 1.0
++                    cloud_signal_updates.append(edge_update)
++                    cloud_index = len(cloud_updates)
++                    if local_packet_dp:
++                        sensitivity, noise_std = _dp_update_release_parameters(
++                            max_client_fraction,
++                            clip_norm=train_config.dp_clip_norm,
++                            noise_multiplier=float(
++                                privacy_parameters["update_noise_multiplier"]
+                             ),
+                         )
++                        local_dp_packet_client_fractions.append(max_client_fraction)
++                        local_dp_packet_sensitivities.append(sensitivity)
++                        local_dp_pending_components.append(
++                            (
++                                cloud_index,
++                                noise_std,
++                                _dp_noise_seed(
++                                    selection.seed,
++                                    round_idx,
++                                    edge_id,
++                                    10_000,
++                                ),
++                            )
++                        )
++                else:
++                    edge_state, _edge_used_he = _aggregate_returned_client_models(
++                        updates=updates,
++                        client_model_states=client_model_states,
++                        global_end=global_end,
++                        global_edge=global_edge,
++                        device=device,
++                        model_name=model_name,
++                        input_shape=input_shape,
++                        num_classes=num_classes,
++                        he_aggregation_size=train_config.he_aggregation_size,
++                        he_backend="none",
++                        he_metrics=round_he_metrics,
++                    )
++                    edge_update = _state_difference_from_model(
++                        edge_state,
++                        global_end,
++                        global_edge,
++                        torch.device("cpu"),
++                    )
++                    max_client_fraction = 0.0
++                    cloud_signal_updates.append(edge_update)
++                cloud_updates.append(
++                    (
++                        edge_update,
++                        sum(item[2] for item in updates),
++                        representative,
++                        [item[0] for item in updates],
+                     )
+-            else:
+-                edge_state, _edge_used_he = _aggregate_returned_client_models(
+-                    updates=updates,
+-                    client_model_states=client_model_states,
+-                    global_end=global_end,
+-                    global_edge=global_edge,
+-                    device=device,
+-                    model_name=model_name,
+-                    input_shape=input_shape,
+-                    num_classes=num_classes,
+-                    he_aggregation_size=train_config.he_aggregation_size,
+-                    he_backend="none",
+-                    he_metrics=round_he_metrics,
+-                )
+-                edge_update = _state_difference_from_model(
+-                    edge_state,
+-                    global_end,
+-                    global_edge,
+-                    torch.device("cpu"),
+                 )
+-                max_client_fraction = 0.0
+-                cloud_signal_updates.append(edge_update)
+-            cloud_updates.append(
+-                (
+-                    edge_update,
+-                    sum(item[2] for item in updates),
+-                    representative,
+-                    [item[0] for item in updates],
++                secure_aggregate_dp_client_fractions.append(
++                    max_client_fraction if secure_aggregate_dp else 0.0
+                 )
+-            )
+-            secure_aggregate_dp_client_fractions.append(
+-                max_client_fraction if secure_aggregate_dp else 0.0
+-            )
+ 
+         global_aggregation_weights = _edge_normalized_cloud_weights(
+             cloud_updates,
+@@ -1857,7 +2000,11 @@ def _run_lenet5_policy(
+             global_aggregation_weights,
+             secure_aggregate_dp_client_fractions,
+             clip_norm=train_config.dp_clip_norm,
+-            noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
++            noise_multiplier=(
++                release_account.multiplier
++                if effective_selection.mainline_fusion and release_account is not None
++                else float(privacy_parameters["update_noise_multiplier"])
++            ),
+         )
+         cloud_signal_updates.clear()
+         local_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
+@@ -1984,7 +2131,8 @@ def _run_lenet5_policy(
+                 (client_id, state_diff, sample_count, candidate)
+             )
+ 
+-        for updates in edge_only_groups.values():
++        edge_only_iter = () if effective_selection.mainline_fusion else edge_only_groups.values()
++        for updates in edge_only_iter:
+             returned_state, used_real_he = _aggregate_returned_client_models(
+                 updates=updates,
+                 client_model_states=client_model_states,
+@@ -2020,13 +2168,22 @@ def _run_lenet5_policy(
+             global_sample_counts = global_aggregation_weights
+             global_candidates = [item[2] for item in cloud_updates]
+             global_he_mask = [
+-                mechanism_uses_he(_candidate_cloud_update_mechanism(candidate))
++                True if effective_selection.mainline_fusion
++                else mechanism_uses_he(_candidate_cloud_update_mechanism(candidate))
+                 for candidate in global_candidates
+             ]
+             use_real_he = (
+                 execute_real_he
+                 and any(global_he_mask)
+             )
++            if effective_selection.mainline_fusion:
++                if release_account is None:
++                    raise RuntimeError("Missing mainline release account")
++                fixed_ids = sorted(flow_result.selected_client_ids)
++                release_account.check(round_idx, fixed_ids)
++                release_account.reserve(round_idx, fixed_ids)
++                if not use_real_he:
++                    raise RuntimeError("Mainline fusion refuses plaintext/profiled cloud aggregation")
+             if use_real_he:
+                 round_real_he_used = True
+                 round_real_he_clients += sum(
+@@ -2066,14 +2223,17 @@ def _run_lenet5_policy(
+                     device,
+                 )
+         for client_id, candidate, _candidates, _remaining in selected:
+-            if _mode_reaches_cloud(candidate.mode):
++            if effective_selection.mainline_fusion or _mode_reaches_cloud(candidate.mode):
+                 client_model_states.pop(client_id, None)
+         aggregation_wall_time_sec = time.perf_counter() - aggregation_wall_started_at
+ 
+         packet_dp_indices = {index for index, _std, _seed in local_dp_pending_components}
+         protection_releases = []
+         for packet_index, (_diff, _samples, candidate, client_ids) in enumerate(cloud_updates):
+-            mechanism = _candidate_cloud_update_mechanism(candidate)
++            mechanism = _reported_release_mechanism(
++                candidate,
++                mainline_fusion=effective_selection.mainline_fusion,
++            )
+             noise_location = (
+                 "packet" if packet_index in packet_dp_indices else
+                 "aggregate_share" if aggregate_dp_share_stds[packet_index] > 0.0 else "none"
+@@ -2084,10 +2244,16 @@ def _run_lenet5_policy(
+             audit = audit_update_release(
+                 mechanism=mechanism, noise_location=noise_location,
+                 he_execution=packet_he,
+-                dp_budget_ok=all(
+-                    privacy_ledgers[cid].update.current_epsilon()
+-                    <= privacy_ledgers[cid].update.budget + 1e-12
+-                    for cid in client_ids
++                dp_budget_ok=(
++                    release_account is not None
++                    and release_account.ledger.current_epsilon()
++                    <= release_account.ledger.budget + 1e-12
++                    if effective_selection.mainline_fusion
++                    else all(
++                        privacy_ledgers[cid].update.current_epsilon()
++                        <= privacy_ledgers[cid].update.budget + 1e-12
++                        for cid in client_ids
++                    )
+                 ),
+                 key_isolation_enforced=False,
+                 aggregate_only_decryption_enforced=False,
+@@ -2197,13 +2363,17 @@ def _run_lenet5_policy(
+                     ledger.update.current_epsilon() for ledger in privacy_ledgers.values()
+                 ),
+                 "privacy_guarantee": (
+-                    "uniform_secure_aggregate_dp"
+-                    if uniform_secure_aggregate_dp
+-                    else "uniform_local_packet_dp"
+-                    if uniform_local_update_dp
+-                    else "hybrid_update_protection"
+-                    if all_cross_domain_updates_protected
+-                    else "incomplete_cross_domain_protection"
++                    privacy_reporting_scope["privacy_guarantee"]
++                    if effective_selection.mainline_fusion
++                    else (
++                        "uniform_secure_aggregate_dp"
++                        if uniform_secure_aggregate_dp
++                        else "uniform_local_packet_dp"
++                        if uniform_local_update_dp
++                        else "hybrid_update_protection"
++                        if all_cross_domain_updates_protected
++                        else "incomplete_cross_domain_protection"
++                    )
+                 ),
+                 "infeasible_clients": infeasible,
+                 "skipped_clients": skipped_clients,
+@@ -2230,8 +2400,19 @@ def _run_lenet5_policy(
+                 "update_dp_preclip_norm_p50": float(np.quantile(update_dp_preclip_norms, 0.5)) if update_dp_preclip_norms else 0.0,
+                 "update_dp_preclip_norm_p90": float(np.quantile(update_dp_preclip_norms, 0.9)) if update_dp_preclip_norms else 0.0,
+                 "dp_diagnostic_scope": "private_experiment_logs_not_public_dp_outputs",
+-                "dp_accountant_scope": "recorded_dp_events_only",
++                "dp_accountant_scope": privacy_reporting_scope["dp_accountant_scope"],
+                 "end_to_end_dp_status": "not_established",
++                "mainline_fusion": int(effective_selection.mainline_fusion),
++                "global_release_count": (
++                    release_account.next_round if release_account is not None else 0
++                ),
++                "global_release_epsilon": (
++                    release_account.ledger.current_epsilon() if release_account is not None else 0.0
++                ),
++                "global_release_contract": (
++                    "client_clip_then_distributed_noise_then_he_cloud_aggregate"
++                    if effective_selection.mainline_fusion else "legacy_per_link_selection"
++                ),
+                 "update_dp_max_client_fraction": update_dp_max_client_fraction,
+                 "update_dp_sensitivity": update_dp_sensitivity,
+                 "update_dp_noise_std": update_dp_noise_std,
+@@ -2285,8 +2466,8 @@ def _run_lenet5_policy(
+                     if execute_real_he
+                     else "profiled"
+                 ),
+-                "protected_object": "cross_domain_model_update",
+-                "privacy_mechanism_scope": "local_packet_or_secure_aggregate",
++                "protected_object": privacy_reporting_scope["protected_object"],
++                "privacy_mechanism_scope": privacy_reporting_scope["privacy_mechanism_scope"],
+                 "protection_release_audit": json.dumps(protection_releases, sort_keys=True),
+                 "update_packets_without_dp_calibration": sum(
+                     item["released_model_dp_status"] != "dp_coverage_pending_analysis"
+@@ -2387,7 +2568,12 @@ def _run_lenet5_policy(
+         current_round.update(training_privacy_diagnostics(current_round))
+         max_feature_epsilon = current_round["max_feature_epsilon"]
+         max_update_epsilon = current_round["max_update_epsilon"]
+-        larger_channel_epsilon = max(max_feature_epsilon, max_update_epsilon)
++        reported_update_epsilon = (
++            float(current_round["global_release_epsilon"])
++            if effective_selection.mainline_fusion
++            else max_update_epsilon
++        )
++        larger_channel_epsilon = max(max_feature_epsilon, reported_update_epsilon)
+         cumulative_comm = sum(float(row["communication_volume"]) for row in round_rows)
+         selected_details = [
+             {
+@@ -2417,7 +2603,10 @@ def _run_lenet5_policy(
+             "cumulative_communication_volume": cumulative_comm,
+             "larger_channel_epsilon": larger_channel_epsilon,
+             "feature_epsilon": max_feature_epsilon,
+-            "update_epsilon": max_update_epsilon,
++            "update_epsilon": reported_update_epsilon,
++            "global_release_count": current_round["global_release_count"],
++            "global_release_epsilon": current_round["global_release_epsilon"],
++            "global_release_contract": current_round["global_release_contract"],
+             "privacy_guarantee": current_round["privacy_guarantee"],
+             "dp_delta": privacy_parameters["delta"],
+             "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
+@@ -2530,13 +2719,19 @@ def _run_lenet5_policy(
+             real_he_aggregated_clients=real_he_aggregated_clients,
+             global_pareto_selection_rounds=global_pareto_selection_rounds,
+             client_model_states=client_model_states,
++            mainline_release_account=release_account,
+         )
+         privacy_progress = (
+-            f"feature_dp=off update_eps={max_update_epsilon:.3f}"
+-            if effective_selection.trusted_edge_split_execution
++            f"global_release_eps={reported_update_epsilon:.3f} "
++            f"release_count={current_round['global_release_count']}"
++            if effective_selection.mainline_fusion
+             else (
+-                f"feature_eps={max_feature_epsilon:.3f} "
+-                f"update_eps={max_update_epsilon:.3f}"
++                f"feature_dp=off update_eps={max_update_epsilon:.3f}"
++                if effective_selection.trusted_edge_split_execution
++                else (
++                    f"feature_eps={max_feature_epsilon:.3f} "
++                    f"update_eps={max_update_epsilon:.3f}"
++                )
+             )
+         )
+         print(
+@@ -2757,9 +2952,12 @@ def _run_lenet5_policy(
+     summary["dp_feature_enabled"] = privacy_parameters["feature_dp_enabled"]
+     summary["trusted_edge_split_execution"] = effective_selection.trusted_edge_split_execution
+     summary["tracks_returned_client_models"] = True
+-    summary["privacy_policy_scope"] = "per_link"
+-    summary["protected_object"] = "cross_domain_model_update"
+-    summary["privacy_mechanism_scope"] = "local_packet_or_secure_aggregate"
++    summary["privacy_policy_scope"] = privacy_reporting_scope["privacy_policy_scope"]
++    summary["protected_object"] = privacy_reporting_scope["protected_object"]
++    summary["privacy_mechanism_scope"] = privacy_reporting_scope["privacy_mechanism_scope"]
++    summary["privacy_guarantee"] = privacy_reporting_scope["privacy_guarantee"]
++    summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
++    summary.update(_global_release_summary(release_account))
+     summary["aggregate_dp_protocol"] = "distributed_noise_before_ckks_aggregation"
+     summary["aggregate_dp_release_rounds"] = sum(
+         int(row.get("aggregate_dp_release", 0)) for row in round_rows
+@@ -2917,6 +3115,7 @@ def _run_client_training_tasks(
+             global_edge=global_edge,
+             device=torch.device("cpu"),
+             training_stage=training_stage,
++            mainline_fusion=selection.mainline_fusion,
+         )
+         return {
+             "client_id": client_id,
+@@ -3004,7 +3203,13 @@ def _training_base_state(
+     global_edge: torch.nn.Module,
+     device: torch.device,
+     training_stage: int = 0,
++    mainline_fusion: bool = False,
+ ) -> dict[str, dict[str, torch.Tensor]]:
++    if mainline_fusion:
++        return {
++            "end": _state_dict_to_device(global_end.state_dict(), device),
++            "edge": _state_dict_to_device(global_edge.state_dict(), device),
++        }
+     stored_state = client_model_states.get(client_id)
+     if stored_state is not None and (
+         not _mode_reaches_cloud(candidate.mode) or training_stage > 0
+@@ -4108,6 +4313,7 @@ def _save_policy_checkpoint(
+     real_he_aggregated_clients: int,
+     global_pareto_selection_rounds: int,
+     client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]],
++    mainline_release_account: IndependentReleaseAccount | None = None,
+ ) -> None:
+     path.parent.mkdir(parents=True, exist_ok=True)
+     temporary_path = path.with_suffix(path.suffix + ".tmp")
+@@ -4137,6 +4343,9 @@ def _save_policy_checkpoint(
+             "real_he_aggregated_clients": real_he_aggregated_clients,
+             "global_pareto_selection_rounds": global_pareto_selection_rounds,
+             "client_model_states": client_model_states,
++            "mainline_release_account": (
++                mainline_release_account.state_dict() if mainline_release_account is not None else None
++            ),
+             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+         },
+         temporary_path,
+diff --git a/dynfed/independent_release.py b/dynfed/independent_release.py
+index ca1b6e7..6399d1b 100644
+--- a/dynfed/independent_release.py
++++ b/dynfed/independent_release.py
+@@ -18,13 +18,44 @@ class IndependentReleaseAccount:
+                 or type(horizon) is not int or horizon <= 0):
+             raise ValueError("Positive fixed counts, clipping and release horizon required")
+         self.weights = tuple(n / sum(self.counts) for n in self.counts)
+-        self.sensitivity = 2 * clip_norm * max(self.weights)
++        self.clip_norm = float(clip_norm)
++        self.sensitivity = 2 * self.clip_norm * max(self.weights)
+         self.multiplier = calibrate_gaussian_noise(epsilon, delta, horizon)
+         self.noise_std = self.multiplier * self.sensitivity
+         self.horizon = horizon
+         self.ledger = PrivacyAccountant(epsilon, delta)
+         self.next_round = 0
+ 
++
++    def state_dict(self):
++        return {
++            "counts": list(self.counts),
++            "clip_norm": self.clip_norm,
++            "horizon": self.horizon,
++            "multiplier": self.multiplier,
++            "next_round": self.next_round,
++            "ledger": self.ledger.state_dict(),
++        }
++
++    def load_state_dict(self, state):
++        if tuple(int(value) for value in state.get("counts", ())) != self.counts:
++            raise ValueError("Release-account cohort mismatch")
++        if int(state.get("horizon", -1)) != self.horizon:
++            raise ValueError("Release-account horizon mismatch")
++        if not math.isclose(
++            float(state.get("clip_norm", float("nan"))),
++            self.clip_norm,
++            rel_tol=1e-12,
++            abs_tol=1e-12,
++        ):
++            raise ValueError("Release-account clip norm mismatch")
++        if not math.isclose(float(state.get("multiplier", float("nan"))), self.multiplier, rel_tol=1e-12, abs_tol=1e-12):
++            raise ValueError("Release-account calibration mismatch")
++        self.ledger = PrivacyAccountant.from_state_dict(state["ledger"])
++        self.next_round = int(state["next_round"])
++        if not 0 <= self.next_round <= self.horizon:
++            raise ValueError("Invalid saved release round")
++
+     def check(self, round_index, client_ids):
+         ids = tuple(client_ids)
+         if (type(round_index) is not int or round_index != self.next_round
+diff --git a/dynfed/privacy.py b/dynfed/privacy.py
+index 355ba11..487e7e4 100644
+--- a/dynfed/privacy.py
++++ b/dynfed/privacy.py
+@@ -74,8 +74,16 @@ def privacy_execution_audit(round_rows: list[dict[str, Any]]) -> dict[str, Any]:
+     """Report observed mechanism coverage, not a transcript privacy proof."""
+     cloud_rows = [row for row in round_rows if row.get("num_global_update_clients", 0) > 0]
+     coverage_known = bool(cloud_rows) and all("uniform_update_dp" in row for row in cloud_rows)
++    fused = bool(round_rows) and all(bool(row.get("mainline_fusion", 0)) for row in round_rows)
++    release_count = max((int(row.get("global_release_count", 0)) for row in round_rows), default=0)
++    release_epsilon = max((float(row.get("global_release_epsilon", 0.0)) for row in round_rows), default=0.0)
+     return {
+-        "accountant_scope": "recorded_dp_events_only",
++        "accountant_scope": (
++            "one_global_release_per_round_fixed_public_roster"
++            if fused else "recorded_dp_events_only"
++        ),
++        "global_release_count": release_count if fused else None,
++        "global_release_epsilon": release_epsilon if fused else None,
+         "uniform_selected_update_dp": (
+             all(bool(row["uniform_update_dp"]) for row in cloud_rows)
+             if coverage_known else None
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index 3545706..cd449a1 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -147,6 +147,7 @@ class SelectionConfig:
+     omega_update_dimension: float = 61706.0
+     embedding_payload_mb: float = 1.6
+     update_payload_mb: float = 4.0
++    mainline_fusion: bool = False
+ 
+ 
+ @dataclass(frozen=True)
+@@ -180,6 +181,7 @@ class Candidate:
+     edge_aggregation_payload: float = 0.0
+     cloud_aggregation_payload: float = 0.0
+     link_metrics: tuple[dict[str, Any], ...] = ()
++    global_release_required: bool = False
+ 
+     @property
+     def feasible(self) -> bool:
+@@ -261,7 +263,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
+ 
+     per_mode_counts = []
+     for mode, spec in MODE_SPECS.items():
+-        if config.trusted_edge_split_execution and mode == "LIC":
++        if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         events = _mode_link_transmissions(
+             mode,
+@@ -641,7 +643,7 @@ def enumerate_candidates(
+     validate_update_protection_goal(config, policy)
+     candidates: list[Candidate] = []
+     for mode, spec in MODE_SPECS.items():
+-        if config.trusted_edge_split_execution and mode == "LIC":
++        if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
+             continue
+@@ -657,6 +659,7 @@ def enumerate_candidates(
+             policy_allow_none,
+             trusted_edge_split_execution=config.trusted_edge_split_execution,
+             update_mechanism_options=config.update_mechanism_options,
++            mainline_fusion=config.mainline_fusion,
+         )
+         for mechanisms, link_mechanisms in assignments:
+             candidates.append(
+@@ -719,11 +722,20 @@ def _mode_reaches_cloud(spec: ModeSpec) -> bool:
+ 
+ 
+ def _candidate_reaches_cloud(candidate: Candidate) -> bool:
++    if candidate.global_release_required:
++        return True
+     spec = MODE_SPECS.get(candidate.mode)
+     return bool(spec and _mode_reaches_cloud(spec))
+ 
+ 
+ def validate_update_protection_goal(config: SelectionConfig, policy: str) -> None:
++    if config.mainline_fusion:
++        if not config.trusted_edge_split_execution:
++            raise ValueError("Mainline fusion requires the trusted edge execution domain")
++        if abs(float(config.aggregation_fraction) - 1.0) > 1e-12:
++            raise ValueError("Mainline fusion requires aggregation_fraction=1.0")
++        if config.update_protection_goal != "released_model_dp":
++            raise ValueError("Mainline fusion requires update_protection_goal=released_model_dp")
+     if config.update_protection_goal not in {"packet_protection", "released_model_dp"}:
+         raise ValueError("Unknown update protection goal")
+     if config.update_protection_goal == "released_model_dp":
+@@ -736,6 +748,8 @@ def validate_update_protection_goal(config: SelectionConfig, policy: str) -> Non
+ 
+ def candidate_meets_update_goal(config: SelectionConfig, candidate: Candidate) -> bool:
+     """Necessary cloud update coverage only, not a transcript privacy proof."""
++    if config.mainline_fusion:
++        return candidate.mode != "LIC" and candidate.global_release_required
+     if config.update_protection_goal == "packet_protection":
+         return True
+     if config.update_protection_goal != "released_model_dp":
+@@ -2747,6 +2761,9 @@ def _omega_from_profile_stats(
+             )
+     cloud_samples = sum(stats.cloud_samples_by_edge.values())
+     cloud_fusion_ratio = cloud_samples / max(stats.total_samples, 1e-12)
++    weighted_local += _fusion_aggregate_noise_cost(
++        config, profile, client_edges, admitted_client_ids, stats.client_samples
++    )
+     return (
+         weighted_local
+         + config.cloud_fusion_xi / (cloud_fusion_ratio + config.cloud_fusion_eps),
+@@ -2821,6 +2838,9 @@ def _global_omega_proxy_from_admitted(
+         for client_id in weights
+     )
+     cloud_fusion_ratio = admitted_cloud_samples / max(stats.total_samples, 1e-12)
++    weighted_local += _fusion_aggregate_noise_cost(
++        config, profile, client_edges, admitted_client_ids, client_samples
++    )
+     return (
+         weighted_local
+         + config.cloud_fusion_xi / (cloud_fusion_ratio + config.cloud_fusion_eps),
+@@ -2873,6 +2893,39 @@ def _cloud_client_aggregation_weights(
+     }
+ 
+ 
++def _fusion_aggregate_noise_cost(
++    config: SelectionConfig,
++    profile: dict[int, Candidate],
++    client_edges: dict[int, int],
++    admitted_client_ids: list[int] | tuple[int, ...],
++    client_samples: dict[int, float],
++) -> float:
++    if not config.mainline_fusion or not admitted_client_ids:
++        return 0.0
++    weights = _cloud_client_aggregation_weights(
++        profile, client_samples, client_edges, admitted_client_ids
++    )
++    if not weights:
++        return 0.0
++    max_weight = max(weights.values())
++    privacy_parameters = resolved_privacy_parameters(config)
++    sigma = float(privacy_parameters["update_noise_multiplier"])
++    sensitivity = 2.0 * max(float(config.omega_update_clip_norm), 1e-12) * max_weight
++    eta = max(float(config.omega_learning_rate), 1e-12)
++    local_cycles = max(float(config.L_block_cycles), 1.0)
++    variance_scale = (
++        max(float(config.omega_smoothness), 1e-12)
++        * eta
++        * local_cycles
++        / max(float(config.omega_mu), 1e-12)
++    )
++    gradient_variance = (
++        sigma * sigma * sensitivity * sensitivity * float(config.omega_update_dimension)
++        / (eta * eta * local_cycles * local_cycles)
++    )
++    return variance_scale * gradient_variance
++
++
+ def _aggregation_sizes(
+     profile: dict[int, Candidate],
+     client_edges: dict[int, int],
+@@ -2991,7 +3044,7 @@ def _local_omega_components(
+     feature_events, client_update_events, edge_update_events = (
+         _candidate_dp_event_counts(candidate, config)
+     )
+-    return _cached_local_omega_components(
++    components = _cached_local_omega_components(
+         feature_events,
+         client_update_events,
+         edge_update_events,
+@@ -2999,6 +3052,22 @@ def _local_omega_components(
+         config.omega_update_clip_excess_sq,
+         config,
+     )
++    if config.mainline_fusion and candidate.global_release_required:
++        eta = max(float(config.omega_learning_rate), 1e-12)
++        local_cycles = max(float(config.L_block_cycles), 1.0)
++        clip_bias = max(float(config.omega_update_clip_excess_sq), 0.0) / (
++            eta * eta * local_cycles * local_cycles
++        )
++        return _OmegaComponents(
++            client_bias=(
++                components.client_bias
++                + (3.0 / (2.0 * max(float(config.omega_mu), 1e-12))) * clip_bias
++            ),
++            client_variance=components.client_variance,
++            edge_bias=0.0,
++            edge_variance=0.0,
++        )
++    return components
+ 
+ 
+ def _candidate_feature_clip_excess_sq(
+@@ -3247,6 +3316,7 @@ def _mechanism_assignments(
+     allow_none: bool = False,
+     trusted_edge_split_execution: bool = False,
+     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3"),
++    mainline_fusion: bool = False,
+ ) -> list[tuple[dict[str, str], dict[str, str]]]:
+     all_transmissions = _mode_link_transmissions(
+         spec.name,
+@@ -3262,6 +3332,20 @@ def _mechanism_assignments(
+         if trusted_edge_split_execution
+         and link.startswith("L_E_")
+     }
++    if mainline_fusion:
++        # The selector chooses execution topology only. DP is enforced by the
++        # global release gate; HE is the fixed confidentiality layer whenever
++        # an update crosses into the untrusted cloud.
++        link_assignment = {}
++        for link in links:
++            obj = link_objects[link]
++            if link.startswith("L_E_"):
++                link_assignment[link] = "trusted"
++            elif obj == "upd" and link.endswith("_C_upd"):
++                link_assignment[link] = "he3"
++            else:
++                link_assignment[link] = "none"
++        return [(_object_mechanism_summary(link_assignment, link_objects), link_assignment)]
+     if policy in {"no_protection", "fixed_splitfed_no_protection"}:
+         link_assignments = [{
+             link: ("trusted" if link in trusted_links else "none")
+@@ -3611,26 +3695,36 @@ def _estimate_candidate(
+     # Global penalty: only cloud-reaching objects affect global model accuracy
+     protected_links = [event for event in link_events if event[3]]
+     mech_penalty = (
+-        sum(
+-            utility_penalty(
+-                actual_link_mechanisms[link_id],
+-                max(
+-                    float(
+-                        resolved_privacy_parameters(config)[
+-                            "update_budget" if obj == "upd" else "feature_budget"
+-                        ]
++        0.0
++        if config.mainline_fusion
++        else (
++            sum(
++                utility_penalty(
++                    actual_link_mechanisms[link_id],
++                    max(
++                        float(
++                            resolved_privacy_parameters(config)[
++                                "update_budget" if obj == "upd" else "feature_budget"
++                            ]
++                        ),
++                        1e-6,
+                     ),
+-                    1e-6,
+-                ),
++                )
++                for link_id, obj, _count, _privacy_eligible in protected_links
+             )
+-            for link_id, obj, _count, _privacy_eligible in protected_links
++            / max(len(protected_links), 1)
+         )
+-        / max(len(protected_links), 1)
+     )
+     penalty = spec.mode_penalty + mech_penalty
+     progress = (round_idx + 1.0) / max(config.rounds, 1)
+     accuracy = 0.2 + (0.83 - penalty - 0.2) * (1.0 - math.exp(-3.0 * progress))
+-    accuracy += _candidate_accuracy_jitter(config, client_id, round_idx, mode, actual_link_mechanisms)
++    accuracy += _candidate_accuracy_jitter(
++        config,
++        client_id,
++        round_idx,
++        mode,
++        {} if config.mainline_fusion else actual_link_mechanisms,
++    )
+ 
+     return Candidate(
+         mode=mode,
+@@ -3661,6 +3755,7 @@ def _estimate_candidate(
+         edge_aggregation_payload=edge_aggregation_payload,
+         cloud_aggregation_payload=cloud_aggregation_payload,
+         link_metrics=tuple(link_metrics),
++        global_release_required=bool(config.mainline_fusion),
+     )
+ 
+ 
+diff --git a/dynfed/version.py b/dynfed/version.py
+index bfcbf6a..c52f79b 100644
+--- a/dynfed/version.py
++++ b/dynfed/version.py
+@@ -1,2 +1,2 @@
+-CURRENT_EXECUTION_REVISION = "paper_flow_v29_tex_packet_dp"
++CURRENT_EXECUTION_REVISION = "paper_flow_v30_mainline_fusion"
+ CURRENT_UPDATE_PARAMETER_SCOPE = "trainable_parameters_v1"
+diff --git a/experiments/edge_dp_common.py b/experiments/edge_dp_common.py
+index 8bfa4a8..5f66cf1 100644
+--- a/experiments/edge_dp_common.py
++++ b/experiments/edge_dp_common.py
+@@ -83,6 +83,12 @@ def aggregate_signal_diagnostics(updates, plan, packets, clip_norm, *, clip=True
+             clipped += factor < 1.0
+     noise_norm = float((noisy - signal).norm())
+     signal_norm = float(signal.norm())
++    # Symmetric weighted updates can cancel exactly in real arithmetic while
++    # float32 accumulation leaves a few ulps. Treat that residual as zero so
++    # the internal noise/signal diagnostic does not manufacture a finite ratio.
++    zero_tol = float(torch.finfo(signal.dtype).eps) * max(1.0, float(clip_norm))
++    if signal_norm <= zero_tol:
++        signal_norm = 0.0
+     return dict(preclip_norm_mean=sum(norms) / len(norms), preclip_norm_max=max(norms),
+                 global_clipped_fraction=clipped / len(norms),
+                 aggregate_raw_signal_norm=float(raw.norm()), aggregate_signal_norm=signal_norm,
+diff --git a/experiments/run_fmnist_lenet5.py b/experiments/run_fmnist_lenet5.py
+index 5cd0f6d..f021615 100644
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -16,6 +16,27 @@ from dynfed.version import CURRENT_EXECUTION_REVISION
+ from dynfed.utils import timestamped_dir
+ 
+ 
++
++LEGACY_DEFAULT_POLICIES = (
++    "ours", "fixed_dp", "fixed_he", "random", "privacy_only", "no_protection"
++)
++FUSION_DEFAULT_POLICIES = (
++    "ours",
++    "individual_optimal",
++    "random",
++    "fixed_fedavg",
++    "fixed_splitfed",
++    "fixed_hfl",
++    "nsga2",
++)
++
++
++def _resolved_policies(args: argparse.Namespace) -> tuple[str, ...]:
++    if args.policies:
++        return tuple(args.policies)
++    return FUSION_DEFAULT_POLICIES if args.mainline_fusion else LEGACY_DEFAULT_POLICIES
++
++
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+         description="Run dynamic cloud-edge-end federated learning collaboration reconfiguration."
+@@ -86,6 +107,14 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate"])
+     parser.add_argument("--update-mechanisms", nargs="+", choices=["dp", "he3", "dp_he3"], default=["dp", "he3"])
+     parser.add_argument("--update-protection-goal", choices=["packet_protection", "released_model_dp"], default="packet_protection")
++    parser.add_argument(
++        "--mainline-fusion",
++        action="store_true",
++        help=(
++            "Fuse dynamic collaboration selection with the fixed Method 2 global release "
++            "contract: full roster, client clipping, distributed DP noise, and real HE."
++        ),
++    )
+     parser.add_argument(
+         "--trusted-edge-split-execution",
+         action="store_true",
+@@ -156,13 +185,15 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument(
+         "--policies",
+         nargs="+",
+-        default=["ours", "fixed_dp", "fixed_he", "random", "privacy_only", "no_protection"],
++        default=None,
++        help="Policies to run. Mainline fusion defaults exclude privacy-bypass controls.",
+     )
+     return parser.parse_args()
+ 
+ 
+ def main() -> None:
+     args = parse_args()
++    policies = _resolved_policies(args)
+     if args.max_new_rounds is not None and args.max_new_rounds < 1:
+         raise ValueError("--max-new-rounds must be positive")
+     output_root = timestamped_dir(args.output_root, "lenet5_dynamic_newtex202608")
+@@ -176,7 +207,7 @@ def main() -> None:
+         "max_new_rounds": args.max_new_rounds,
+         "dataset": args.dataset,
+         "model": args.model,
+-        "policies": list(args.policies),
++        "policies": list(policies),
+         "updated_at": time.time(),
+     }
+     for status_path in (output_root / "live_status.json", output_root.parent / "live_status.json"):
+@@ -207,7 +238,7 @@ def main() -> None:
+         risk_limit=args.risk_limit,
+         aggregation_fraction=args.aggregation_fraction,
+         privacy_local_epochs=args.local_epochs,
+-        trusted_edge_split_execution=args.trusted_edge_split_execution,
++        trusted_edge_split_execution=(args.trusted_edge_split_execution or args.mainline_fusion),
+         pareto_archive_size=args.pareto_archive_size,
+         pareto_beam_size=args.pareto_beam_size,
+         pareto_max_iters=args.pareto_max_iters,
+@@ -239,7 +270,10 @@ def main() -> None:
+         assume_encoder_feasible=args.assume_encoder_feasible,
+         output_dir=str(output_root),
+         update_mechanism_options=tuple(args.update_mechanisms),
+-        update_protection_goal=args.update_protection_goal,
++        update_protection_goal=(
++            "released_model_dp" if args.mainline_fusion else args.update_protection_goal
++        ),
++        mainline_fusion=args.mainline_fusion,
+     )
+     train_config = Lenet5Config(
+         execution_revision=args.execution_revision,
+@@ -258,7 +292,7 @@ def main() -> None:
+         he_backend=args.he_backend,
+         he_execution=args.he_execution,
+         he_local_deps=args.he_local_deps,
+-        require_real_he=args.require_real_he,
++        require_real_he=(args.require_real_he or args.mainline_fusion),
+         he_aggregation_size=args.he_aggregation_size,
+         he_workers=max(1, args.he_workers),
+         executor=args.executor,
+@@ -273,7 +307,7 @@ def main() -> None:
+         test_limit=args.test_limit,
+         resume_from_run=args.resume_from_run,
+         max_new_rounds=args.max_new_rounds,
+-        policies=tuple(args.policies),
++        policies=policies,
+     )
+     print(f"[{result['status'].upper()}] summary table: {result['summary_table']}")
+ 
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index 851f089..8b5f623 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -8,7 +8,7 @@ from pathlib import Path
+ 
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+-DEFAULT_CONFIG = ROOT / "configs" / "paper_v29_cifar10_resnet18.json"
++DEFAULT_CONFIG = ROOT / "configs" / "paper_v30_cifar10_resnet18.json"
+ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+ 
+@@ -147,6 +147,7 @@ def build_command(
+         "require_feasible",
+         "require_edge_cloud_coverage",
+         "trusted_edge_split_execution",
++        "mainline_fusion",
+     ):
+         if system.get(name):
+             command.append(_flag(name))
+@@ -228,16 +229,45 @@ def validate_config(config: dict) -> None:
+     if he.get("require_real_he") and he.get("execution", "real") != "real":
+         raise ValueError("require_real_he is only valid with real HE execution")
+     privacy = config["privacy"]
+-    if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
+-        raise ValueError(
+-            "Formal configurations must protect cross-domain updates and secure aggregate releases"
+-        )
+-    if privacy.get("candidate_mechanisms") != ["dp", "he3"]:
+-        raise ValueError(
+-            "TeX configurations must expose DP and HE as the update choices"
+-        )
+-    if privacy.get("release_calibration") != "tex_packet":
+-        raise ValueError("TeX configurations require whole packet DP calibration")
++    if config["system"].get("mainline_fusion"):
++        if privacy.get("protection_scope") != "global_release_dp_plus_he_confidentiality":
++            raise ValueError(
++                "Mainline fusion requires global release DP plus HE confidentiality"
++            )
++        if privacy.get("update_protection_goal") != "released_model_dp":
++            raise ValueError("Mainline fusion requires released_model_dp")
++        if privacy.get("accounting_mode") != "rdp_auto":
++            raise ValueError("Mainline fusion requires accounting_mode=rdp_auto")
++        if float(config["system"].get("aggregation_fraction", 0.0)) != 1.0:
++            raise ValueError("Mainline fusion requires full participation")
++        if he.get("execution") != "real" or not he.get("require_real_he"):
++            raise ValueError("Mainline fusion requires real HE")
++        if int(he.get("aggregation_size", 0)) != 0:
++            raise ValueError("Mainline fusion requires aggregation_size=0")
++        incompatible = {
++            "no_protection",
++            "fixed_he",
++            "fixed_dp",
++            "privacy_only",
++            "fixed_splitfed_no_protection",
++            "fixed_splitfed_trusted_edge",
++        }.intersection(config.get("policies", ()))
++        if incompatible:
++            raise ValueError(
++                "Policies incompatible with mainline fusion mandatory release: "
++                + ", ".join(sorted(incompatible))
++            )
++    else:
++        if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
++            raise ValueError(
++                "Formal configurations must protect cross-domain updates and secure aggregate releases"
++            )
++        if privacy.get("candidate_mechanisms") != ["dp", "he3"]:
++            raise ValueError(
++                "TeX configurations must expose DP and HE as the update choices"
++            )
++        if privacy.get("release_calibration") != "tex_packet":
++            raise ValueError("TeX configurations require whole packet DP calibration")
+     if float(privacy["cloud_dp_stability_threshold"]) <= 0.0:
+         raise ValueError("The cloud DP stability threshold must be positive")
+ 
+diff --git a/tests/test_aggregate_signal_diagnostics.py b/tests/test_aggregate_signal_diagnostics.py
+index 8b3ab81..33dd4aa 100644
+--- a/tests/test_aggregate_signal_diagnostics.py
++++ b/tests/test_aggregate_signal_diagnostics.py
+@@ -10,7 +10,7 @@ def test_global_vectors_not_average_of_norms():
+     packets = {0: torch.tensor([.6, .8]), 1: torch.tensor([-.6, -.8])}
+     metrics = aggregate_signal_diagnostics(updates, plan, packets, 1)
+     assert metrics["preclip_norm_mean"] == 5
+-    assert metrics["aggregate_signal_norm"] == 0
++    assert metrics["aggregate_signal_norm"] == pytest.approx(0.0, abs=1e-7)
+     assert metrics["noise_signal_ratio"] is None
+     assert metrics["global_clipped_fraction"] == 1
+ 
+diff --git a/tests/test_independent_release.py b/tests/test_independent_release.py
+index a1de804..08b1d36 100644
+--- a/tests/test_independent_release.py
++++ b/tests/test_independent_release.py
+@@ -22,3 +22,12 @@ def test_no_replay_skips_or_cohort_changes():
+     account.reserve(0, [0, 1])
+     with pytest.raises(ValueError):
+         account.reserve(0, [0, 1])
++
++
++def test_resume_rejects_changed_clip_norm_even_when_multiplier_matches():
++    original = IndependentReleaseAccount([3, 7], 0.1, 8.0, 1e-5, 5)
++    state = original.state_dict()
++    changed = IndependentReleaseAccount([3, 7], 0.2, 8.0, 1e-5, 5)
++
++    with pytest.raises(ValueError, match="clip norm"):
++        changed.load_state_dict(state)
+diff --git a/tests/test_mainline_fusion.py b/tests/test_mainline_fusion.py
+new file mode 100644
+index 0000000..4cfdbf4
+--- /dev/null
++++ b/tests/test_mainline_fusion.py
+@@ -0,0 +1,393 @@
++import math
++import random
++from dataclasses import replace
++
++import pytest
++import torch
++
++from dynfed.independent_release import IndependentReleaseAccount
++from dynfed.selection import SelectionConfig, enumerate_candidates, _candidate_accuracy_jitter
++from dynfed.fmnist_lenet5_dynamic import _training_base_state, Lenet5Config
++from dynfed.training import MODE_SPECS
++
++
++class DummyModel(torch.nn.Module):
++    def __init__(self, value: float):
++        super().__init__()
++        self.w = torch.nn.Parameter(torch.tensor([value], dtype=torch.float32))
++
++
++def _fusion_config():
++    return SelectionConfig(
++        rounds=5,
++        num_clients=2,
++        num_edges=1,
++        trusted_edge_split_execution=True,
++        allow_he=True,
++        update_mechanism_options=("dp", "he3", "dp_he3"),
++        update_protection_goal="released_model_dp",
++        mainline_fusion=True,
++    )
++
++
++def test_mainline_fusion_enumerates_six_modes_without_privacy_choice():
++    config = _fusion_config()
++    candidates = enumerate_candidates(
++        config=config,
++        client_id=0,
++        edge_factor=1.0,
++        compute_factor=1.0,
++        samples=60,
++        remaining_epsilon=8.0,
++        round_idx=0,
++        rng=random.Random(42),
++        policy="ours",
++    )
++    modes = {candidate.mode for candidate in candidates}
++    assert modes == {"LIE", "LIIE", "LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"}
++    assert all(candidate.global_release_required for candidate in candidates)
++    assert len(candidates) == 6
++    assert all(candidate.update_dp_events == 0 for candidate in candidates)
++    assert all(candidate.feature_dp_events == 0 for candidate in candidates)
++
++
++def test_release_account_state_round_trip_preserves_next_round_and_epsilon():
++    account = IndependentReleaseAccount([3, 7], 0.1, 8.0, 1e-5, 5)
++    first_epsilon = account.reserve(0, [0, 1])
++    state = account.state_dict()
++
++    restored = IndependentReleaseAccount([3, 7], 0.1, 8.0, 1e-5, 5)
++    restored.load_state_dict(state)
++
++    assert restored.next_round == 1
++    assert restored.ledger.current_epsilon() == pytest.approx(first_epsilon)
++    assert restored.reserve(1, [0, 1]) > first_epsilon
++
++
++def test_fusion_training_base_ignores_private_returned_state():
++    global_end = DummyModel(1.0)
++    global_edge = DummyModel(2.0)
++    private_state = {
++        "end": {"w": torch.tensor([9.0])},
++        "edge": {"w": torch.tensor([8.0])},
++    }
++    candidate = next(
++        c for c in enumerate_candidates(
++            config=_fusion_config(),
++            client_id=0,
++            edge_factor=1.0,
++            compute_factor=1.0,
++            samples=60,
++            remaining_epsilon=8.0,
++            round_idx=0,
++            rng=random.Random(42),
++            policy="ours",
++        )
++        if c.mode == "LIEIIIC"
++    )
++
++    base = _training_base_state(
++        client_id=0,
++        candidate=candidate,
++        client_model_states={0: private_state},
++        global_end=global_end,
++        global_edge=global_edge,
++        device=torch.device("cpu"),
++        training_stage=1,
++        mainline_fusion=True,
++    )
++
++    assert base["end"]["w"].item() == pytest.approx(1.0)
++    assert base["edge"]["w"].item() == pytest.approx(2.0)
++
++
++def test_fusion_config_requires_full_participation_and_real_he():
++    from dynfed.fmnist_lenet5_dynamic import _validate_mainline_fusion
++
++    selection = _fusion_config()
++    training = Lenet5Config(he_execution="real", require_real_he=True)
++    _validate_mainline_fusion(selection, training)
++
++    with pytest.raises(ValueError, match="aggregation_fraction"):
++        _validate_mainline_fusion(
++            SelectionConfig(
++                mainline_fusion=True,
++                trusted_edge_split_execution=True,
++                update_protection_goal="released_model_dp",
++                aggregation_fraction=0.5,
++            ),
++            training,
++        )
++    with pytest.raises(ValueError, match="real HE"):
++        _validate_mainline_fusion(selection, Lenet5Config(he_execution="profiled"))
++
++
++def test_v30_paper_config_enables_fusion_contract():
++    import json
++    from experiments.run_paper_config import ROOT, build_command, validate_config
++
++    config = json.loads((ROOT / "configs/paper_v30_cifar10_resnet18.json").read_text())
++    validate_config(config)
++    command = build_command(config, seed=42, policies=["ours"], rounds=2)
++    assert "--mainline-fusion" in command
++    assert command[command.index("--update-protection-goal") + 1] == "released_model_dp"
++    assert "--require-real-he" in command
++
++
++def test_v30_formal_policy_set_contains_no_privacy_bypass_control():
++    import json
++    from experiments.run_paper_config import ROOT, validate_config
++
++    for filename in (
++        "paper_v30_cifar10_resnet18.json",
++        "paper_v30_fmnist_lenet5.json",
++    ):
++        config = json.loads((ROOT / "configs" / filename).read_text())
++        validate_config(config)
++        assert "no_protection" not in config["policies"]
++        assert "fixed_he" not in config["policies"]
++        assert "fixed_dp" not in config["policies"]
++
++
++def test_fusion_omega_uses_common_aggregate_release_cost():
++    from dynfed.selection import _fusion_aggregate_noise_cost
++
++    config = _fusion_config()
++    candidates = enumerate_candidates(
++        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
++        samples=60, remaining_epsilon=8.0, round_idx=0,
++        rng=random.Random(42), policy="ours",
++    )
++    profile = {0: next(c for c in candidates if c.mode == "LIIC"),
++               1: next(c for c in candidates if c.mode == "LIEIIC")}
++    cost = _fusion_aggregate_noise_cost(
++        config, profile, {0: 0, 1: 0}, (0, 1), {0: 3.0, 1: 7.0}
++    )
++    assert cost > 0.0
++    assert _fusion_aggregate_noise_cost(
++        config, profile, {0: 0, 1: 0}, (), {0: 3.0, 1: 7.0}
++    ) == 0.0
++
++
++def test_fusion_privacy_audit_reports_one_global_release_account():
++    from dynfed.privacy import privacy_execution_audit
++
++    audit = privacy_execution_audit([
++        {
++            "mainline_fusion": 1,
++            "num_global_update_clients": 2,
++            "uniform_update_dp": True,
++            "global_release_count": 1,
++            "global_release_epsilon": 1.25,
++            "he_execution_status": "real",
++        }
++    ])
++
++    assert audit["accountant_scope"] == "one_global_release_per_round_fixed_public_roster"
++    assert audit["global_release_count"] == 1
++    assert audit["global_release_epsilon"] == pytest.approx(1.25)
++    assert audit["end_to_end_dp_status"] == "not_established"
++
++
++def test_fusion_release_audit_reports_fixed_dp_plus_he_for_every_mode():
++    from dynfed.fmnist_lenet5_dynamic import _reported_release_mechanism
++
++    candidates = enumerate_candidates(
++        config=_fusion_config(),
++        client_id=0,
++        edge_factor=1.0,
++        compute_factor=1.0,
++        samples=60,
++        remaining_epsilon=8.0,
++        round_idx=0,
++        rng=random.Random(42),
++        policy="ours",
++    )
++    assert {
++        _reported_release_mechanism(candidate, mainline_fusion=True)
++        for candidate in candidates
++    } == {"dp_he3"}
++
++
++def test_fusion_config_requires_rdp_auto_accounting():
++    from dynfed.fmnist_lenet5_dynamic import _validate_mainline_fusion
++
++    selection = replace(_fusion_config(), dp_accounting_mode="rdp_manual")
++    with pytest.raises(ValueError, match="rdp_auto"):
++        _validate_mainline_fusion(
++            selection,
++            Lenet5Config(he_execution="real", require_real_he=True),
++        )
++
++
++def test_fusion_config_requires_full_update_he_encryption():
++    from dynfed.fmnist_lenet5_dynamic import _validate_mainline_fusion
++
++    with pytest.raises(ValueError, match="he_aggregation_size=0"):
++        _validate_mainline_fusion(
++            _fusion_config(),
++            Lenet5Config(
++                he_execution="real",
++                require_real_he=True,
++                he_aggregation_size=128,
++            ),
++        )
++
++
++def test_v30_config_rejects_nonautomatic_release_accounting():
++    import copy
++    import json
++    from experiments.run_paper_config import ROOT, validate_config
++
++    config = json.loads((ROOT / "configs/paper_v30_cifar10_resnet18.json").read_text())
++    config = copy.deepcopy(config)
++    config["privacy"]["accounting_mode"] = "rdp_manual"
++    with pytest.raises(ValueError, match="rdp_auto"):
++        validate_config(config)
++
++
++def test_v30_config_rejects_partial_he_aggregation():
++    import copy
++    import json
++    from experiments.run_paper_config import ROOT, validate_config
++
++    config = json.loads((ROOT / "configs/paper_v30_cifar10_resnet18.json").read_text())
++    config = copy.deepcopy(config)
++    config["he"]["aggregation_size"] = 128
++    with pytest.raises(ValueError, match="aggregation_size=0"):
++        validate_config(config)
++
++
++def test_fusion_reporting_scope_describes_global_release_not_per_link_policy():
++    from dynfed.fmnist_lenet5_dynamic import _privacy_reporting_scope
++
++    scope = _privacy_reporting_scope(True)
++    assert scope == {
++        "dp_accountant_scope": "one_global_release_per_round_fixed_public_roster",
++        "privacy_policy_scope": "dynamic_mode_fixed_global_release",
++        "protected_object": "global_aggregate_release",
++        "privacy_mechanism_scope": "fixed_client_dp_plus_he_cloud_confidentiality",
++        "privacy_guarantee": "fixed_global_release_dp_plus_he",
++    }
++
++
++def test_legacy_reporting_scope_remains_per_link():
++    from dynfed.fmnist_lenet5_dynamic import _privacy_reporting_scope
++
++    scope = _privacy_reporting_scope(False)
++    assert scope["dp_accountant_scope"] == "recorded_dp_events_only"
++    assert scope["privacy_policy_scope"] == "per_link"
++    assert scope["protected_object"] == "cross_domain_model_update"
++    assert scope["privacy_mechanism_scope"] == "local_packet_or_secure_aggregate"
++    assert scope["privacy_guarantee"] == "legacy_per_link_mechanisms"
++
++
++def test_global_release_summary_uses_release_account_state():
++    from dynfed.fmnist_lenet5_dynamic import _global_release_summary
++
++    account = IndependentReleaseAccount([3, 7], 0.1, 8.0, 1e-5, 5)
++    epsilon = account.reserve(0, [0, 1])
++    summary = _global_release_summary(account)
++
++    assert summary["global_release_count"] == 1
++    assert summary["global_release_epsilon"] == pytest.approx(epsilon)
++    assert summary["global_release_target_epsilon"] == pytest.approx(8.0)
++    assert summary["global_release_sensitivity"] == pytest.approx(account.sensitivity)
++    assert summary["global_release_noise_multiplier"] == pytest.approx(account.multiplier)
++    assert summary["global_release_noise_std"] == pytest.approx(account.noise_std)
++
++
++def test_fusion_privacy_parameters_calibrate_exactly_one_release_per_round():
++    from dynfed.privacy import calibrate_gaussian_noise
++    from dynfed.selection import resolved_privacy_parameters
++
++    config = _fusion_config()
++    params = resolved_privacy_parameters(config)
++    assert params["max_update_events_per_round"] == 1
++    assert params["update_horizon_events"] == config.rounds
++    assert params["update_noise_multiplier"] == pytest.approx(
++        calibrate_gaussian_noise(
++            float(params["update_budget"]),
++            float(params["delta"]),
++            config.rounds,
++        )
++    )
++
++
++def test_fusion_candidate_utility_does_not_charge_fixed_he_as_mode_penalty():
++    config = _fusion_config()
++    candidates = enumerate_candidates(
++        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
++        samples=60, remaining_epsilon=8.0, round_idx=0,
++        rng=random.Random(42), policy="ours",
++    )
++    progress = 1.0 / config.rounds
++    for candidate in candidates:
++        expected = 0.2 + (
++            0.83 - MODE_SPECS[candidate.mode].mode_penalty - 0.2
++        ) * (1.0 - math.exp(-3.0 * progress))
++        expected += _candidate_accuracy_jitter(
++            config, 0, 0, candidate.mode, {}
++        )
++        assert candidate.accuracy == pytest.approx(max(0.0, min(0.95, expected)))
++
++
++def test_cli_exposes_mainline_fusion_flag(monkeypatch):
++    from experiments import run_fmnist_lenet5
++
++    monkeypatch.setattr(
++        "sys.argv",
++        ["run_fmnist_lenet5.py", "--mainline-fusion"],
++    )
++    args = run_fmnist_lenet5.parse_args()
++    assert args.mainline_fusion is True
++
++
++def test_runner_fusion_defaults_only_include_result_dp_compatible_policies(monkeypatch):
++    import sys
++    from experiments.run_fmnist_lenet5 import parse_args, _resolved_policies
++
++    monkeypatch.setattr(sys, "argv", ["run_fmnist_lenet5.py", "--mainline-fusion"])
++    args = parse_args()
++    policies = _resolved_policies(args)
++    assert "ours" in policies
++    assert "no_protection" not in policies
++    assert "fixed_he" not in policies
++    assert "fixed_dp" not in policies
++    assert "fixed_fedavg" in policies
++    assert "fixed_splitfed" in policies
++    assert "fixed_hfl" in policies
++    assert "nsga2" in policies
++
++
++def test_v30_fusion_config_rejects_control_policies_inside_mandatory_release_run():
++    import copy
++    import json
++    from experiments.run_paper_config import ROOT, validate_config
++
++    config = json.loads((ROOT / "configs/paper_v30_cifar10_resnet18.json").read_text())
++    config = copy.deepcopy(config)
++    config["policies"] = ["ours", "no_protection"]
++    with pytest.raises(ValueError, match="incompatible.*mainline fusion"):
++        validate_config(config)
++
++
++def test_fusion_rejects_legacy_dp_vs_he_stability_switching():
++    from dynfed.fmnist_lenet5_dynamic import _validate_mainline_fusion
++
++    selection = replace(_fusion_config(), enforce_cloud_dp_stability=True)
++    with pytest.raises(ValueError, match="legacy cloud-DP stability"):
++        _validate_mainline_fusion(
++            selection,
++            Lenet5Config(he_execution="real", require_real_he=True),
++        )
++
++
++def test_v30_config_disables_legacy_cloud_dp_stability_switching():
++    import json
++    from experiments.run_paper_config import ROOT
++
++    for filename in ("paper_v30_cifar10_resnet18.json", "paper_v30_fmnist_lenet5.json"):
++        config = json.loads((ROOT / "configs" / filename).read_text())
++        assert config["system"]["mainline_fusion"] is True
++        assert config["privacy"]["enforce_cloud_dp_stability"] is False
+diff --git a/tex/paper/main.tex b/tex/paper/main.tex
+index de023a4..77e2e48 100644
+--- a/tex/paper/main.tex
++++ b/tex/paper/main.tex
+@@ -98,9 +98,10 @@
+ Hierarchical federated learning reduces direct cloud communication, but fixed
+ workflows cannot adapt computation, aggregation, and privacy protection to
+ heterogeneous devices and changing system conditions. We propose a unified
+-cloud-edge-end collaboration reconfiguration framework that jointly determines
+-execution placement, aggregation topology, and privacy mechanisms under dynamic
+-resource and privacy constraints. Link blocks and link flows provide a unified
++cloud-edge-end collaboration reconfiguration framework that dynamically determines
++execution placement and aggregation topology under heterogeneous resource conditions,
++while every formal global release follows a fixed client-level DP and HE protection
++contract. Link blocks and link flows provide a unified
+ collaboration space in which heterogeneous federated learning workflows become
+ comparable decisions. A joint model evaluates latency, communication, privacy
+ consumption, encrypted aggregation overhead, and estimated convergence error
+@@ -160,14 +161,14 @@ Figure~\ref{fig:balance} illustrates this coupled design objective.
+ 
+ Motivated by this challenge, this paper studies dynamic reconfiguration of
+ cloud-edge-end federated learning workflows under resource and privacy
+-constraints. Each configuration jointly specifies model execution, computation
+-placement, aggregation flow, and privacy mechanisms across the end, edge, and
+-cloud layers.
++constraints. Each configuration specifies model execution, computation
++placement, and aggregation flow across the end, edge, and cloud layers, while the
++privacy release contract is fixed independently of the selected collaboration mode.
+ The main contributions are summarized as follows.
+ \begin{itemize}
+-    \item We propose a dynamic cloud-edge-end collaboration reconfiguration framework that adapts execution placement, aggregation topology, and privacy mechanisms to resource availability and privacy requirements.
+-    \item We introduce a unified collaboration space representation based on link blocks and link flows. It describes model execution, transmitted objects, aggregation locations, return paths, and privacy mechanisms in a common decision space.
+-    \item We establish a joint model for latency, communication, privacy consumption, encrypted aggregation overhead, and estimated convergence error cost. Privacy mechanisms are treated as collaboration dimensions instead of external additions to a fixed workflow.
++    \item We propose a dynamic cloud-edge-end collaboration reconfiguration framework that adapts execution placement and aggregation topology while preserving one mandatory client-level DP global-release contract.
++    \item We introduce a unified collaboration space representation based on link blocks and link flows. It describes model execution, transmitted objects, aggregation locations, and return paths, while a fixed HE confidentiality layer protects cloud-facing aggregate traffic.
++    \item We establish a joint model for latency, communication, encrypted aggregation overhead, and estimated convergence error cost under the common DP release mechanism. HE and DP are modeled with distinct roles rather than as interchangeable privacy choices.
+     \item We formulate collaboration reconfiguration as a constrained multiobjective problem. A bounded Pareto search constructs feasible global decisions, and an ideal point Tchebycheff criterion selects the executed configuration.
+ \end{itemize}
+ The framework is evaluated through 100 round CIFAR 10 training with ResNet 18
+@@ -248,8 +249,11 @@ Weaker devices use split positions closer to the input layer and offload more co
+ Each end device and its associated edge node form a trusted execution domain.
+ Intermediate representations, logits, backward gradients, and model updates exchanged inside this domain are not exposed to the cloud adversary.
+ The cloud is honest but curious, and update transmissions from an end device or edge node to the cloud cross the trust boundary.
+-These cross domain updates are protected by DP or HE.
+-Raw samples remain at the end device throughout training.
++Cloud-facing aggregate updates are protected by HE during transport and cloud
++aggregation. Independently of the selected executable mode, every formal global
++model release is produced by a client-level DP mechanism before the cloud obtains
++any decryptable aggregate. HE therefore provides confidentiality and does not replace
++DP. Raw samples remain at the end device throughout training.
+ 
+ \begin{definition}[Collaborative Link Block]
+ Given a collaborative mode \(h_i\), a collaborative link block is the local
+@@ -352,40 +356,41 @@ For example, for one complete LIEIIC link flow,
+ \end{aligned}
+ \end{equation}
+ The nonzero entries indicate transmission directions only.
+-The corresponding candidate mechanism matrix is
++The corresponding protection-role matrix is
+ \begin{equation}
+ \mathcal{O}_{b}^{h_i}(u,v)=
+ \begin{cases}
+ \{\mathrm{trusted}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ (u,v)\in\{(L,E),(E,L)\},\\
+-\{\mathrm{DP},\mathrm{HE}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ b=\mathrm{upd},\ v=C,\\
++\{\mathrm{HE}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ b=\mathrm{upd},\ v=C,\\
+ \{\mathrm{none}\}, & \mathbf{I}_{b}^{h_i}(u,v)=1,\ \text{model return},\\
+ \emptyset, & \mathbf{I}_{b}^{h_i}(u,v)=0.
+ \end{cases}
+ \end{equation}
+-Thus, \(\mathbf{I}_{b}^{h_i}\) says whether a transmission exists.
+-\(\mathcal{O}_{b}^{h_i}\) gives the candidate privacy mechanisms for that transmission.
+-For LIEIIC, the update mechanism matrix is
++Thus, \(\mathbf{I}_{b}^{h_i}\) says whether a transmission exists, whereas
++\(\mathcal{O}_{b}^{h_i}\) gives its fixed trust or transport role. DP is not a
++link-level alternative in this matrix because it is applied once at the global release
++boundary for every executable mode. For LIEIIC, the update protection-role matrix is
+ \begin{equation}
+ \mathcal{O}_{\mathrm{upd}}^{\mathrm{LIEIIC}}=
+ \begin{pmatrix}
+ \emptyset & \emptyset & \emptyset\\
+-\{\mathrm{none}\} & \emptyset & \{\mathrm{DP},\mathrm{HE}\}\\
++\{\mathrm{none}\} & \emptyset & \{\mathrm{HE}\}\\
+ \emptyset & \{\mathrm{none}\} & \emptyset
+ \end{pmatrix}.
+ \end{equation}
+ The entries with \(\{\mathrm{none}\}\) are model return links.
+ \end{definition}
+ 
+-The selected mode determines the transmitted objects, and the indicator matrices record their directions.
+-Privacy mechanisms are then selected for the eligible transmitted objects.
+-Embedding and gradient exchanges remain inside the trusted end and edge domain, while updates sent to the cloud may use DP or HE~\cite{PPHFL}.
+-\(\Pi(h_i)\) denotes the candidate privacy policy set under mode \(h_i\), and each policy \(\pi_i\in\Pi(h_i)\) maps an eligible link to a selected privacy mechanism.
+-For each transmitted link \(\lambda=(u,v,b)\), the selected privacy mechanism \(\pi_i(\lambda)\) is chosen from \(\mathcal{O}_{b}^{h_i}(u,v)\).
+-Model return links are counted for communication latency only and are not assigned DP or HE.
++The selected mode determines the transmitted objects and their directions. Embedding and
++gradient exchanges remain inside the trusted end-edge domain, while the cloud-facing
++aggregate path uses HE. We retain \(\pi_i\) in the latency notation as the unique
++protection map induced by mode \(h_i\); hence \(\Pi(h_i)=\{\pi_i^{\mathrm{fusion}}\}\)
++is a singleton and is not a selector decision variable. Model return links are counted for
++communication latency only and use \(\mathrm{none}\).
+ 
+ \textbf{Collaborative link flows of the seven modes.}
+ The following expressions summarize the block execution layer, aggregation node, and model return path of each mode.
+-Detailed transmitted objects and candidate privacy mechanisms are determined by \(\mathbf{I}_{b}^{h_i}\) and \(\mathcal{O}_{b}^{h_i}\).
++Detailed transmitted objects and the fixed trust/transport roles are determined by \(\mathbf{I}_{b}^{h_i}\) and \(\mathcal{O}_{b}^{h_i}\).
+ \begin{itemize}
+     \item \textbf{LIE} \(\mathcal{F}(\mathrm{LIE}) = B_E \times L_B \rightarrow A_e \rightarrow \mathrm{end}\).
+     \item \textbf{LIIE} \(\mathcal{F}(\mathrm{LIIE}) = B_L \times L_B \rightarrow A_e \rightarrow \mathrm{end}\).
+@@ -395,6 +400,11 @@ Detailed transmitted objects and candidate privacy mechanisms are determined by
+     \item \textbf{LIEIIIC} \(\mathcal{F}(\mathrm{LIEIIIC}) = [B_E \times L_B \rightarrow A_e \rightarrow \mathrm{end}] \times E_B \rightarrow A_c \rightarrow A_e \rightarrow \mathrm{end}\).
+     \item \textbf{LIIEIIIC} \(\mathcal{F}(\mathrm{LIIEIIIC}) = [B_L \times L_B \rightarrow A_e \rightarrow \mathrm{end}] \times E_B \rightarrow A_c \rightarrow A_e \rightarrow \mathrm{end}\).
+ \end{itemize}
++In the fused protocol, the repeated trusted execution stages represented by \(E_B\)
++do not feed an unreleased aggregate from one client into another client's same-round
++optimization. Each formal client contribution is computed from the previously released
++global state, that client's private data, and the public execution schedule. This
++independence condition is required by the client-replacement release analysis below.
+ 
+ \begin{table*}[t]
+ \centering
+@@ -406,13 +416,13 @@ Detailed transmitted objects and candidate privacy mechanisms are determined by
+ \hline
+ \textbf{Mode} & \textbf{Execution structure} & \textbf{Aggregation structure} & \textbf{Protected upload} & \textbf{Available mechanism} \\
+ \hline
+-LIE & End and edge split & Edge & Internal embedding and gradient & Trusted execution \\
++LIE & End and edge split & Edge & Internal embedding and gradient & Trusted execution + global DP/HE release \\
+ LIC & End and cloud split & Cloud & Embedding and gradient & Excluded in this threat model \\
+-LIIE & Local training & Edge & Internal client update & Trusted execution \\
+-LIIC & Local training & Cloud & Client update & Update DP or HE \\
+-LIEIIC & End and edge split & Cloud through edge & Edge update & Update DP or HE \\
+-LIEIIIC & Repeated end and edge split & Edge then cloud & Edge update & Update DP or HE \\
+-LIIEIIIC & Repeated local and edge training & Edge then cloud & Edge update & Update DP or HE \\
++LIIE & Local training & Edge & Internal client update & Trusted execution + global DP/HE release \\
++LIIC & Local training & Cloud & Client contribution & Global DP + HE transport \\
++LIEIIC & End and edge split & Cloud through edge & Client contribution & Global DP + HE transport \\
++LIEIIIC & Repeated trusted execution stages & Edge then cloud & Client contribution & Global DP + HE transport \\
++LIIEIIIC & Repeated trusted execution stages & Edge then cloud & Client contribution & Global DP + HE transport \\
+ \hline
+ \end{tabular}
+ \end{table*}
+@@ -435,9 +445,9 @@ Modes LIEIIIC and LIIEIIIC add the \(E_B\) edge aggregation loop before cloud ag
+ 
+ \subsection{Joint Cost and Utility Modeling}
+ \label{sec:cost_utility_model}
+-After the link topology is determined, each client selects a collaborative mode \(h_i\) and a privacy policy \(\pi_i\).
+-The selected mode must satisfy the computation and memory limits of the end device, while the joint decision profile determines the system level latency and estimated convergence error cost.
+-The modeling below is organized in five parts, including end side resource feasibility, path level latency, buffered aggregation cost, DP budget consumption, and convergence error cost estimation.
++After the link topology is determined, each client selects only a collaborative mode \(h_i\). The protection map \(\pi_i=\pi_i^{\mathrm{fusion}}(h_i)\) is induced by the selected mode and the fixed release contract rather than optimized independently.
++The selected mode must satisfy the computation and memory limits of the end device, while the joint mode profile determines the system level latency and estimated convergence error cost.
++The modeling below is organized in five parts, including end side resource feasibility, path level latency, buffered aggregation cost, global release privacy feasibility, and convergence error cost estimation.
+ 
+ \subsubsection{End Side Resource Feasibility}
+ Let \(n_i\) be the number of local samples processed by device \(i\) in one round, and let \(L_B\) be the number of local link block iterations.
+@@ -481,8 +491,8 @@ We first define the general link and path latency terms. A representative comple
+ Let \(R^t=(R_{u,v}^t)_{u,v\in\mathcal{V}}\) be the cloud-edge-end link rate matrix in round \(t\).
+ The communication model is link specific. For an end edge pair \((i,j)\), the rate \(R_{i,j}^{t}\) and the base latency \(T_{i,j}^{0}\) may differ from those of other device edge pairs. These parameters capture heterogeneous physical distance, wireless channel quality, interference, and congestion. Therefore, two end devices connected to the same edge server can have different communication latencies, and the same device connected to different edge servers can also experience different communication latencies~\cite{ZHANG2019111,ZHU2024303}.
+ For an interaction link \(\lambda=(u,v,b)\), its raw transmission size is \(S_{\lambda}^t(h_i)\).
+-Let \(\psi_{\lambda}(h_i,\pi_i)\) denote the actual mechanism applied on link \(\lambda\) under mode \(h_i\) and privacy policy \(\pi_i\).
+-It selects the policy specified mechanism for privacy eligible links and uses \(\mathrm{none}\) for links that only transmit returned models.
++Let \(\psi_{\lambda}(h_i,\pi_i)\) denote the actual trust/transport mechanism on link \(\lambda\) under mode \(h_i\), where \(\pi_i=\pi_i^{\mathrm{fusion}}(h_i)\) is the unique induced protection map rather than an independent policy choice.
++It returns the trust/transport mechanism fixed by the induced protection map and uses \(\mathrm{none}\) for links that only transmit returned models.
+ \begin{equation}
+ \psi_{\lambda}(h_i,\pi_i)=
+ \begin{cases}
+@@ -495,7 +505,7 @@ Thus, a model return link uses \(\mathrm{none}\) even when its object type is
+ \(\widetilde{S}_{\lambda}^t(h_i,\pi_i)=
+ \alpha(\psi_{\lambda}(h_i,\pi_i))S_{\lambda}^t(h_i)\), where
+ \(\alpha(\cdot)\) is the communication inflation factor induced by the
+-selected privacy mechanism.
++fixed induced protection mechanism.
+ For \(\mathrm{none}\), \(\alpha(\mathrm{none})=1\).
+ For DP, \(\alpha(\mathrm{DP})\approx 1\). For HE, ciphertext encoding and packing increase the transmitted payload, so \(\alpha(\mathrm{HE})>1\)~\cite{PPHFL}.
+ In practice, \(\alpha(\mathrm{HE})\) can be obtained by offline profiling as the ratio between the serialized ciphertext payload size and the original plaintext tensor size.
+@@ -588,15 +598,15 @@ is the aggregation processing coefficient of edge aggregator \(j\). For the
+ update upload link \(\lambda=(i,j,\mathrm{upd})\),
+ \(\widetilde{S}_{i,j}^{\mathrm{upd},t}=\widetilde{S}_{\lambda}^t(h_i,\pi_i)\),
+ i.e., the effective payload size of client \(i\)'s update received by edge
+-aggregator \(j\) after the selected privacy mechanism is applied. The
++aggregator \(j\) after the fixed protection map is applied. The
+ coefficient \(\beta_j\) can be obtained by offline profiling with varying
+ update counts and payload sizes, and \(T_j^{\mathrm{fix}}\) denotes the fixed
+-aggregation overhead. Privacy mechanism processing is accounted for in the
++aggregation overhead. Protection processing, including fixed HE overhead on cloud-facing aggregate paths, is accounted for in the
+ link endpoint term \(T_{\lambda}^{\mathrm{priv},t}\).
+ 
+ The same construction is applied to every aggregation group induced by a
+ complete candidate profile
+-\(\mathbf x=\{(h_i,\pi_i)\}_{i\in\mathcal N}\). Clients are grouped by their
++\(\mathbf x=\mathbf h_{\mathcal N}\). The induced protection map is fixed once each \(h_i\) is chosen. Clients are grouped by their
+ selected aggregation endpoint and compatible link flow. Each edge buffer
+ admits its earliest required arrivals. An admitted edge aggregate that reaches
+ the cloud then becomes a cloud arrival, and the cloud buffer applies the same
+@@ -652,186 +662,128 @@ T_i^{\mathrm{lupd}}(h_i,\pi_i)
+ The expanded form is shown only for the representative path in \figref{fig:time}. For any selected mode \(h_i\), \(T_i^t(h_i,\pi_i)\) accumulates the terms on the complete link flow induced by that mode, including the model return required to prepare the device for the next round.
+ 
+ \subsubsection{Privacy Budget Accounting}
+-The DP channel protects a model update before it crosses the trusted execution
+-domain. Two client datasets are adjacent when the complete contribution of one
+-client is replaced. A client update or an edge update computed from a client
+-group is clipped to norm \(C_u\). Because every clipped output lies in the
+-radius \(C_u\) ball, replacement sensitivity is bounded by
+-\(\Delta_u=2C_u\). Gaussian noise with standard deviation
+-\(\sigma_u\Delta_u\) is added before release. Let
+-\((\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\) denote the fixed
+-privacy target for client \(i\).
+-
+-For Gaussian DP, we use RDP accounting to accumulate repeated privacy
+-releases~\cite{mironov2017rdp}. Let
+-\(R_{i,\mathrm{upd}}^{t}(\alpha)\) be the accumulated RDP value of client
+-\(i\) at order \(\alpha>1\) before round \(t\). If candidate
+-\((h_i,\pi_i)\) enables DP on a cross domain update link, the new RDP increment is
++The formal privacy unit is one client contribution. In round $t$, every
++participating client starts from the previously released global state and computes an
++update $u_i^t$ without same-round private feedback from other clients. The contribution
++is clipped as
+ \begin{equation}
+-\Delta R_{i,\mathrm{upd}}^{t}(\alpha;h_i,\pi_i)
+-=\sum_{\lambda\in\mathcal E_{\mathrm{upd}}^{h_i}}
+-N_{\lambda}(h_i)\mathbb I\!\left(\pi_i(\lambda)=\mathrm{DP}\right)
+-\frac{\alpha}{2\sigma_u^2}.
++\bar u_i^t=u_i^t\min\left(1,\frac{C_u}{\|u_i^t\|_2}\right).
++\label{eq:fused_client_clip}
++\end{equation}
++Let $q_i^t$ be the public normalized aggregation weight actually used for the formal
++release, with $\sum_i q_i^t=1$. Under client replacement adjacency, the sensitivity of
++the weighted aggregate is
++\begin{equation}
++S_t=2C_u\max_i q_i^t.
++\label{eq:fused_sensitivity}
++\end{equation}
++The trusted edge domains generate distributed Gaussian noise shares whose weighted sum
++has distribution $\mathcal N(0,(\sigma_u S_t)^2I_d)$. The shares are added before HE
++encryption. The honest-but-curious cloud therefore receives ciphertexts representing
++already-noisy contributions, performs ciphertext aggregation only, and a designated
++trusted edge custodian decrypts the already-noisy aggregate. HE protects confidentiality
++on the cloud path; it does not replace the DP mechanism applied to the released model.
++
++We use RDP accounting for repeated Gaussian releases~\cite{mironov2017rdp}. Because the
++noise standard deviation is calibrated as $\sigma_u S_t$, one formal global release
++adds
++\begin{equation}
++\Delta R_{i,\mathrm{upd}}^t(\alpha)=\frac{\alpha}{2\sigma_u^2}
+ \label{eq:privacy_budget}
+ \end{equation}
+-Here, \(\alpha\) is the RDP order, \(\sigma_u\) is the update noise
+-multiplier, and \(N_{\lambda}(h_i)\) is the execution count of link
+-\(\lambda\). Trusted internal links and HE protected links do not consume DP
+-budget.
+-
+-Before accepting a candidate, the accumulated RDP after adding
+-\(\Delta R_{i,\mathrm{upd}}^{t}\) is converted to its
+-\((\epsilon,\delta_{\mathrm{upd}})\) value by
++for every client whose contribution is covered by that release. The corresponding
++$(\epsilon,\delta_{\mathrm{upd}})$ value after the tentative release is
+ \begin{equation}
+-\begin{aligned}
+-\epsilon_{i,\mathrm{upd}}^{t,+}(h_i,\pi_i)
+-&=\min_{\alpha>1}\Bigl[
+-R_{i,\mathrm{upd}}^{t}(\alpha)\\
+-&\quad+\Delta R_{i,\mathrm{upd}}^{t}(\alpha;h_i,\pi_i)
++\epsilon_{i,\mathrm{upd}}^{t,+}
++=\min_{\alpha>1}\left[
++R_{i,\mathrm{upd}}^t(\alpha)
+++\frac{\alpha}{2\sigma_u^2}
+ +\frac{\log(1/\delta_{\mathrm{upd}})}{\alpha-1}
+-\Bigr].
+-\end{aligned}
++\right].
+ \label{eq:rdp_to_dp}
+ \end{equation}
+-A candidate satisfies the privacy constraint when
+-\(\epsilon_{i,\mathrm{upd}}^{t,+}\le
+-\bar\epsilon_{i,\mathrm{upd}}\).
+-After the candidate is selected, the corresponding RDP increments are added to
+-the next round state \(R_{i,\mathrm{upd}}^{t+1}(\alpha)\).
+-
+-The accountant records the Gaussian DP releases for each client. A zero
+-accountant value means that no DP event has been recorded. HE protects update
+-contents during encrypted aggregation; it does not establish DP for the
+-decrypted result.
+-An RDP bound applies to a complete update transcript when every release
+-depending on the protected client satisfies the accounted conditional DP
+-bound, with participation and aggregation weights fixed by public information
+-or included in the privacy analysis~\cite{mironov2017rdp}.
+-
+-The total privacy target does not change with the number of training rounds.
+-Let \(K_{\mathrm{upd}}^{\max}(T)\) be the largest possible number of update DP
+-releases over \(T\) rounds. Before training, the noise multiplier \(\sigma_u\) is
+-chosen to satisfy
++A release is permitted only when this value does not exceed the fixed target
++$\bar\epsilon_{i,\mathrm{upd}}$. In the formal experiments the participation roster is
++fixed and all clients participate in each release; data-dependent admission or weighting
++would require a separate privacy analysis.
++
++The total privacy target does not change with the number of training rounds. With one
++formal aggregate release per communication round,
++$K_{\mathrm{upd}}^{\max}(T)=T$, and the noise multiplier is selected before training to
++satisfy
+ \begin{equation}
+ \min_{\alpha>1}\left[
+-\frac{K_{\mathrm{upd}}^{\max}(T)\alpha}{2\sigma_u^2}
++\frac{T\alpha}{2\sigma_u^2}
+ +\frac{\log(1/\delta_{\mathrm{upd}})}{\alpha-1}
+ \right]\le\bar\epsilon_{i,\mathrm{upd}}.
+ \label{eq:noise_calibration}
+ \end{equation}
+-When \(T\) increases, the noise multiplier is recalibrated while the total
+-privacy target remains fixed.
++Increasing the privacy horizon therefore recalibrates $\sigma_u$ while keeping the
++reported total privacy target fixed. The implementation reports this release accountant
++separately from any legacy link-level diagnostic ledger. The current guarantee is for
++the stated aggregate-release mechanism under the fixed public participation assumptions;
++a full end-to-end DP claim for arbitrary adaptive protocol decisions is not established.
+ 
+ \subsubsection{Estimation of Convergence Error Cost}
+-We next estimate the convergence error cost associated with the selected
+-privacy mechanisms.
+-For update level DP, we clip the client update difference before Gaussian perturbation~\cite{pmlr-v162-zhang22b}.
+-The client update vector \(u_i^t=\operatorname{vec}(\theta_i^t-w_s^t)\) is clipped and perturbed.
++We next estimate the convergence error cost under the common privacy release
++mechanism. For every executable mode, the client contribution
++$u_i^t=\operatorname{vec}(\theta_i^t-w^t)$ is first clipped according to
++\equref{eq:fused_client_clip}. Clipping introduces the gradient-unit distortion
+ \begin{equation}
+ \begin{aligned}
+-    u_i^{t,\mathrm{clip}}
+-    &=
+-    \frac{u_i^t}{\max(1,\|u_i^t\|_2/C_u)},
+-    \\
+-    \tilde{u}_i^t&=u_i^{t,\mathrm{clip}}+\xi_i^t,
+-    &\xi_i^t&\sim\mathcal{N}(0,\sigma_u^2\Delta_u^2I_d),
+-    \quad \Delta_u=2C_u.
+-\end{aligned}
+-\label{eq:update_dp_noise}
+-\end{equation}
+-By construction, \(\|u_i^{t,\mathrm{clip}}\|_2\le C_u\).
+-Under client replacement adjacency, two clipped contributions can differ by
+-at most \(2C_u\), which gives \(\Delta_u\).
+-Clipping also introduces a deterministic update distortion, which can create a persistent optimization bias when client update magnitudes are heterogeneous~\cite{pmlr-v162-zhang22b}.
+-To express this distortion in gradient units, we define the local clipping bias estimate as
+-\begin{equation}
+-\begin{aligned}
+-    \mathbf{b}_{\mathrm{clip},i}^{t}
+-    &=
+-    \frac{u_i^{t,\mathrm{clip}}-u_i^t}{\eta_{\mathrm{lr}}L_B},
+-    \\
+-    \mathcal{B}_{\mathrm{clip},i}^{t}
+-    &=\mathbb{E}\!\left[\|\mathbf{b}_{\mathrm{clip},i}^{t}\|_2^2\mid w^t\right]\\
+-    &=
+-    \mathbb{E}\!\left[
+-    \frac{(\|u_i^t\|_2-C_u)_+^2}{\eta_{\mathrm{lr}}^2L_B^2}
+-    \mathrel{\Big|} w^t\right],
++\mathbf b_{\mathrm{clip},i}^t
++&=\frac{\bar u_i^t-u_i^t}{\eta_{\mathrm{lr}}L_B},\\
++\mathcal B_{\mathrm{clip},i}^t
++&=\mathbb E\!\left[\|\mathbf b_{\mathrm{clip},i}^t\|_2^2\mid w^t\right].
+ \end{aligned}
+ \label{eq:update_clipping_bias}
+ \end{equation}
+-where \((a)_+=\max(a,0)\).
+-The conditional mean square term \(\mathcal{B}_{\mathrm{clip},i}^{t}\) is zero when the update norm does not exceed the clipping threshold almost surely and increases with the amount removed by clipping.
+-For normalized aggregation weights \(a_i\), Jensen's inequality gives
+-\(\mathbb{E}[\|\sum_i a_i\mathbf{b}_{\mathrm{clip},i}^{t}\|_2^2\mid w^t]
+-\le\sum_i a_i\mathcal{B}_{\mathrm{clip},i}^{t}\), so the weighted sum of local terms is a separable upper bound on the aggregate clipping bias.
+-Update clipping and Gaussian perturbation affect convergence in different ways.
+-The clipping distortion is generally nonzero in expectation and is therefore
+-treated as a deterministic gradient error. Its conditional mean square
+-\(\mathcal{B}_{\mathrm{clip},i}^{t}\) contributes to the persistent bias term
+-in the PL error bound.
+-
+-In contrast, Gaussian update noise has zero mean and contributes through its
+-variance. Its contribution depends on the aggregation weight used by the
+-actual training process. Let \(A_C^t(\mathbf x)\) contain the clients
+-whose updates are admitted and reach the cloud under profile \(\mathbf x\).
+-For edge \(e\), let \(N_e\) denote its total data size and let
+-\(N_{e,A}^t\) denote the admitted cloud data size. The normalized weight of
+-client \(i\) is
++This term is zero when clipping is inactive and increases with the amount removed from
++client updates. Execution placement alone does not create an additional accuracy
++penalty: two modes that produce the same client contribution distribution share the
++same clipping and privacy-noise terms.
++
++For the formal release, let $q_i^t(\mathbf h)$ denote the normalized public aggregation
++weight of client $i$ under the selected collaboration profile $\mathbf h$. In the main
++experiments all clients participate, and the implementation uses the same normalized
++weights in sensitivity calibration and model aggregation. Define
+ \begin{equation}
+-q_i^t(\mathbf x)=
+-\begin{cases}
+-\displaystyle
+-\frac{N_{e(i)}}{\sum_{e:N_{e,A}^t>0}N_e}
+-\frac{n_i}{N_{e(i),A}^t},
+-& i\in A_C^t(\mathbf x),\\
+-0, & \text{otherwise}.
+-\end{cases}
++q_{\max}^t(\mathbf h)=\max_i q_i^t(\mathbf h),\qquad
++S_t=2C_u q_{\max}^t(\mathbf h).
+ \label{eq:effective_aggregation_weight}
+ \end{equation}
+-These weights are the edge normalized weights used by the cloud aggregation
+-step. They satisfy \(\sum_i q_i^t(\mathbf x)=1\). Independent client noise
+-therefore contributes
++The released aggregate is
+ \begin{equation}
+-\mathbb E\left\|\sum_i q_i^t(\mathbf x)\xi_i^t\right\|_2^2
+-=\sum_i\left(q_i^t(\mathbf x)\right)^2\sigma_u^2\Delta_u^2d.
+-\label{eq:aggregated_update_variance}
++\widetilde u^t=\sum_i q_i^t(\mathbf h)\bar u_i^t+\xi^t,
++\qquad
++\xi^t\sim\mathcal N\!\left(0,\sigma_u^2S_t^2I_d\right).
++\label{eq:update_dp_noise}
+ \end{equation}
+-For LIEIIIC and LIIEIIIC, Update DP may also be applied after edge
+-aggregation. Let \(\mathcal G^t(\mathbf x)\) be the resulting edge update
+-groups and let \(q_g^t=\sum_{i\in g}q_i^t\). The variance of an independent
+-edge update noise is weighted by \((q_g^t)^2\). The complete derivation is
+-provided in Appendix~\ref{app:convergence_derivation}.
+-
+-We assume that the original global objective \(F(w)\) is \(G\)-smooth and satisfies the \(\mu\)-PL condition
+-\(\|\nabla F(w)\|_2^2\ge 2\mu(F(w)-F(w^*))\).
+-Combining local stochastic variance, update clipping bias, and update DP
+-variance gives a one step recursion
++Consequently the aggregate DP-noise contribution is
+ \begin{equation}
+-\mathbb{E}[F(w^{t+1})-F(w^*)]
+-\le
+-(1-\rho_{\mathrm{PL}})\mathbb{E}[F(w^t)-F(w^*)]
+-+\mathcal{R}(h_i,\pi_i).
+-\label{eq:pl_recursion}
++\mathbb E\|\xi^t\|_2^2=d\sigma_u^2S_t^2.
++\label{eq:aggregated_update_variance}
+ \end{equation}
+-Taking the steady state of this recursion motivates the convergence error cost
+-used during selection. Let \(m_{u,i}^t\) be the number of update DP releases
+-generated by the selected link flow. Define the client bias and variance costs as
++The distributed edge noise shares are an implementation of this single aggregate noise
++term; they are not separate privacy releases. Likewise, HE changes communication and
++cryptographic computation cost but does not remove the clipping or DP-noise term.
++
++We assume that the original global objective $F(w)$ is $G$-smooth and satisfies the
++$\mu$-PL condition $\|\nabla F(w)\|_2^2\ge 2\mu(F(w)-F(w^*))$. Combining local
++stochastic variance, clipping distortion, and the common aggregate DP noise motivates
++the selection-time error proxy. A convenient separable client term is
+ \begin{equation}
+ \begin{aligned}
+-B_i^t={}&\frac{3m_{u,i}^t}{2\mu}
+-\mathcal B_{\mathrm{clip},i}^t,\\
+-V_i^t={}&\frac{G\eta_{\mathrm{lr}}L_B}{\mu}\left[
+-\sigma_{\mathrm{local}}^2
+-+m_{u,i}^t\frac{\sigma_u^2\Delta_u^2d}
+-{\eta_{\mathrm{lr}}^2L_B^2}\right].
++B_i^t&=\frac{3}{2\mu}\mathcal B_{\mathrm{clip},i}^t,\\
++V_i^t&=\frac{G\eta_{\mathrm{lr}}L_B}{\mu}\sigma_{\mathrm{local}}^2.
+ \end{aligned}
+ \label{eq:client_error_cost}
+ \end{equation}
+-For an edge update group \(g\), \(B_g^t\) and \(V_g^t\) are defined by the
+-update clipping and noise terms in \equref{eq:client_error_cost} for the DP
+-release applied after edge aggregation. These terms are zero when that release
+-uses HE. These client and edge terms are combined below with the cloud fusion
+-penalty.
++The profile-level proxy adds the common release variance
++$d\sigma_u^2S_t^2$ and the cloud-fusion/system terms defined below. Thus privacy cost is
++not inferred from a mode label or a DP-versus-HE choice; it changes only when a selected
++training variable changes the actual contributions, aggregation weights, clipping
++statistics, or release sensitivity.
+ 
+ \subsection{Global Multi-Objective Collaborative Optimization}
+ \label{sec:global_optimization}
+@@ -841,59 +793,57 @@ Cloud-edge-end FL ultimately trains a system level global model.
+ If each device independently selects the locally fastest and lowest estimated
+ cost mode, cross edge information fusion may be insufficient, especially under
+ non-IID data.
+-Let \(\mathbf{h}_{\mathcal{N}}=[h_1,\dots,h_N]\) and \(\boldsymbol{\pi}_{\mathcal{N}}=[\pi_1,\dots,\pi_N]\) denote the global mode and privacy policy vectors.
++Let \(\mathbf{h}_{\mathcal{N}}=[h_1,\dots,h_N]\) denote the global collaboration-mode vector. The protection map is fixed by the fused release contract and is therefore omitted from the decision vector.
+ 
+ Path level latency \(T_i^t\) describes the time contribution generated by the
+ path selected for device \(i\) at decision epoch \(t\). A complete profile
+-changes the path choices, arrival order, buffer triggers, and model return
+-events. For \(\mathbf x=(\mathbf h_{\mathcal N},\boldsymbol\pi_{\mathcal N})\),
+-the buffer procedure above produces \(A_i^t(\mathbf x)\) for every client and
+-the corresponding system latency \(T_{\mathrm{sys}}^t(\mathbf x)\).
+-Slower updates excluded by their corresponding buffers do not block the
+-current event. Every candidate profile is evaluated with its own admitted
+-sets.
+-
+-The cloud fusion ratio is
++changes path choices, arrival order, aggregation timing, and model-return events. The
++general evaluator retains the buffer notation \(A_i^t(\mathbf x)\), but the formal
++fused configuration sets the aggregation fraction to one, so the release roster is the
++fixed full client set rather than a data-dependent admitted subset. For
++\(\mathbf x=\mathbf h_{\mathcal N}\), the evaluator therefore produces the system
++latency \(T_{\mathrm{sys}}^t(\mathbf x)\) while every client remains in the formal
++release.
++
++For the formal fused mainline, the release roster is fixed and the aggregation
++fraction is one. Therefore every executable mode contributes one client update to the
++same formal global release, even when its internal collaboration flow performs trusted
++edge aggregation. Hence \(A_C^t(\mathbf x)=\mathcal N\) and the diagnostic cloud
++fusion ratio is \(r_C^t(\mathbf x)=1\). We retain
++\(\Psi_C^t=\xi/(1+\varepsilon)\) in the implementation for compatibility with
++the general evaluator, but it is constant and does not change the ordering of fused
++profiles.
++
++The common aggregate-noise contribution expressed in the same optimization scale is
+ \begin{equation}
+-r_C^t(\mathbf x)
+-=
+-\frac{\sum_{i\in A_C^t(\mathbf x)}n_i}{N_{\mathrm{total}}},
+-\quad
+-N_{\mathrm{total}}=\sum_{i=1}^{N}n_i.
++V_{\mathrm{DP}}^t(\mathbf x)=
++\frac{G\eta_{\mathrm{lr}}L_B}{\mu}
++\frac{d\sigma_u^2S_t(\mathbf x)^2}
++{\eta_{\mathrm{lr}}^2L_B^2}.
++\label{eq:aggregate_dp_error_cost}
+ \end{equation}
+-It measures the sample proportion participating in cloud level cross edge
+-fusion. To penalize insufficient cloud fusion, define
+-\(\Psi_C^t(\mathbf x)=
+-\xi/[r_C^t(\mathbf x)+\varepsilon]\), where \(\xi\) controls
+-penalty strength and \(\varepsilon\) avoids division by zero.
+-The system level estimate of convergence error cost is
++The system-level estimate of convergence error cost is
+ \begin{equation}
+ \begin{aligned}
+ \widehat{\Omega}_{\mathrm{sys}}^t(\mathbf x)
+-={}&\sum_{i\in A_C^t(\mathbf x)}
+-\left[q_i^t B_i^t+(q_i^t)^2V_i^t\right]\\
+-&+\sum_{g\in\mathcal G^t(\mathbf x)}
+-\left[q_g^tB_g^t+(q_g^t)^2V_g^t\right]
+-+\Psi_C^t(\mathbf x).
++={}&\sum_{i\in\mathcal N}
++\left[q_i^t B_i^t+(q_i^t)^2V_i^t\right]
+++V_{\mathrm{DP}}^t(\mathbf x)+\Psi_C^t.
+ \end{aligned}
+ \label{eq:global_omega}
+ \end{equation}
+-The future training loss is unavailable during selection, so this quantity
+-estimates its error cost. Equation~\equref{eq:global_omega} uses the same
+-admitted clients and aggregation weights as the training process. When many
+-devices remain in edge only modes, \(r_C^t\) decreases and the cloud fusion
+-penalty increases.
++The future training loss is unavailable during selection, so this quantity is a
++selection-time proxy. The privacy term is common to modes that produce the same public
++weights and clipping statistics; execution placement alone does not create an artificial
++accuracy difference.
+ 
+ Let
+-\(\mathbf{x}=(\mathbf{h}_{\mathcal N},\boldsymbol{\pi}_{\mathcal N})\)
+-denote a complete system decision. Its global feasible set is
++\(\mathbf{x}=\mathbf{h}_{\mathcal N}\) denote a complete system decision. Its global feasible set is
+ \begin{equation}
+-\begin{aligned}
+-\mathcal X^t=\bigl\{\mathbf{x}\mid{}&h_i\in\mathcal H_i^{\mathrm{res}},\
+-\pi_i\in\Pi(h_i),\\
+-&\epsilon_{i,\mathrm{upd}}^{t,+}(h_i,\pi_i)
+-\le\bar\epsilon_{i,\mathrm{upd}},\ \forall i\in\mathcal N\bigr\}.
+-\end{aligned}
++\mathcal X^t=\left\{\mathbf{x}\mid
++h_i\in\mathcal H_i^{\mathrm{res}},\
++\epsilon_{i,\mathrm{upd}}^{t,+}\le\bar\epsilon_{i,\mathrm{upd}},\
++\forall i\in\mathcal N\right\}.
+ \label{eq:global_feasible_set}
+ \end{equation}
+ The global multi objective problem minimizes system latency and the system
+@@ -964,9 +914,8 @@ estimated convergence error cost objective.
+ \section{Algorithm}
+ \label{sec:algorithm}
+ 
+-Each device first constructs \(\mathcal S_i\) by retaining the pairs
+-\((h_i,\pi_i)\) that satisfy the resource and privacy constraints. A complete global profile selects one
+-pair from every \(\mathcal S_i\) and is evaluated by
++Each device first constructs \(\mathcal S_i\) by retaining the executable modes \(h_i\) that satisfy the resource constraints. The common release accountant is checked once for the prospective round; it is not a per-mode mechanism choice. A complete global profile selects one
++mode from every \(\mathcal S_i\) and is evaluated by
+ \((T_{\mathrm{sys}}^t,\widehat\Omega_{\mathrm{sys}}^t)\).
+ 
+ For a small instance, the exact solver evaluates all
+@@ -1014,92 +963,53 @@ The search is performed only at the strategy update points determined by
+ \(S_P\). At other rounds, the previous profile is reused. The latency caused
+ by changing collaborative modes is included in \(T_i^t\).
+ 
+-The implementation applies one explicit utility stability safeguard before
+-the bounded search. The update Gaussian standard deviation relative to its
+-clipping radius is
+-\begin{equation}
+-q_{\mathrm{upd}}=2\sigma_{\mathrm{upd}}.
+-\label{eq:cloud_dp_stability}
+-\end{equation}
+-The factor two follows from the replacement sensitivity \(\Delta_u=2C_u\).
+-If a cloud reaching DP candidate has
+-\(q_{\mathrm{upd}}>\tau_{\mathrm{DP}}\), it is removed only when the same client has a
+-feasible cloud reaching HE candidate. We use
+-\(\tau_{\mathrm{DP}}=1\). A cloud reaching DP candidate with a per coordinate
+-Gaussian standard deviation larger than the update clipping scale is
+-replaced by an HE alternative when such an alternative is feasible.
+-
+-Because the reported task is global model training, the feasible global set
+-also excludes configurations with too little cross edge information. For every
+-represented edge domain \(j\), define
++The fused mainline does not apply a DP-versus-HE substitution safeguard.
++Result DP is a mandatory release constraint and HE is the fixed confidentiality
++layer for the cloud aggregation path, so neither can be selected as a replacement
++for the other. Before the bounded search, the implementation checks that one
++additional release remains feasible under the fixed RDP horizon. The common
++release-noise term is evaluated from the actual public aggregation weights via
++\equref{eq:fused_sensitivity}; because this protection contract is common to all
++feasible modes, it does not create an artificial mode-specific utility preference.
++Legacy packet-protection experiments may retain mechanism-specific diagnostics,
++but those controls are outside the formal fused candidate set.
++
++Because every executable mode sets the global-release requirement, the final
++protected release contains the complete public roster:
+ \begin{equation}
+-\begin{split}
+-\mathcal H_C=\{&\mathrm{LIIC},\mathrm{LIEIIC},\\
+-&\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
+-\end{split}
+-\end{equation}
+-The executed profile satisfies
+-\begin{equation}
+-\frac{\sum_{i:e(i)=j}n_i\mathbb I(h_i\in\mathcal H_C)}
+-{\sum_{i:e(i)=j}n_i}
+-\ge r_{C,\min}.
++A_C^t(\mathbf x)=\mathcal N,\qquad r_C^t(\mathbf x)=1.
+ \label{eq:edge_cloud_coverage}
+ \end{equation}
+-We use \(r_{C,\min}=0.5\) in the main experiments and expose it as an
+-experimental parameter. Initial profiles are moved into this feasible set by
+-deterministic one device replacements. Every subsequent archive and exploration
+-profile is required to satisfy the same condition. The final Tchebycheff
+-selection is therefore made directly over the constrained feasible set.
+-
+-The coverage lower bound alone does not make the admitted cloud sample mass
+-identical across edge domains. Direct sample count FedAvg would therefore
+-overweight an edge whenever its temporary cloud reaching fraction is larger,
+-which is particularly harmful under edge level non-IID data. We remove this
+-participation rate bias without observing labels. Let
+-\(N_j=\sum_{i:e(i)=j}n_i\) be the full data mass associated with edge \(j\),
+-\(A_{j,C}^{t}(\mathbf x)=\{i\in A^t(\mathbf x)\mid e(i)=j,
+-h_i\in\mathcal H_C\}\), and
+-\(N_{j,C}^{t}(\mathbf x)=\sum_{i\in A_{j,C}^{t}(\mathbf x)}n_i\). The cloud applies
+-edge normalized FedAvg,
++The general implementation retains the edge-coverage checker as a fail-closed assertion,
++but \equref{eq:edge_cloud_coverage} makes it automatically satisfied in the formal fused
++configuration.
++
++With full participation, the edge-normalized aggregation rule reduces to the public
++sample-proportional weight
+ \begin{equation}
+-a_i^t(\mathbf x)=\frac{N_{e(i)}}{N_{e(i),C}^{t}(\mathbf x)}n_i,
+-\qquad
+-\Delta w^t(\mathbf x)=
+-\frac{\sum_j\sum_{i\in A_{j,C}^{t}(\mathbf x)}a_i^t(\mathbf x)\Delta w_i^t}
+-{\sum_j\sum_{i\in A_{j,C}^{t}(\mathbf x)}a_i^t(\mathbf x)}.
++q_i^t=\frac{n_i}{\sum_{k\in\mathcal N}n_k},\qquad
++\Delta w^t=\sum_{i\in\mathcal N}q_i^t\Delta w_i^t.
+ \label{eq:edge_normalized_fedavg}
+ \end{equation}
+-Thus, clients admitted from the same edge retain sample proportional weights,
+-whereas the total weight of a represented edge equals its full data mass
+-\(N_j\), independent of its round specific cloud reaching fraction. For an
+-edge aggregated object, the same expression is applied to its aggregate sample
+-count. For an HE protected update, the public scalar \(a_i^t(\mathbf x)\) is applied
+-before CKKS encryption. The evaluator adds the resulting ciphertexts and any
+-unprotected public terms, while the trusted coordinator decrypts only the
+-final weighted sum. Under \equref{eq:edge_cloud_coverage}, every represented edge has
+-\(N_{j,C}^{t}(\mathbf x)>0\).
++The same public weights are used for clipping-sensitivity calibration in
++\equref{eq:fused_sensitivity}. Each noisy weighted contribution is encrypted before the
++untrusted cloud sums ciphertexts, and only the trusted custodian decrypts the already-noisy
++aggregate.
+ 
+ \begin{breakablealgorithm}
+ \caption{Bounded Pareto Solver for Collaboration Reconfiguration}
+ \label{alg:selection}
+ \small
+ \begin{algorithmic}[1]
+-\REQUIRE Device set \(\mathcal N\), resource feasible modes \(\mathcal H_i^{\mathrm{res}}\), policy sets \(\Pi(h_i)\), update RDP states \(R_{i,\mathrm{upd}}^t(\alpha)\), targets \((\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\), round system state, path latency and buffer models, \(K_{\mathrm P},K_{\mathrm B},I_{\max},S_P\), optional \(\mathbf z^{r,t}\), and \(\mathbf x^{t-1}\)
+-\ENSURE Selected global profile \(\mathbf x^\star=\{(h_i^\star,\pi_i^\star)\}_{i\in\mathcal N}\)
++\REQUIRE Device set \(\mathcal N\), executable resource-feasible modes \(\mathcal H_i^{\mathrm{res}}\subseteq\mathcal H\), fixed global release RDP state \(R_{\mathrm{upd}}^t(\alpha)\), target \((\bar\epsilon_{\mathrm{upd}},\delta_{\mathrm{upd}})\), round system state, path latency and buffer models, \(K_{\mathrm P},K_{\mathrm B},I_{\max},S_P\), optional \(\mathbf z^{r,t}\), and \(\mathbf x^{t-1}\)
++\ENSURE Selected global collaboration profile \(\mathbf x^\star=\mathbf h_{\mathcal N}^\star\)
+ \STATE \textbf{Preparation}
+-\STATE For every \(i\in\mathcal N\), construct the candidate set satisfying the resource and privacy constraints
+-\STATE \(\displaystyle
+-\mathcal S_i=\{(h_i,\pi_i)\mid h_i\in\mathcal H_i^{\mathrm{res}},
+-\pi_i\in\Pi(h_i),
+-\epsilon_{i,\mathrm{upd}}^{t,+}(h_i,\pi_i)
+-\le\bar\epsilon_{i,\mathrm{upd}}\}\).
+-\STATE If client \(i\) has a feasible cloud reaching HE candidate, remove each
+-cloud reaching DP candidate with \(q_{\mathrm{upd}}>\tau_{\mathrm{DP}}\) from
+-\(\mathcal S_i\) according to \equref{eq:cloud_dp_stability}.
++\STATE Check that the fixed release accountant permits one additional global release at the calibrated noise multiplier.
++\STATE For every \(i\in\mathcal N\), construct \(\mathcal S_i=\{h_i\mid h_i\in\mathcal H_i^{\mathrm{res}}\}\).
+ \STATE \(\displaystyle
+ \mathcal X^t=\left\{\mathbf x\in\prod_{i\in\mathcal N}\mathcal S_i
+ \mid \mathbf x\text{ satisfies \equref{eq:edge_cloud_coverage}}\right\},\quad
+-\mathbf x=(\mathbf h_{\mathcal N},\boldsymbol\pi_{\mathcal N})\).
++\mathbf x=\mathbf h_{\mathcal N}.\)
+ \IF{\(t\) is not a strategy update point and \(\mathbf x^{t-1}\in\mathcal X^t\)}
+     \RETURN \(\mathbf x^{t-1}\).
+ \ENDIF
+@@ -1175,16 +1085,16 @@ The main symbols used in the collaboration reconfiguration model and solver are
+ \hline
+ \(\mathcal{N}, N\) & End device set and number of end devices \\
+ \(\mathcal{H}_{\mathrm{base}},\mathcal{H}, \mathcal{H}_i^{\mathrm{res}}\) & Abstract mode set, executable mode set, and resource feasible mode set of client \(i\) \\
+-\(\Pi(h_i), \pi_i\) & Candidate privacy policy set under mode \(h_i\), and the privacy policy selected by client \(i\) \\
+-\(\psi_{\lambda}(h_i,\pi_i)\) & Actual privacy mechanism applied on link \(\lambda\), selected from \(\pi_i\) for privacy eligible links and set to \(\mathrm{none}\) otherwise \\
+-\(s_i=(h_i,\pi_i),\mathcal{S}_i\) & One decision pair of client \(i\), and the feasible candidate set \\
++\(\Pi(h_i), \pi_i\) & Singleton fixed protection-map set induced by mode \(h_i\), and its unique element; not an optimization variable in the fused mainline \\
++\(\psi_{\lambda}(h_i,\pi_i)\) & Fixed trust/transport mechanism induced on link \(\lambda\); DP is applied at the common global release boundary rather than selected per link \\
++\(s_i=h_i,\mathcal{S}_i\) & One collaboration-mode decision of client \(i\), and the feasible mode candidate set \\
+ \(L_B,E_B\) & Number of local link block loops and number of edge aggregation loops before cloud aggregation \\
+ \(Q_{\mathrm{comp},i}, Q_{\mathrm{mem},i}\) & Local computation budget and memory upper bound of client \(i\) \\
+ \(R_{i,\mathrm{upd}}^t(\alpha)\) & Client RDP state for update DP at order \(\alpha\) \\
+ \((\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\) & Fixed total privacy target for the update channel \\
+ \(W_{i,L}^{\mathrm{comp}}, M_i^{\mathrm{mem}}\) & Computation workload and memory requirement of client \(i\) under a selected mode \\
+ \(\chi(h_i),F_i\) & Mode dependent sample computation workload and fixed computing rate of client \(i\) \\
+-\(\epsilon_{i,\mathrm{upd}}^{t,+}\) & Projected update epsilon after one candidate link flow \\
++\(\epsilon_{i,\mathrm{upd}}^{t,+}\) & Projected update epsilon after one formal global aggregate release \\
+ \(T_i, T_{\mathrm{sys}}\) & Path level link flow latency of client \(i\), and system latency of one triggered aggregation event \\
+ \(C_i^{\mathrm{sw},t}, S_P\) & Mode switching overhead in round \(t\), and strategy update period for limiting reconfiguration frequency \\
+ \(K_{\mathrm P},K_{\mathrm B},I_{\max}\) & Pareto archive limit, deterministic exploration queue limit, and maximum search expansions \\
+@@ -1192,7 +1102,7 @@ The main symbols used in the collaboration reconfiguration model and solver are
+ \(A_i^t(\mathbf x),A^t(\mathbf x)\) & Admitted clients in the buffer associated with client \(i\)'s path, and complete admitted client set under profile \(\mathbf x\) \\
+ \(S_{\mathrm{agg}}^t\) & Privacy processed update payload size used in aggregation computation \\
+ \(B_i^t,V_i^t,q_i^t\) & Client bias cost, variance cost, and effective cloud aggregation weight \\
+-\(B_g^t,V_g^t,q_g^t\) & Edge update group bias cost, variance cost, and aggregation weight \\
++\(V_{\mathrm{DP}}^t,S_t\) & Common aggregate DP-noise error term and client-replacement sensitivity of the formal release \\
+ \(\widehat{\Omega}_{\mathrm{sys}}^t\) & System level estimate of convergence error cost \\
+ \(\Psi_C^t, r_C^t\) & Cloud fusion insufficiency penalty and cloud fusion ratio \\
+ \(N_e,N_{e,A}^t\) & Full edge data mass and admitted cloud data mass \\
+@@ -1360,22 +1270,22 @@ test accuracy, and their global update norms differed by
+ \(1.47\times10^{-9}\). These measurements determine the HE communication and
+ computation coefficients used in the main experiments.
+ % The numerical tables and figures below must be regenerated with execution
+-% revision paper_flow_v25_trusted_edge_domain before submission.
++% revision paper_flow_v30_mainline_fusion before submission.
+ \subsection{Compared Methods and Main Results}
+ Ours performs joint Pareto search over the global client profile and selects a
+ compromise between system latency and estimated convergence error cost. Individual Optimal
+-uses the same feasible candidate set but selects the ideal point independently
+-for each device without system coordination. No Protection removes DP and HE
+-and applies the same global Pareto solver to the resulting collaboration space.
+-Random samples from the same admissible candidate set. These four methods share
+-the remaining training and aggregation settings.
++uses the same feasible mode candidate set but selects the ideal point independently
++for each device without system coordination. Random samples from the same admissible
++mode set. These protected methods share the fixed global release contract. No Protection
++is reported only as a separately configured ablation/control run with the release gate
++disabled; it is not an admissible policy inside a formal mainline-fusion run.
+ 
+ Three fixed topology references place the framework beside established FL
+ training structures. Fixed FedAvg uses local training followed by direct cloud
+ aggregation through LIIC~\cite{fedavg}. Fixed HFL uses local training, edge aggregation, and
+ cloud aggregation through LIIEIIIC~\cite{hfl}. Fixed SplitFed uses end and edge split
+ training followed by cloud aggregation through LIEIIC~\cite{SFETEC}. These references use
+-the same global solver, feasible privacy mechanisms, and all remaining settings as Ours. They
++the same fixed global release contract and all remaining settings as Ours. They
+ are common topology implementations in the shared execution engine rather than
+ reproductions of every component in the cited systems.
+ 
+@@ -1388,10 +1298,10 @@ conditions.
+ \tabref{tab:main_comparison} and \figref{fig:accuracy_convergence} present the
+ five random seeds. The primary efficiency value is system time, which combines
+ modeled workflow execution with measured decision time. The privacy column
+-reports the largest client update privacy loss. The figure uses the common measured time
++reports the accounted epsilon of the formal global aggregate release. The figure uses the common measured time
+ system time interval determined by the shortest completed run and shows raw accuracy
+ without temporal smoothing. Numerical values from execution revisions before
+-\texttt{paper\_flow\_v25\_trusted\_edge\_domain} are not retained because they used different
++\texttt{paper\_flow\_v30\_mainline\_fusion} are not retained because they used different
+ privacy, encrypted aggregation, feasible set, and timing semantics.
+ 
+ \begin{table*}[t]
+@@ -1420,10 +1330,10 @@ NSGA II & -- & -- & -- & -- & -- \\
+ 
+ \begin{figure}[t]
+ \centering
+-\IfFileExists{cifar10_resnet18_100r_wall_time_accuracy_v25.png}{
+-\includegraphics[width=\columnwidth]{cifar10_resnet18_100r_wall_time_accuracy_v25.png}
++\IfFileExists{cifar10_resnet18_100r_wall_time_accuracy_v30.png}{
++\includegraphics[width=\columnwidth]{cifar10_resnet18_100r_wall_time_accuracy_v30.png}
+ }{
+-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v25 main experiment figure pending}}
++\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 main experiment figure pending}}
+ }
+ \caption{Raw test accuracy against system time on CIFAR 10 with ResNet 18. All curves use the common interval determined by the shortest completed run. The curves show the mean over five random seeds, the shaded regions show 95\% confidence intervals, and the inset enlarges the final quarter of the common interval.}
+ \label{fig:accuracy_convergence}
+@@ -1434,7 +1344,7 @@ NSGA II & -- & -- & -- & -- & -- \\
+ 
+ The client decision logs expose how the selected workflow changes during
+ training. \figref{fig:reconfiguration_behavior} reports the share of clients in
+-each collaboration mode together with the shares using update DP and HE. The
++each executable collaboration mode together with fixed global release protection coverage. The
+ mode switch curve records the fraction of clients whose selected
+ mode differs from the preceding round. These measurements distinguish dynamic
+ workflow reconfiguration from a fixed topology with changing scalar
+@@ -1442,12 +1352,12 @@ parameters.
+ 
+ \begin{figure}[t]
+ \centering
+-\IfFileExists{cifar10_reconfiguration_trace_v25.png}{
+-\includegraphics[width=\columnwidth]{cifar10_reconfiguration_trace_v25.png}
++\IfFileExists{cifar10_reconfiguration_trace_v30.png}{
++\includegraphics[width=\columnwidth]{cifar10_reconfiguration_trace_v30.png}
+ }{
+-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v25 reconfiguration figure pending}}
++\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 reconfiguration figure pending}}
+ }
+-\caption{Raw collaboration mode shares, privacy mechanism shares, and client mode switch rate over communication rounds. The curves report the mean over five random seeds.}
++\caption{Raw collaboration mode shares, fixed global release protection coverage, and client mode switch rate over communication rounds. The curves report the mean over five random seeds.}
+ \label{fig:reconfiguration_behavior}
+ \end{figure}
+ 
+@@ -1484,10 +1394,10 @@ NSGA II & -- & -- & -- \\
+ 
+ \begin{figure}[t]
+ \centering
+-\IfFileExists{fmnist_lenet5_100r_wall_time_accuracy_v25.png}{
+-\includegraphics[width=\columnwidth]{fmnist_lenet5_100r_wall_time_accuracy_v25.png}
++\IfFileExists{fmnist_lenet5_100r_wall_time_accuracy_v30.png}{
++\includegraphics[width=\columnwidth]{fmnist_lenet5_100r_wall_time_accuracy_v30.png}
+ }{
+-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 second dataset figure pending}}
++\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 second dataset figure pending}}
+ }
+ \caption{Raw Fashion MNIST test accuracy against system time with LeNet 5. The curves report the mean and 95\% confidence interval over five random seeds.}
+ \label{fig:second_dataset}
+@@ -1503,10 +1413,10 @@ each scale.
+ 
+ \begin{figure}[t]
+ \centering
+-\IfFileExists{cifar10_decision_scalability_v25.png}{
+-\includegraphics[width=\columnwidth]{cifar10_decision_scalability_v25.png}
++\IfFileExists{cifar10_decision_scalability_v30.png}{
++\includegraphics[width=\columnwidth]{cifar10_decision_scalability_v30.png}
+ }{
+-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 scale experiment figure pending}}
++\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 scale experiment figure pending}}
+ }
+ \caption{Measured decision time and system time under different client scales.}
+ \label{fig:decision_scale}
+@@ -1582,10 +1492,10 @@ utility while controlling search overhead.
+ 
+ \begin{figure}[t]
+ \centering
+-\IfFileExists{cifar10_strategy_period_v25.png}{
+-\includegraphics[width=\columnwidth]{cifar10_strategy_period_v25.png}
++\IfFileExists{cifar10_strategy_period_v30.png}{
++\includegraphics[width=\columnwidth]{cifar10_strategy_period_v30.png}
+ }{
+-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 strategy period figure pending}}
++\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 strategy period figure pending}}
+ }
+ \caption{Effect of the strategy update period on accuracy, decision time, and system time.}
+ \label{fig:strategy_period}
+@@ -1601,10 +1511,10 @@ privacy loss, final accuracy, and last 10 round accuracy.
+ 
+ \begin{figure}[t]
+ \centering
+-\IfFileExists{cifar10_privacy_budget_v25.png}{
+-\includegraphics[width=\columnwidth]{cifar10_privacy_budget_v25.png}
++\IfFileExists{cifar10_privacy_budget_v30.png}{
++\includegraphics[width=\columnwidth]{cifar10_privacy_budget_v30.png}
+ }{
+-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v25 privacy budget figure pending}}
++\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 privacy budget figure pending}}
+ }
+ \caption{Accuracy and realized privacy loss under different total privacy targets.}
+ \label{fig:privacy_budget}
+@@ -1646,10 +1556,10 @@ Fixed LIIEIIIC & -- & -- & -- & -- & -- & -- \\
+ 
+ \begin{figure}[t]
+ \centering
+-\IfFileExists{cifar10_ablation_wall_time_accuracy_v25.png}{
+-\includegraphics[width=\columnwidth]{cifar10_ablation_wall_time_accuracy_v25.png}
++\IfFileExists{cifar10_ablation_wall_time_accuracy_v30.png}{
++\includegraphics[width=\columnwidth]{cifar10_ablation_wall_time_accuracy_v30.png}
+ }{
+-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v25 ablation figure pending}}
++\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 ablation figure pending}}
+ }
+ \caption{Raw test accuracy against system time for the complete method and three ablation variants. The curves use the common interval determined by the shortest completed run, and the inset enlarges the final quarter of that interval.}
+ \label{fig:ablation}
+@@ -1660,10 +1570,10 @@ Fixed LIIEIIIC & -- & -- & -- & -- & -- & -- \\
+ This paper presented a dynamic cloud-edge-end collaboration reconfiguration
+ framework for federated learning under resource and privacy constraints. The
+ unified collaboration space represents execution placement, aggregation
+-topology, transmitted objects, return paths, and privacy mechanisms as one
+-global decision. The joint model evaluates latency, communication, privacy
+-consumption, encrypted aggregation overhead, and estimated convergence error
+-cost. The constrained multiobjective formulation is solved by bounded Pareto
++topology, transmitted objects, and return paths as the dynamic decision, while a
++fixed client-level DP plus HE contract protects every formal global release. The
++joint model evaluates latency, communication, fixed-protocol privacy noise, encrypted
++aggregation overhead, and estimated convergence error cost. The constrained multiobjective formulation is solved by bounded Pareto
+ search and ideal point Tchebycheff selection.
+ 
+ The current framework uses profiled computation and link rates in its logical
+@@ -1785,7 +1695,7 @@ S_{\mathrm{bias},i}^t
+ \end{equation}
+ Because \(G\alpha^2V_i^t/2\le G\alpha^2V_i^t\), we use the conservative residual
+ \begin{equation}
+-\mathcal R(h_i,\pi_i)
++\mathcal R(h_i)
+ =\frac{3\alpha}{2}S_{\mathrm{bias},i}^t+G\alpha^2V_i^t.
+ \label{eq:app_residual_definition}
+ \end{equation}
+@@ -1796,19 +1706,20 @@ For a fixed conditional residual, iterating the recursion gives
+ \mathbb{E}[F(w^t)-F(w^*)]
+ &\le(1-\rho_{\mathrm{PL}})^t[F(w^0)-F(w^*)]\\
+ &\quad+\frac{1-(1-\rho_{\mathrm{PL}})^t}{\rho_{\mathrm{PL}}}
+-\mathcal R(h_i,\pi_i).
++\mathcal R(h_i).
+ \end{aligned}
+ \label{eq:app_recursion_unrolled}
+ \end{equation}
+ Thus its persistent contribution is estimated by
+-\(\mathcal R(h_i,\pi_i)/\rho_{\mathrm{PL}}\). Substituting
++\(\mathcal R(h_i)/\rho_{\mathrm{PL}}\). Substituting
+ \(\alpha=\eta_{\mathrm{lr}}L_B\), \equref{eq:app_total_variance}, and
+ \equref{eq:app_bias_sum} gives the client terms \(B_i^t\) and \(V_i^t\) in
+ \equref{eq:client_error_cost}. Update terms are multiplied by their numbers of
+-DP releases. The same calculation gives
+-\(B_g^t\) and \(V_g^t\) for a DP release applied after edge aggregation.
+-Weighting the bias terms by \(q_i^t\) or \(q_g^t\), and independent variance
+-terms by their squared weights, gives \equref{eq:global_omega}.
++formal releases. In the fused mainline the Gaussian release is applied once to the
++weighted aggregate with sensitivity from \equref{eq:fused_sensitivity}; there is no
++mode-selectable client-versus-edge DP mechanism. Weighting client clipping-bias terms
++by \(q_i^t\) and adding the common aggregate-noise variance gives
++\equref{eq:global_omega}.
+ 
+ \section{CKKS Implementation and Security Scope}
+ \label{app:he_model}

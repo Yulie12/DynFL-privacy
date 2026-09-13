@@ -1,2 +1,2 @@
-CURRENT_EXECUTION_REVISION = "paper_flow_v29_tex_packet_dp"
+CURRENT_EXECUTION_REVISION = "paper_flow_v30_mainline_fusion_method2"
 CURRENT_UPDATE_PARAMETER_SCOPE = "trainable_parameters_v1"

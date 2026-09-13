@@ -147,6 +147,7 @@ class SelectionConfig:
     omega_update_dimension: float = 61706.0
     embedding_payload_mb: float = 1.6
     update_payload_mb: float = 4.0
+    mainline_fusion: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,7 @@ class Candidate:
     edge_aggregation_payload: float = 0.0
     cloud_aggregation_payload: float = 0.0
     link_metrics: tuple[dict[str, Any], ...] = ()
+    global_release_required: bool = False
 
     @property
     def feasible(self) -> bool:
@@ -208,6 +210,8 @@ def candidate_mechanisms_for_object(candidate: Candidate, obj: str) -> list[str]
             local_block_cycles=1,
             edge_loops=spec.E_edge_loops,
         )
+        if candidate.global_release_required:
+            transmissions = _fusion_link_transmissions(candidate.mode, 1, spec.E_edge_loops)
         object_by_link = {link_id: event_obj for link_id, event_obj, _count, _eligible in transmissions}
         return [
             mechanism
@@ -261,7 +265,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
 
     per_mode_counts = []
     for mode, spec in MODE_SPECS.items():
-        if config.trusted_edge_split_execution and mode == "LIC":
+        if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
             continue
         events = _mode_link_transmissions(
             mode,
@@ -641,7 +645,7 @@ def enumerate_candidates(
     validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
     for mode, spec in MODE_SPECS.items():
-        if config.trusted_edge_split_execution and mode == "LIC":
+        if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
             continue
         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
             continue
@@ -657,6 +661,7 @@ def enumerate_candidates(
             policy_allow_none,
             trusted_edge_split_execution=config.trusted_edge_split_execution,
             update_mechanism_options=config.update_mechanism_options,
+            mainline_fusion=config.mainline_fusion,
         )
         for mechanisms, link_mechanisms in assignments:
             candidates.append(
@@ -719,11 +724,20 @@ def _mode_reaches_cloud(spec: ModeSpec) -> bool:
 
 
 def _candidate_reaches_cloud(candidate: Candidate) -> bool:
+    if candidate.global_release_required:
+        return True
     spec = MODE_SPECS.get(candidate.mode)
     return bool(spec and _mode_reaches_cloud(spec))
 
 
 def validate_update_protection_goal(config: SelectionConfig, policy: str) -> None:
+    if config.mainline_fusion:
+        if not config.trusted_edge_split_execution:
+            raise ValueError("Mainline fusion requires the trusted edge execution domain")
+        if abs(float(config.aggregation_fraction) - 1.0) > 1e-12:
+            raise ValueError("Mainline fusion requires aggregation_fraction=1.0")
+        if config.update_protection_goal != "released_model_dp":
+            raise ValueError("Mainline fusion requires update_protection_goal=released_model_dp")
     if config.update_protection_goal not in {"packet_protection", "released_model_dp"}:
         raise ValueError("Unknown update protection goal")
     if config.update_protection_goal == "released_model_dp":
@@ -736,6 +750,8 @@ def validate_update_protection_goal(config: SelectionConfig, policy: str) -> Non
 
 def candidate_meets_update_goal(config: SelectionConfig, candidate: Candidate) -> bool:
     """Necessary cloud update coverage only, not a transcript privacy proof."""
+    if config.mainline_fusion:
+        return candidate.mode != "LIC" and candidate.global_release_required
     if config.update_protection_goal == "packet_protection":
         return True
     if config.update_protection_goal != "released_model_dp":
@@ -2043,6 +2059,7 @@ def _profile_flow_inputs_by_candidate(
                 state_diff={},
                 sample_count=max(1, int(round(client_samples.get(client_id, 1.0)))),
                 edge_loops=MODE_SPECS[candidate.mode].E_edge_loops,
+                fused_release=config.mainline_fusion,
                 edge_to_cloud_time=candidate.edge_to_cloud_time,
                 return_path_time=candidate.return_path_time,
                 edge_aggregation_payload=candidate.edge_aggregation_payload,
@@ -2063,6 +2080,8 @@ def _full_buffer_flow_stats(
     profile: dict[int, Candidate],
     flow_inputs_by_candidate: dict[int, dict[tuple, ClientFlowInput]],
 ) -> _FullBufferFlowStats | None:
+    if config.mainline_fusion:
+        return None
     client_inputs = {
         client_id: flow_inputs_by_candidate[client_id][_candidate_key(candidate)]
         for client_id, candidate in profile.items()
@@ -2522,6 +2541,8 @@ def _candidate_dp_event_counts(
     candidate: Candidate,
     config: SelectionConfig,
 ) -> tuple[int, int, int]:
+    if config.mainline_fusion:
+        return 0, 0, 0  # DP belongs to the final aggregate, never these links.
     feature_events = 0
     client_update_events = 0
     edge_update_events = 0
@@ -2747,6 +2768,9 @@ def _omega_from_profile_stats(
             )
     cloud_samples = sum(stats.cloud_samples_by_edge.values())
     cloud_fusion_ratio = cloud_samples / max(stats.total_samples, 1e-12)
+    weighted_local += _fusion_aggregate_noise_cost(
+        config, profile, client_edges, admitted_client_ids, stats.client_samples
+    )
     return (
         weighted_local
         + config.cloud_fusion_xi / (cloud_fusion_ratio + config.cloud_fusion_eps),
@@ -2821,6 +2845,9 @@ def _global_omega_proxy_from_admitted(
         for client_id in weights
     )
     cloud_fusion_ratio = admitted_cloud_samples / max(stats.total_samples, 1e-12)
+    weighted_local += _fusion_aggregate_noise_cost(
+        config, profile, client_edges, admitted_client_ids, client_samples
+    )
     return (
         weighted_local
         + config.cloud_fusion_xi / (cloud_fusion_ratio + config.cloud_fusion_eps),
@@ -2871,6 +2898,39 @@ def _cloud_client_aggregation_weights(
         for client_id in admitted_cloud
         if admitted_by_edge.get(int(client_edges.get(client_id, -1)), 0.0) > 0.0
     }
+
+
+def _fusion_aggregate_noise_cost(
+    config: SelectionConfig,
+    profile: dict[int, Candidate],
+    client_edges: dict[int, int],
+    admitted_client_ids: list[int] | tuple[int, ...],
+    client_samples: dict[int, float],
+) -> float:
+    if not config.mainline_fusion or not admitted_client_ids:
+        return 0.0
+    weights = _cloud_client_aggregation_weights(
+        profile, client_samples, client_edges, admitted_client_ids
+    )
+    if not weights:
+        return 0.0
+    max_weight = max(weights.values())
+    privacy_parameters = resolved_privacy_parameters(config)
+    sigma = float(privacy_parameters["update_noise_multiplier"])
+    sensitivity = 2.0 * max(float(config.omega_update_clip_norm), 1e-12) * max_weight
+    eta = max(float(config.omega_learning_rate), 1e-12)
+    local_cycles = max(float(config.L_block_cycles), 1.0)
+    variance_scale = (
+        max(float(config.omega_smoothness), 1e-12)
+        * eta
+        * local_cycles
+        / max(float(config.omega_mu), 1e-12)
+    )
+    gradient_variance = (
+        sigma * sigma * sensitivity * sensitivity * float(config.omega_update_dimension)
+        / (eta * eta * local_cycles * local_cycles)
+    )
+    return variance_scale * gradient_variance
 
 
 def _aggregation_sizes(
@@ -2991,7 +3051,7 @@ def _local_omega_components(
     feature_events, client_update_events, edge_update_events = (
         _candidate_dp_event_counts(candidate, config)
     )
-    return _cached_local_omega_components(
+    components = _cached_local_omega_components(
         feature_events,
         client_update_events,
         edge_update_events,
@@ -2999,6 +3059,22 @@ def _local_omega_components(
         config.omega_update_clip_excess_sq,
         config,
     )
+    if config.mainline_fusion and candidate.global_release_required:
+        eta = max(float(config.omega_learning_rate), 1e-12)
+        local_cycles = max(float(config.L_block_cycles), 1.0)
+        clip_bias = max(float(config.omega_update_clip_excess_sq), 0.0) / (
+            eta * eta * local_cycles * local_cycles
+        )
+        return _OmegaComponents(
+            client_bias=(
+                components.client_bias
+                + (3.0 / (2.0 * max(float(config.omega_mu), 1e-12))) * clip_bias
+            ),
+            client_variance=components.client_variance,
+            edge_bias=0.0,
+            edge_variance=0.0,
+        )
+    return components
 
 
 def _candidate_feature_clip_excess_sq(
@@ -3247,12 +3323,15 @@ def _mechanism_assignments(
     allow_none: bool = False,
     trusted_edge_split_execution: bool = False,
     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3"),
+    mainline_fusion: bool = False,
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     all_transmissions = _mode_link_transmissions(
         spec.name,
         local_block_cycles=1,
         edge_loops=spec.E_edge_loops,
     )
+    if mainline_fusion:
+        all_transmissions = _fusion_link_transmissions(spec.name, 1, spec.E_edge_loops)
     transmissions = [event for event in all_transmissions if event[3]]
     links = list(dict.fromkeys(event[0] for event in transmissions))
     link_objects = {event[0]: event[1] for event in all_transmissions}
@@ -3262,6 +3341,20 @@ def _mechanism_assignments(
         if trusted_edge_split_execution
         and link.startswith("L_E_")
     }
+    if mainline_fusion:
+        # The selector chooses execution topology only. DP is enforced by the
+        # global release gate; HE is the fixed confidentiality layer whenever
+        # an update crosses into the untrusted cloud.
+        link_assignment = {}
+        for link in links:
+            obj = link_objects[link]
+            if link.startswith("L_E_"):
+                link_assignment[link] = "trusted"
+            elif obj == "upd" and link.endswith("_C_upd"):
+                link_assignment[link] = "he3"
+            else:
+                link_assignment[link] = "none"
+        return [(_object_mechanism_summary(link_assignment, link_objects), link_assignment)]
     if policy in {"no_protection", "fixed_splitfed_no_protection"}:
         link_assignments = [{
             link: ("trusted" if link in trusted_links else "none")
@@ -3433,7 +3526,8 @@ def _estimate_candidate(
         block_compute = L * (local_time + edge_time)
 
     cloud_time = spec.cloud_work * 0.55
-    link_events = _mode_link_transmissions(mode, L, E)
+    link_events = (_fusion_link_transmissions(mode, L, E) if config.mainline_fusion
+                   else _mode_link_transmissions(mode, L, E))
     actual_link_mechanisms = dict(link_mechanisms or {})
     compute_time = E * block_compute if E > 1 else block_compute
     link_metrics: list[dict[str, Any]] = []
@@ -3534,14 +3628,26 @@ def _estimate_candidate(
     else:
         cloud_aggregation_payload = 0.0
 
+    if config.mainline_fusion:
+        edge_to_cloud_time = sum(item["total_link_time"] for item in link_metrics
+                                 if item["link_id"] == "E_C_upd")
+        first_aggregation_arrival_time = compute_time + sum(
+            item["total_link_time"] for item in link_metrics
+            if item["link_id"] != "E_C_upd"
+            and not item["link_id"].endswith("_final_return"))
+        edge_aggregation_payload = _profile_object_size(config, "upd")
+        cloud_aggregation_payload = effective_payload("E_C_upd")
+
     edge_aggregation_events = E if mode in {"LIEIIIC", "LIIEIIIC"} else int(
         mode in {"LIE", "LIIE"}
     )
+    if config.mainline_fusion:
+        edge_aggregation_events = 1
     edge_aggregation_time = edge_aggregation_events * (
         config.edge_aggregation_beta * edge_aggregation_payload
         + config.edge_aggregation_fixed
     )
-    cloud_aggregation_time = int(_mode_reaches_cloud(spec)) * (
+    cloud_aggregation_time = int(config.mainline_fusion or _mode_reaches_cloud(spec)) * (
         config.cloud_aggregation_beta * cloud_aggregation_payload
         + config.cloud_aggregation_fixed
     )
@@ -3611,26 +3717,36 @@ def _estimate_candidate(
     # Global penalty: only cloud-reaching objects affect global model accuracy
     protected_links = [event for event in link_events if event[3]]
     mech_penalty = (
-        sum(
-            utility_penalty(
-                actual_link_mechanisms[link_id],
-                max(
-                    float(
-                        resolved_privacy_parameters(config)[
-                            "update_budget" if obj == "upd" else "feature_budget"
-                        ]
+        0.0
+        if config.mainline_fusion
+        else (
+            sum(
+                utility_penalty(
+                    actual_link_mechanisms[link_id],
+                    max(
+                        float(
+                            resolved_privacy_parameters(config)[
+                                "update_budget" if obj == "upd" else "feature_budget"
+                            ]
+                        ),
+                        1e-6,
                     ),
-                    1e-6,
-                ),
+                )
+                for link_id, obj, _count, _privacy_eligible in protected_links
             )
-            for link_id, obj, _count, _privacy_eligible in protected_links
+            / max(len(protected_links), 1)
         )
-        / max(len(protected_links), 1)
     )
     penalty = spec.mode_penalty + mech_penalty
     progress = (round_idx + 1.0) / max(config.rounds, 1)
     accuracy = 0.2 + (0.83 - penalty - 0.2) * (1.0 - math.exp(-3.0 * progress))
-    accuracy += _candidate_accuracy_jitter(config, client_id, round_idx, mode, actual_link_mechanisms)
+    accuracy += _candidate_accuracy_jitter(
+        config,
+        client_id,
+        round_idx,
+        mode,
+        {} if config.mainline_fusion else actual_link_mechanisms,
+    )
 
     return Candidate(
         mode=mode,
@@ -3661,6 +3777,7 @@ def _estimate_candidate(
         edge_aggregation_payload=edge_aggregation_payload,
         cloud_aggregation_payload=cloud_aggregation_payload,
         link_metrics=tuple(link_metrics),
+        global_release_required=bool(config.mainline_fusion),
     )
 
 
@@ -3706,6 +3823,20 @@ def _mode_link_events(
             edge_loops,
         )
     )
+
+
+def _fusion_link_transmissions(mode, local_block_cycles, edge_loops):
+    if mode == "LIC":
+        return ()
+    if mode in {"LIE", "LIEIIC", "LIEIIIC"}:
+        training = tuple(event for event in _mode_link_transmissions(
+            "LIE", max(1, local_block_cycles) * max(1, edge_loops), 1)
+            if not event[0].endswith("_final_return"))
+    else:
+        training = (("L_E_upd", "upd", 1, True),)
+    return training + (("E_C_upd", "upd", 1, True),
+                       ("C_E_upd_final_return", "upd", 1, False),
+                       ("E_L_upd_final_return", "upd", 1, False))
 
 
 def _mode_link_transmissions(

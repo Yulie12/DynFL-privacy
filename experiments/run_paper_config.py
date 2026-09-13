@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "paper_v29_cifar10_resnet18.json"
+DEFAULT_CONFIG = ROOT / "configs" / "paper_v30_cifar10_resnet18.json"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -147,6 +147,7 @@ def build_command(
         "require_feasible",
         "require_edge_cloud_coverage",
         "trusted_edge_split_execution",
+        "mainline_fusion",
     ):
         if system.get(name):
             command.append(_flag(name))
@@ -228,16 +229,47 @@ def validate_config(config: dict) -> None:
     if he.get("require_real_he") and he.get("execution", "real") != "real":
         raise ValueError("require_real_he is only valid with real HE execution")
     privacy = config["privacy"]
-    if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
-        raise ValueError(
-            "Formal configurations must protect cross-domain updates and secure aggregate releases"
-        )
-    if privacy.get("candidate_mechanisms") != ["dp", "he3"]:
-        raise ValueError(
-            "TeX configurations must expose DP and HE as the update choices"
-        )
-    if privacy.get("release_calibration") != "tex_packet":
-        raise ValueError("TeX configurations require whole packet DP calibration")
+    if config["system"].get("mainline_fusion"):
+        if he.get("backend") != "seal":
+            raise ValueError("Mainline fusion requires the Method 2 SEAL custodian backend")
+        if privacy.get("protection_scope") != "global_release_dp_plus_he_confidentiality":
+            raise ValueError(
+                "Mainline fusion requires global release DP plus HE confidentiality"
+            )
+        if privacy.get("update_protection_goal") != "released_model_dp":
+            raise ValueError("Mainline fusion requires released_model_dp")
+        if privacy.get("accounting_mode") != "rdp_auto":
+            raise ValueError("Mainline fusion requires accounting_mode=rdp_auto")
+        if float(config["system"].get("aggregation_fraction", 0.0)) != 1.0:
+            raise ValueError("Mainline fusion requires full participation")
+        if he.get("execution") != "real" or not he.get("require_real_he"):
+            raise ValueError("Mainline fusion requires real HE")
+        if int(he.get("aggregation_size", 0)) != 0:
+            raise ValueError("Mainline fusion requires aggregation_size=0")
+        incompatible = {
+            "no_protection",
+            "fixed_he",
+            "fixed_dp",
+            "privacy_only",
+            "fixed_splitfed_no_protection",
+            "fixed_splitfed_trusted_edge",
+        }.intersection(config.get("policies", ()))
+        if incompatible:
+            raise ValueError(
+                "Policies incompatible with mainline fusion mandatory release: "
+                + ", ".join(sorted(incompatible))
+            )
+    else:
+        if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
+            raise ValueError(
+                "Formal configurations must protect cross-domain updates and secure aggregate releases"
+            )
+        if privacy.get("candidate_mechanisms") != ["dp", "he3"]:
+            raise ValueError(
+                "TeX configurations must expose DP and HE as the update choices"
+            )
+        if privacy.get("release_calibration") != "tex_packet":
+            raise ValueError("TeX configurations require whole packet DP calibration")
     if float(privacy["cloud_dp_stability_threshold"]) <= 0.0:
         raise ValueError("The cloud DP stability threshold must be positive")
 

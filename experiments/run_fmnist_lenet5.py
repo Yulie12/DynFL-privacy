@@ -16,6 +16,27 @@ from dynfed.version import CURRENT_EXECUTION_REVISION
 from dynfed.utils import timestamped_dir
 
 
+
+LEGACY_DEFAULT_POLICIES = (
+    "ours", "fixed_dp", "fixed_he", "random", "privacy_only", "no_protection"
+)
+FUSION_DEFAULT_POLICIES = (
+    "ours",
+    "individual_optimal",
+    "random",
+    "fixed_fedavg",
+    "fixed_splitfed",
+    "fixed_hfl",
+    "nsga2",
+)
+
+
+def _resolved_policies(args: argparse.Namespace) -> tuple[str, ...]:
+    if args.policies:
+        return tuple(args.policies)
+    return FUSION_DEFAULT_POLICIES if args.mainline_fusion else LEGACY_DEFAULT_POLICIES
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run dynamic cloud-edge-end federated learning collaboration reconfiguration."
@@ -83,9 +104,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dp-update-noise-multiplier", type=float, default=None)
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
-    parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate"])
+    parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate", "global_release"])
     parser.add_argument("--update-mechanisms", nargs="+", choices=["dp", "he3", "dp_he3"], default=["dp", "he3"])
     parser.add_argument("--update-protection-goal", choices=["packet_protection", "released_model_dp"], default="packet_protection")
+    parser.add_argument(
+        "--mainline-fusion",
+        action="store_true",
+        help=(
+            "Fuse dynamic collaboration selection with the fixed Method 2 global release "
+            "contract: full roster, client clipping, distributed DP noise, and real HE."
+        ),
+    )
     parser.add_argument(
         "--trusted-edge-split-execution",
         action="store_true",
@@ -156,13 +185,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--policies",
         nargs="+",
-        default=["ours", "fixed_dp", "fixed_he", "random", "privacy_only", "no_protection"],
+        default=None,
+        help="Policies to run. Mainline fusion defaults exclude privacy-bypass controls.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    policies = _resolved_policies(args)
     if args.max_new_rounds is not None and args.max_new_rounds < 1:
         raise ValueError("--max-new-rounds must be positive")
     output_root = timestamped_dir(args.output_root, "lenet5_dynamic_newtex202608")
@@ -176,7 +207,7 @@ def main() -> None:
         "max_new_rounds": args.max_new_rounds,
         "dataset": args.dataset,
         "model": args.model,
-        "policies": list(args.policies),
+        "policies": list(policies),
         "updated_at": time.time(),
     }
     for status_path in (output_root / "live_status.json", output_root.parent / "live_status.json"):
@@ -207,7 +238,7 @@ def main() -> None:
         risk_limit=args.risk_limit,
         aggregation_fraction=args.aggregation_fraction,
         privacy_local_epochs=args.local_epochs,
-        trusted_edge_split_execution=args.trusted_edge_split_execution,
+        trusted_edge_split_execution=(args.trusted_edge_split_execution or args.mainline_fusion),
         pareto_archive_size=args.pareto_archive_size,
         pareto_beam_size=args.pareto_beam_size,
         pareto_max_iters=args.pareto_max_iters,
@@ -239,7 +270,10 @@ def main() -> None:
         assume_encoder_feasible=args.assume_encoder_feasible,
         output_dir=str(output_root),
         update_mechanism_options=tuple(args.update_mechanisms),
-        update_protection_goal=args.update_protection_goal,
+        update_protection_goal=(
+            "released_model_dp" if args.mainline_fusion else args.update_protection_goal
+        ),
+        mainline_fusion=args.mainline_fusion,
     )
     train_config = Lenet5Config(
         execution_revision=args.execution_revision,
@@ -258,7 +292,7 @@ def main() -> None:
         he_backend=args.he_backend,
         he_execution=args.he_execution,
         he_local_deps=args.he_local_deps,
-        require_real_he=args.require_real_he,
+        require_real_he=(args.require_real_he or args.mainline_fusion),
         he_aggregation_size=args.he_aggregation_size,
         he_workers=max(1, args.he_workers),
         executor=args.executor,
@@ -273,7 +307,7 @@ def main() -> None:
         test_limit=args.test_limit,
         resume_from_run=args.resume_from_run,
         max_new_rounds=args.max_new_rounds,
-        policies=tuple(args.policies),
+        policies=policies,
     )
     print(f"[{result['status'].upper()}] summary table: {result['summary_table']}")
 

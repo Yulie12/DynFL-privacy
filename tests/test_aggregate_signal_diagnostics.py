@@ -10,7 +10,7 @@ def test_global_vectors_not_average_of_norms():
     packets = {0: torch.tensor([.6, .8]), 1: torch.tensor([-.6, -.8])}
     metrics = aggregate_signal_diagnostics(updates, plan, packets, 1)
     assert metrics["preclip_norm_mean"] == 5
-    assert metrics["aggregate_signal_norm"] == 0
+    assert metrics["aggregate_signal_norm"] == pytest.approx(0.0, abs=1e-7)
     assert metrics["noise_signal_ratio"] is None
     assert metrics["global_clipped_fraction"] == 1
 

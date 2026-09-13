@@ -83,6 +83,12 @@ def aggregate_signal_diagnostics(updates, plan, packets, clip_norm, *, clip=True
             clipped += factor < 1.0
     noise_norm = float((noisy - signal).norm())
     signal_norm = float(signal.norm())
+    # Symmetric weighted updates can cancel exactly in real arithmetic while
+    # float32 accumulation leaves a few ulps. Treat that residual as zero so
+    # the internal noise/signal diagnostic does not manufacture a finite ratio.
+    zero_tol = float(torch.finfo(signal.dtype).eps) * max(1.0, float(clip_norm))
+    if signal_norm <= zero_tol:
+        signal_norm = 0.0
     return dict(preclip_norm_mean=sum(norms) / len(norms), preclip_norm_max=max(norms),
                 global_clipped_fraction=clipped / len(norms),
                 aggregate_raw_signal_norm=float(raw.norm()), aggregate_signal_norm=signal_norm,

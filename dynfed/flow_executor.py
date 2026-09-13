@@ -31,6 +31,7 @@ class ClientFlowInput:
     aggregation_group: str = ""
     dispatch_start_time: float = 0.0
     dispatch_sequence: int = 0
+    fused_release: bool = False
 
     @property
     def arrival_time(self) -> float:
@@ -86,6 +87,45 @@ class EdgeReadyInput:
     aggregation_group: str
 
 
+def _execute_fused_release_flow(round_idx, clients, fraction, edge_beta,
+                                edge_fixed, cloud_beta, cloud_fixed):
+    if fraction != 1.0 or not all(c.fused_release for c in clients):
+        raise ValueError("Fused flow requires a fixed full cohort")
+    groups = {}
+    for client in clients:
+        groups.setdefault(client.edge_id, []).append(client)
+    events, arrivals = [], []
+    waiting = edge_total = payload_total = 0.0
+    for edge_id, group in sorted(groups.items()):
+        start = max(c.arrival_time for c in group)
+        waiting += sum(start - c.arrival_time for c in group)
+        # Independent stages have already been included in client arrival time.
+        # Exactly one noisy edge packet, with no cross-client feedback loop.
+        edge_cost = edge_fixed + edge_beta * sum(c.edge_aggregation_payload for c in group)
+        edge_total += edge_cost
+        arrival = start + edge_cost + max(c.edge_to_cloud_time for c in group)
+        arrivals.append(arrival)
+        payload_total += max(c.cloud_aggregation_payload for c in group)
+        events.append({"round": round_idx, "event": "trusted_noisy_edge_aggregate",
+                       "edge_id": edge_id, "start_time": start,
+                       "finish_time": start + edge_cost, "loop_factor": 1,
+                       "client_ids": ";".join(str(c.client_id) for c in group),
+                       "modes": ";".join(sorted({c.mode for c in group}))})
+    cloud_start = max(arrivals)
+    waiting += sum(cloud_start - arrival for arrival in arrivals)
+    cloud_cost = cloud_fixed + cloud_beta * payload_total
+    return_time = max(c.return_path_time for c in clients)
+    finish = cloud_start + cloud_cost + return_time
+    events.append({"round": round_idx, "event": "global_dp_he_release",
+                   "start_time": cloud_start, "finish_time": finish,
+                   "release_count": 1, "num_clients": len(clients)})
+    return FlowExecutionResult(
+        [c.client_id for c in clients], [c.state_diff for c in clients],
+        [c.sample_count for c in clients], finish, waiting, edge_total,
+        cloud_cost, return_time, len(groups), events,
+    )
+
+
 def execute_mixed_round_flow(
     *,
     round_idx: int,
@@ -104,6 +144,11 @@ def execute_mixed_round_flow(
     the selected mode.
     """
 
+    if clients and any(client.fused_release for client in clients):
+        return _execute_fused_release_flow(
+            round_idx, clients, aggregation_fraction, edge_aggregation_beta,
+            edge_aggregation_fixed, cloud_aggregation_beta, cloud_aggregation_fixed,
+        )
     selected: dict[int, ClientFlowInput] = {}
     waiting_time = 0.0
     edge_agg_total = 0.0
@@ -396,6 +441,11 @@ def summarize_mixed_round_flow(
     directly. Other buffer configurations retain the event executor as the
     exact fallback.
     """
+    if clients and any(client.fused_release for client in clients):
+        return _execute_fused_release_flow(
+            round_idx, clients, aggregation_fraction, edge_aggregation_beta,
+            edge_aggregation_fixed, cloud_aggregation_beta, cloud_aggregation_fixed,
+        )
     edge_groups: dict[tuple[str, int, str], list[tuple[int, ClientFlowInput]]] = {}
     direct_cloud_clients: list[tuple[int, ClientFlowInput]] = []
     for position, client in enumerate(clients):

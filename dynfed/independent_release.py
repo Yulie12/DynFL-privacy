@@ -18,12 +18,43 @@ class IndependentReleaseAccount:
                 or type(horizon) is not int or horizon <= 0):
             raise ValueError("Positive fixed counts, clipping and release horizon required")
         self.weights = tuple(n / sum(self.counts) for n in self.counts)
-        self.sensitivity = 2 * clip_norm * max(self.weights)
+        self.clip_norm = float(clip_norm)
+        self.sensitivity = 2 * self.clip_norm * max(self.weights)
         self.multiplier = calibrate_gaussian_noise(epsilon, delta, horizon)
         self.noise_std = self.multiplier * self.sensitivity
         self.horizon = horizon
         self.ledger = PrivacyAccountant(epsilon, delta)
         self.next_round = 0
+
+
+    def state_dict(self):
+        return {
+            "counts": list(self.counts),
+            "clip_norm": self.clip_norm,
+            "horizon": self.horizon,
+            "multiplier": self.multiplier,
+            "next_round": self.next_round,
+            "ledger": self.ledger.state_dict(),
+        }
+
+    def load_state_dict(self, state):
+        if tuple(int(value) for value in state.get("counts", ())) != self.counts:
+            raise ValueError("Release-account cohort mismatch")
+        if int(state.get("horizon", -1)) != self.horizon:
+            raise ValueError("Release-account horizon mismatch")
+        if not math.isclose(
+            float(state.get("clip_norm", float("nan"))),
+            self.clip_norm,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("Release-account clip norm mismatch")
+        if not math.isclose(float(state.get("multiplier", float("nan"))), self.multiplier, rel_tol=1e-12, abs_tol=1e-12):
+            raise ValueError("Release-account calibration mismatch")
+        self.ledger = PrivacyAccountant.from_state_dict(state["ledger"])
+        self.next_round = int(state["next_round"])
+        if not 0 <= self.next_round <= self.horizon:
+            raise ValueError("Invalid saved release round")
 
     def check(self, round_index, client_ids):
         ids = tuple(client_ids)

@@ -1,93 +1,116 @@
-# Paper to Code Conformance
+# Paper-to-Code Conformance — v30 Mainline Fusion
 
-The normative specification is `tex/paper/main.tex`. Current training outputs
-record `training.execution_revision=paper_flow_v25_trusted_edge_domain`. Earlier
-results and checkpoints are intentionally excluded because the trust boundary,
-DP protection object, feasible mode set, and result semantics changed in
-revision v25.
+The normative specification is `tex/paper/main.tex`. The formal execution revision is
+`paper_flow_v30_mainline_fusion_method2`. Earlier packet-level privacy-selection revisions remain
+available only for controls/compatibility experiments and are not the v30 paper method.
 
-## Directly implemented
+## Formal mainline contract
 
-| Paper element | Implementation and evidence |
+1. The paper keeps seven basic collaboration modes, while `LIC` is structurally excluded
+   under the honest-but-curious cloud threat model. The dynamic selector therefore searches
+   six executable modes.
+2. The selector chooses collaboration/resource placement. It does not choose whether the
+   released model is protected by DP.
+3. Every client contribution in a formal round starts from the previously released global
+   model and that client's private data plus the public execution schedule. Same-round
+   private aggregate feedback is forbidden in the fused path.
+4. Each client contribution is L2 clipped. The formal weighted aggregate uses
+   client-replacement sensitivity `2 * C * max_i(w_i)` with the actual public normalized
+   release weights.
+5. One formal global Gaussian release is accounted per completed FL round. The total noise
+   multiplier is calibrated for the fixed round horizon with RDP.
+6. Distributed noise shares are introduced before HE cloud aggregation/decryption. Real
+   CKKS protects cloud-side confidentiality; it cannot replace DP.
+7. Formal runs require full participation, `rdp_auto`, real HE, and full-update encryption
+   (`he_aggregation_size=0`). Legacy DP-vs-HE stability substitution is disabled.
+8. The supported privacy statement is the aggregate-release mechanism under the stated
+   fixed public roster/weight assumptions. The implementation intentionally reports
+   `end_to_end_dp_status=not_established` for the complete adaptive protocol.
+
+## Direct implementation map
+
+| Paper element | Implementation |
 | --- | --- |
-| Seven collaboration modes and directed link flows | `dynfed/training.py`, `dynfed/selection.py`, and `dynfed/flow_executor.py` |
-| Resource, memory, and privacy feasible candidate sets | `dynfed/selection.py::enumerate_candidates` |
-| Candidate specific event flow, admission, staleness, and return paths | `dynfed/flow_executor.py::execute_mixed_round_flow` and `dynfed/selection.py::evaluate_global_profile` |
-| Shared link event counts for communication and DP accounting | `dynfed/selection.py::_mode_link_events` |
-| Edge and cloud aggregation time over the admitted payload | `dynfed/flow_executor.py::execute_mixed_round_flow` |
-| Actual edge normalized cloud aggregation weights | `dynfed/fmnist_lenet5_dynamic.py::_edge_normalized_cloud_weights` and `dynfed/selection.py::_global_omega_proxy_from_admitted` |
-| Estimated convergence error cost with admitted client and edge terms | `dynfed/selection.py::_local_omega_components` and `dynfed/selection.py::_global_omega_proxy_from_admitted` |
-| Client replacement update DP with sensitivity `2 C_u` | `dynfed/split_learning.py::apply_unified_dp` |
-| Trusted split execution inside each end to edge domain | `dynfed/selection.py::enumerate_candidates` and `dynfed/fmnist_lenet5_dynamic.py` |
-| Update RDP ledger with a fixed total target | `dynfed/privacy.py`, `dynfed/selection.py::resolved_privacy_parameters`, and per round output fields |
-| Full update CKKS aggregation with every protected participant encrypted | `dynfed/fmnist_lenet5_dynamic.py::fedavg_split_seal` |
-| CKKS key reuse and operation metrics | `dynfed/fmnist_lenet5_dynamic.py` summary and per round HE fields |
-| Bounded Pareto archive, exploration beam, and deterministic Tchebycheff choice | `dynfed/selection.py::choose_global_pareto_profile` |
-| Edge and cloud coverage included in the global feasible set | `dynfed/selection.py::_profile_satisfies_edge_cloud_coverage` |
-| Exact small scale Pareto comparison | `experiments/validate_pareto_search.py` |
-| Fixed FedAvg, SplitFed, and HFL topology references | `dynfed/selection.py` policy topology mappings |
-| Standard NSGA II optimizer reference | `dynfed/selection.py::_run_nsga2_search` |
-| Modeled workflow time, measured decision time, accounted system time, and host wall time | `dynfed/fmnist_lenet5_dynamic.py` round and summary metrics |
-| Mean, standard deviation, 95 percent confidence intervals, paired tests, and effect sizes | `experiments/aggregate_multiseed_results.py` |
-| Raw unsmoothed paper curves | `experiments/aggregate_multiseed_results.py` and `experiments/aggregate_controlled_results.py` |
-| Versioned main and second setting configurations | `configs/paper_v25_cifar10_resnet18.json`, `configs/paper_v25_fmnist_lenet5.json`, and `experiments/run_paper_config.py` |
-| Versioned controlled experiment runner | `experiments/run_controlled_sweeps.py` |
-| Error cost calibration analysis | `experiments/calibrate_convergence_cost.py` |
-| Exact data partitions, device profiles, model split, and runtime environment | Per run reproducibility files generated by `dynfed/fmnist_lenet5_dynamic.py` |
+| Seven-mode taxonomy / six executable fused modes | `dynfed/training.py`, `dynfed/selection.py` |
+| Dynamic mode/Pareto search | `dynfed/selection.py::choose_global_pareto_profile` |
+| Mode-specific logical flow and timing | `dynfed/flow_executor.py` |
+| Fixed global release accountant | `dynfed/independent_release.py::IndependentReleaseAccount` |
+| Independent fused training base | `dynfed/fmnist_lenet5_dynamic.py::_training_base_state` |
+| Client clipping and distributed aggregate noise | fused release branch in `dynfed/fmnist_lenet5_dynamic.py` |
+| Real CKKS aggregate path | `dynfed/he_backend.py` and `fedavg_split_seal` path |
+| Fused privacy/result-DP validation | `_validate_mainline_fusion` |
+| Fixed formal release reporting | `_reported_release_mechanism`, `_privacy_reporting_scope`, `global_release_*` |
+| Common aggregate privacy-noise objective | `dynfed/selection.py::_fusion_aggregate_noise_cost` |
+| v30 formal configurations | `configs/paper_v30_cifar10_resnet18.json`, `configs/paper_v30_fmnist_lenet5.json` |
+| Versioned runner | `experiments/run_paper_config.py`, `experiments/run_fmnist_lenet5.py` |
 
-## Required output evidence
+## Required evidence for a paper run
 
 Each accepted run must contain `summary.json`, `round_metrics.csv`,
-`client_decisions.csv`, `link_state.csv`, and `flow_events.csv`. Its parent run
-directory must also contain `data_partition.json`, `device_profiles.csv`,
-`edge_profiles.csv`, `model_partition.json`, and `runtime_environment.json`. The summary
-records the execution revision, training and privacy parameters, CKKS security
-parameters, ciphertext volume, CKKS operation time, numerical aggregation
-error, logical latency, accounted system time, and measured host wall time.
+`client_decisions.csv`, `flow_events.csv`, and the reproducibility artifacts emitted by the
+training runner. For v30, the summary/round logs must expose at least:
 
-The main aggregation script accepts revision v25 only. Its curve bands are 95
-percent confidence intervals across seeds. `paired_comparisons.csv` reports
-paired differences, paired confidence intervals, Cohen dz, paired t test
-values, and Wilcoxon values.
+- `mainline_fusion=true`;
+- `global_release_count` and `global_release_epsilon`;
+- fixed global release contract metadata;
+- aggregate sensitivity/noise metrics;
+- real HE execution metrics and numerical aggregation error;
+- mode distribution, switching, communication, modeled system time, selection time, and
+  host wall time;
+- `end_to_end_dp_status=not_established`.
 
-## Explicit modeling boundaries
+## Baseline boundary
 
-1. Directed link rates, computation rates, switching coefficients, and
-   aggregation coefficients are reproducible analytical scenario profiles.
-   They are not measurements from separate physical end, edge, and cloud
-   devices.
-2. Training executes on one host. The event flow models logical placement and
-   communication. Accounted system time adds measured decision time to this
-   model, while host wall time describes the sequential local implementation.
-3. The estimated convergence error cost follows the assumptions stated in the
-   paper appendix. It is a decision metric rather than a convergence theorem
-   for nonconvex ResNet training.
-4. CKKS protects selected update contents from communication links and the
-   cloud evaluator. A trusted coordinator holds the secret key and observes the
-   decrypted aggregate. CKKS and DP provide different protection semantics and
-   are reported separately.
-5. Fixed topology references reproduce their collaboration structures inside
-   the shared engine. They are not full source code reproductions of every
-   component in the cited systems.
+Protected methods such as Ours, Individual Optimal, Random, Fixed FedAvg, Fixed SplitFed,
+Fixed HFL, and NSGA-II can share the same fused release contract. `no_protection`, pure HE,
+and legacy packet-DP policies are controls and must be run under a separate configuration;
+they are intentionally rejected inside a formal fused run.
 
 ## Work still required before submission
 
-1. The revision v25 trusted edge validation is complete for five rounds. Ours
-   and Fixed SplitFed reached 30.05 and 30.15 percent test accuracy, confirming
-   that the previous failure was caused by feature perturbation rather than the
-   split execution path.
-2. Rerun every reported table and figure with revision v25. Old numerical
-   results cannot be reused or resumed.
-3. Run the empirical calibration script and insert its generated values in the
-   paper.
-4. Run the main comparison and key ablations with the declared seeds and report
-   the generated confidence intervals and paired effects.
-5. Run the prepared Fashion MNIST and LeNet 5 configuration and insert its
-   generated values in the paper.
-6. Attach the supplementary artifact named in the paper or insert a permanent
-   anonymous artifact URL before submission.
-7. Add at least one source released resource aware or privacy aware FL system
-   if the venue requires a full external system reproduction. Fixed topology
-   references and NSGA II do not reproduce such a system end to end.
-8. Avoid claims about physical deployment efficiency until a real deployment
-   or a calibrated network emulation experiment is available.
+1. Run the complete regression suite and a fresh real-SEAL smoke on the merged v30 path.
+2. Freeze the final dataset/model/DP hyperparameters used for the paper tables.
+3. Run the main comparison and key ablations with the declared multi-seed protocol.
+4. Rebuild every table/figure from v30 outputs; do not reuse pre-v30 numerical results.
+5. Report system-profile provenance and keep the single-host/logical-placement limitation
+   explicit.
+6. Keep the aggregate-release privacy claim narrower than a full adaptive-protocol DP claim
+   unless a separate end-to-end proof is added.
+
+## 本次 Method 2 正式接入（2026-09-13）
+
+- CIFAR 正式入口已固定为 `resnet18_pretrained_head`、5130 个可训练参数、
+  `clip_norm=0.1`；100-round horizon 和每阶段 3 local epochs 保持不变。
+- LIEIIIC/LIIEIIIC 连续执行 3 个客户端私有阶段（共 9 epochs），仅延续该
+  客户端自己的模型和优化器状态。最后才裁剪并加入分布式噪声；一轮一次发布。
+- 复用 `experiments/trusted_edge_custodian.py`：按固定公开权重形成加噪边缘包，
+  独立 cloud worker 只处理密文，custodian 校验完整和后解密。每轮新会话/密钥；
+  FL 总周期及续跑由持久化 global release account 约束。
+- 正式加密载荷为完整可训练更新，而非填充冻结骨干的零更新。
+- 七种基础模式定义保留；LIC 沿用当前受信域的执行限制。本次没有新增云端
+  中间表示保护，也没有放宽信任模型。
+- 选择器与训练共用 fused release flow：所有参与者都进入一次边缘加噪聚合和
+  一次全局发布；重复阶段不再虚构重复跨客户端聚合反馈。通信统计对共享 E-C
+  上传和 C-E 返回按边缘域去重。
+- `release_calibration=global_release`；短跑 summary 也记录真实累计 epsilon，
+  不再把 legacy packet ledger 的零消耗当成全局发布消耗。
+- 新 revision 为 `paper_flow_v30_mainline_fusion_method2`，禁止接续旧融合语义
+  的 checkpoint。旧补丁文件仅对应之前版本，本次没有重新生成那个补丁。
+
+边界：这是机制与执行语义接入，不是收敛优势证明。原完整模型 HE profile
+不能充当 5130 参数载荷的实测成本；正式系统性能结论仍需对应载荷与计算范围
+的 profile。Fashion-MNIST/LeNet 仍是独立模型配置，不宣称已有同样的预训练
+分类头证据。论文编译目前被本机 MiKTeX 初始化目录写入权限阻塞。
+
+### 本次验证证据
+
+- 全量回归 324 passed；日志字段调整后的 focused regression 27 passed。
+- 最终 revision 的 Ours：100 客户端、10 边缘、真实 SEAL 完成 1 round，
+  100-round 隐私 horizon 保留，release_count=1，epsilon=0.70478798，
+  HE 最大绝对误差约 2.30e-8。结果：
+  `out/method2_formal_final_check/2026-09-13_21-41-29_lenet5_dynamic_newtex202608/ours/partial_summary.json`。
+- 同次 fixed_hfl 未完成训练：17 个客户端没有 device-feasible 固定候选。
+  完整 roster 门控拒绝该基线；这不是允许通过删除客户端解决的错误。
+  保留场景并记为不可行，或另设全部方法共同可行的场景，等待用户选择。
+- Ours 的单轮测试精度为 7.1%，仅用于接入验证，不构成长程效用结论。
+- TeX begin/end 环境配对检查通过；PDF 编译尚未通过环境初始化门槛。

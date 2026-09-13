@@ -22,3 +22,12 @@ def test_no_replay_skips_or_cohort_changes():
     account.reserve(0, [0, 1])
     with pytest.raises(ValueError):
         account.reserve(0, [0, 1])
+
+
+def test_resume_rejects_changed_clip_norm_even_when_multiplier_matches():
+    original = IndependentReleaseAccount([3, 7], 0.1, 8.0, 1e-5, 5)
+    state = original.state_dict()
+    changed = IndependentReleaseAccount([3, 7], 0.2, 8.0, 1e-5, 5)
+
+    with pytest.raises(ValueError, match="clip norm"):
+        changed.load_state_dict(state)
