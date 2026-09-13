@@ -62,3 +62,30 @@ def release_edge(updates: torch.Tensor, weights: list[float], *, clip_norm: floa
                        clipped_fraction=float((factors < 1).float().mean()),
                        max_postclip_norm=float((norms * factors).max()))
     return packet, diagnostics
+
+
+def aggregate_signal_diagnostics(updates, plan, packets, clip_norm, *, clip=True):
+    """Internal-only vector diagnostics; norms cannot be averaged across edges."""
+    raw = torch.zeros_like(updates[0])
+    signal = torch.zeros_like(raw)
+    noisy = torch.zeros_like(raw)
+    norms, clipped = [], 0
+    for group in plan:
+        noisy += packets[group["edge"]] * group["cloud_weight"]
+        for client, local_weight in zip(group["clients"], group["weights"]):
+            update = updates[client]
+            norm = float(update.norm())
+            factor = min(1.0, clip_norm / max(norm, 1e-12)) if clip else 1.0
+            weight = local_weight * group["cloud_weight"]
+            raw.add_(update, alpha=weight)
+            signal.add_(update, alpha=weight * factor)
+            norms.append(norm)
+            clipped += factor < 1.0
+    noise_norm = float((noisy - signal).norm())
+    signal_norm = float(signal.norm())
+    return dict(preclip_norm_mean=sum(norms) / len(norms), preclip_norm_max=max(norms),
+                global_clipped_fraction=clipped / len(norms),
+                aggregate_raw_signal_norm=float(raw.norm()), aggregate_signal_norm=signal_norm,
+                aggregate_clipping_bias_norm=float((signal - raw).norm()),
+                aggregate_noise_norm=noise_norm,
+                noise_signal_ratio=noise_norm / signal_norm if signal_norm > 0 else None)

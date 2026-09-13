@@ -19,9 +19,9 @@ import numpy as np
 import torch
 
 from experiments.distributed_edge_dp_common import distributed_noise_plan, seal_edge_sum
-from experiments.edge_dp_common import edge_noise_seed, edge_release_plan, release_edge
+from experiments.edge_dp_common import edge_noise_seed, edge_release_plan, release_edge, aggregate_signal_diagnostics
 from experiments.validate_trusted_aggregate_trajectory import apply_vector_update
-from dynfed.fmnist_lenet5_dynamic import load_image_dataset_arrays
+from dynfed.fmnist_lenet5_dynamic import load_image_dataset_arrays, _partition_clients_lenet5, _split_client_indices
 from dynfed.privacy import PrivacyAccountant, calibrate_gaussian_noise
 from dynfed.split_learning import build_split_pair, split_evaluate, split_local_train_lenet5
 from dynfed.utils import timestamped_dir
@@ -35,6 +35,8 @@ def main():
     parser.add_argument("--edges", type=int, default=10)
     parser.add_argument("--train-limit", type=int, default=6000)
     parser.add_argument("--test-limit", type=int, default=200)
+    parser.add_argument("--partition-mode", choices=["iid", "extreme_edge_label_skew"], default="iid")
+    parser.add_argument("--local-test-ratio", type=float, default=0.0)
     parser.add_argument("--local-epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--clip-norm", type=float, default=0.1)
@@ -64,6 +66,8 @@ def main():
         parser.error("Positive counts, nonempty cohorts and rounds within horizon required")
     if not math.isfinite(args.lr) or args.lr <= 0:
         parser.error("Positive finite learning rate required")
+    if not 0 <= args.local_test_ratio < 1:
+        parser.error("Local test ratio must be in [0, 1)")
     edge_noise_seed(args.seed, 0, 0)
     edge_release_plan([1] * args.clients, args.edges, args.clip_norm)
     sigma = calibrate_gaussian_noise(args.epsilon, args.delta, args.privacy_horizon)
@@ -73,7 +77,10 @@ def main():
     model = args.model
     x, y, tx, ty, shape, _, classes = load_image_dataset_arrays(
         "cifar10", ROOT / "experiments/data/cifar10", args.train_limit, args.test_limit, args.seed)
-    indices = np.array_split(np.random.default_rng(args.seed).permutation(len(y)), args.clients)
+    indices = _partition_clients_lenet5(y, args.clients, args.edges,
+                                       args.partition_mode == "iid", args.partition_mode, args.seed)
+    if args.local_test_ratio:
+        indices, _ = _split_client_indices(indices, test_ratio=args.local_test_ratio, seed=args.seed)
     plan = edge_release_plan([int(len(idx)) for idx in indices], args.edges, args.clip_norm)
     distributed = distributed_noise_plan([int(len(idx)) for idx in indices], args.edges,
                                          args.clip_norm, sigma, args.edges)
@@ -86,6 +93,10 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     path = output / "report.json"
     report = dict(config=vars(args), model=model, status="running", results=[], cohorts=plan,
+                  training_protocol="independent_clients_from_previous_release",
+                  private_shared_state_feedback=False,
+                  dynamic_mode_selection=False,
+                  publication_scope="global_noisy_aggregate_only_controls_are_private",
                   initial_accuracy=initial_acc, initial_loss=initial_loss, noise_multiplier=sigma,
                   adjacency="whole_client_replacement_fixed_public_counts_and_roster",
                   trust="associated_edge_trusted_cloud_honest_but_curious",
@@ -162,6 +173,8 @@ def main():
                         clip=method != "no_protection")
                     packets[group["edge"]] = packet
                     edge_rows.append(dict(edge=group["edge"], **internal))
+                signal_diagnostics = aggregate_signal_diagnostics(
+                    updates, plan, packets, args.clip_norm, clip=method != "no_protection")
                 he_metrics = None
                 if distributed_dp:
                     if custodian is None:
@@ -193,6 +206,7 @@ def main():
                     torch.cuda.synchronize()
                 eps = [l.current_epsilon() for l in ledgers] if dp else [None] * args.clients
                 row = dict(method=method, round=round_idx + 1, accuracy=acc, loss=loss,
+                           **signal_diagnostics,
                            dimensions=released.numel(), edges=edge_rows, client_epsilon=eps,
                            max_client_epsilon=max(eps) if dp else None,
                            dp_events_per_client=round_idx + 1 if dp else 0,
