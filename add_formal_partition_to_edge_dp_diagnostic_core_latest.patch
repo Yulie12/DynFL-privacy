@@ -1,0 +1,96 @@
+diff --git a/experiments/validate_edge_dp_trajectory.py b/experiments/validate_edge_dp_trajectory.py
+index 614813b..d31a99e 100644
+--- a/experiments/validate_edge_dp_trajectory.py
++++ b/experiments/validate_edge_dp_trajectory.py
+@@ -21,12 +21,36 @@ import torch
+ from experiments.distributed_edge_dp_common import distributed_noise_plan, seal_edge_sum
+ from experiments.edge_dp_common import edge_noise_seed, edge_release_plan, release_edge
+ from experiments.validate_trusted_aggregate_trajectory import apply_vector_update
+-from dynfed.fmnist_lenet5_dynamic import load_image_dataset_arrays
++from dynfed.fmnist_lenet5_dynamic import (
++    _partition_clients_lenet5,
++    _split_client_indices,
++    load_image_dataset_arrays,
++)
+ from dynfed.privacy import PrivacyAccountant, calibrate_gaussian_noise
+ from dynfed.split_learning import build_split_pair, split_evaluate, split_local_train_lenet5
+ from dynfed.utils import timestamped_dir
+ 
+ 
++def build_diagnostic_client_splits(
++    labels: np.ndarray,
++    num_clients: int,
++    num_edges: int,
++    partition_mode: str,
++    holdout_ratio: float,
++    seed: int,
++) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
++    """Reuse the formal runner partition and per-client holdout semantics."""
++    if not 0.0 <= holdout_ratio < 1.0:
++        raise ValueError("holdout_ratio must satisfy 0 <= holdout_ratio < 1")
++    full = _partition_clients_lenet5(
++        labels, num_clients, num_edges, partition_mode == "iid", partition_mode, seed
++    )
++    train, holdout = _split_client_indices(full, test_ratio=holdout_ratio, seed=seed)
++    if any(len(idx) == 0 for idx in train):
++        raise ValueError("Partition/holdout produced an empty client training cohort")
++    return full, train, holdout
++
++
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--rounds", type=int, default=5)
+@@ -35,6 +59,16 @@ def main():
+     parser.add_argument("--edges", type=int, default=10)
+     parser.add_argument("--train-limit", type=int, default=6000)
+     parser.add_argument("--test-limit", type=int, default=200)
++    parser.add_argument(
++        "--partition-mode",
++        choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
++        default="iid",
++        help="Reuse the formal dynamic runner client partition semantics",
++    )
++    parser.add_argument(
++        "--client-holdout-ratio", type=float, default=0.2,
++        help="Per-client local holdout fraction removed from private local training",
++    )
+     parser.add_argument("--local-epochs", type=int, default=3)
+     parser.add_argument("--lr", type=float, default=0.01)
+     parser.add_argument("--clip-norm", type=float, default=0.1)
+@@ -64,6 +98,8 @@ def main():
+         parser.error("Positive counts, nonempty cohorts and rounds within horizon required")
+     if not math.isfinite(args.lr) or args.lr <= 0:
+         parser.error("Positive finite learning rate required")
++    if not math.isfinite(args.client_holdout_ratio) or not 0.0 <= args.client_holdout_ratio < 1.0:
++        parser.error("client-holdout-ratio must satisfy 0 <= ratio < 1")
+     edge_noise_seed(args.seed, 0, 0)
+     edge_release_plan([1] * args.clients, args.edges, args.clip_norm)
+     sigma = calibrate_gaussian_noise(args.epsilon, args.delta, args.privacy_horizon)
+@@ -73,9 +109,12 @@ def main():
+     model = args.model
+     x, y, tx, ty, shape, _, classes = load_image_dataset_arrays(
+         "cifar10", ROOT / "experiments/data/cifar10", args.train_limit, args.test_limit, args.seed)
+-    indices = np.array_split(np.random.default_rng(args.seed).permutation(len(y)), args.clients)
+-    plan = edge_release_plan([int(len(idx)) for idx in indices], args.edges, args.clip_norm)
+-    distributed = distributed_noise_plan([int(len(idx)) for idx in indices], args.edges,
++    full_indices, indices, holdout_indices = build_diagnostic_client_splits(
++        y, args.clients, args.edges, args.partition_mode, args.client_holdout_ratio, args.seed
++    )
++    client_train_counts = [int(len(idx)) for idx in indices]
++    plan = edge_release_plan(client_train_counts, args.edges, args.clip_norm)
++    distributed = distributed_noise_plan(client_train_counts, args.edges,
+                                          args.clip_norm, sigma, args.edges)
+     end, edge_model = build_split_pair(model, device, input_channels=shape[0], image_size=shape[1],
+                                      num_classes=classes)
+@@ -86,6 +125,11 @@ def main():
+     output.mkdir(parents=True, exist_ok=False)
+     path = output / "report.json"
+     report = dict(config=vars(args), model=model, status="running", results=[], cohorts=plan,
++                  client_splits=[
++                      {"client": i, "full": int(len(full_indices[i])),
++                       "train": int(len(indices[i])), "holdout": int(len(holdout_indices[i]))}
++                      for i in range(args.clients)
++                  ],
+                   initial_accuracy=initial_acc, initial_loss=initial_loss, noise_multiplier=sigma,
+                   adjacency="whole_client_replacement_fixed_public_counts_and_roster",
+                   trust="associated_edge_trusted_cloud_honest_but_curious",

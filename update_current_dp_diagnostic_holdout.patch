@@ -1,0 +1,160 @@
+diff --git a/experiments/validate_edge_dp_trajectory.py b/experiments/validate_edge_dp_trajectory.py
+index ba76412..260a54f 100644
+--- a/experiments/validate_edge_dp_trajectory.py
++++ b/experiments/validate_edge_dp_trajectory.py
+@@ -27,6 +27,27 @@ from dynfed.split_learning import build_split_pair, split_evaluate, split_local_
+ from dynfed.utils import timestamped_dir
+ 
+ 
++def build_diagnostic_client_splits(
++    y_train,
++    num_clients,
++    num_edges,
++    partition_mode,
++    holdout_ratio,
++    seed,
++):
++    full_indices = _partition_clients_lenet5(
++        y_train, num_clients, num_edges, partition_mode == "iid", partition_mode, seed
++    )
++    if holdout_ratio:
++        train_indices, holdout_indices = _split_client_indices(
++            full_indices, test_ratio=holdout_ratio, seed=seed
++        )
++    else:
++        train_indices = [np.asarray(indices).copy() for indices in full_indices]
++        holdout_indices = [np.array([], dtype=np.int64) for _ in full_indices]
++    return full_indices, train_indices, holdout_indices
++
++
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--rounds", type=int, default=5)
+@@ -36,7 +57,7 @@ def main():
+     parser.add_argument("--train-limit", type=int, default=6000)
+     parser.add_argument("--test-limit", type=int, default=200)
+     parser.add_argument("--partition-mode", choices=["iid", "extreme_edge_label_skew"], default="iid")
+-    parser.add_argument("--local-test-ratio", type=float, default=0.0)
++    parser.add_argument("--client-holdout-ratio", type=float, default=0.2)
+     parser.add_argument("--local-epochs", type=int, default=3)
+     parser.add_argument("--lr", type=float, default=0.01)
+     parser.add_argument("--clip-norm", type=float, default=0.1)
+@@ -66,8 +87,8 @@ def main():
+         parser.error("Positive counts, nonempty cohorts and rounds within horizon required")
+     if not math.isfinite(args.lr) or args.lr <= 0:
+         parser.error("Positive finite learning rate required")
+-    if not 0 <= args.local_test_ratio < 1:
+-        parser.error("Local test ratio must be in [0, 1)")
++    if not 0 <= args.client_holdout_ratio < 1:
++        parser.error("Client holdout ratio must be in [0, 1)")
+     edge_noise_seed(args.seed, 0, 0)
+     edge_release_plan([1] * args.clients, args.edges, args.clip_norm)
+     sigma = calibrate_gaussian_noise(args.epsilon, args.delta, args.privacy_horizon)
+@@ -77,10 +98,9 @@ def main():
+     model = args.model
+     x, y, tx, ty, shape, _, classes = load_image_dataset_arrays(
+         "cifar10", ROOT / "experiments/data/cifar10", args.train_limit, args.test_limit, args.seed)
+-    indices = _partition_clients_lenet5(y, args.clients, args.edges,
+-                                       args.partition_mode == "iid", args.partition_mode, args.seed)
+-    if args.local_test_ratio:
+-        indices, _ = _split_client_indices(indices, test_ratio=args.local_test_ratio, seed=args.seed)
++    full_indices, indices, holdout_indices = build_diagnostic_client_splits(
++        y, args.clients, args.edges, args.partition_mode, args.client_holdout_ratio, args.seed
++    )
+     plan = edge_release_plan([int(len(idx)) for idx in indices], args.edges, args.clip_norm)
+     distributed = distributed_noise_plan([int(len(idx)) for idx in indices], args.edges,
+                                          args.clip_norm, sigma, args.edges)
+@@ -98,6 +118,11 @@ def main():
+                   dynamic_mode_selection=False,
+                   publication_scope="global_noisy_aggregate_only_controls_are_private",
+                   initial_accuracy=initial_acc, initial_loss=initial_loss, noise_multiplier=sigma,
++                  partition_mode=args.partition_mode,
++                  client_holdout_ratio=args.client_holdout_ratio,
++                  client_full_counts=[int(len(idx)) for idx in full_indices],
++                  client_train_counts=[int(len(idx)) for idx in indices],
++                  client_holdout_counts=[int(len(idx)) for idx in holdout_indices],
+                   adjacency="whole_client_replacement_fixed_public_counts_and_roster",
+                   trust="associated_edge_trusted_cloud_honest_but_curious",
+                   noise_location="each_edge_before_cloud", he_execution="not_used",
+diff --git a/tests/test_diagnostic_partition_alignment.py b/tests/test_diagnostic_partition_alignment.py
+index 96c0b59..8a0075b 100644
+--- a/tests/test_diagnostic_partition_alignment.py
++++ b/tests/test_diagnostic_partition_alignment.py
+@@ -1,22 +1,71 @@
++import ast
++from pathlib import Path
++
+ import numpy as np
+ 
+ from dynfed.fmnist_lenet5_dynamic import _partition_clients_lenet5, _split_client_indices
+ 
+ 
+-def test_iid_preserves_previous_diagnostic_partition():
++RUNNER = Path(__file__).resolve().parents[1] / "experiments" / "validate_edge_dp_trajectory.py"
++
++
++def _load_split_builder():
++    source = RUNNER.read_text(encoding="utf-8")
++    tree = ast.parse(source)
++    functions = [
++        node for node in tree.body
++        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
++        and node.name == "build_diagnostic_client_splits"
++    ]
++    assert len(functions) == 1, "diagnostic runner must define build_diagnostic_client_splits exactly once"
++    module = ast.Module(body=functions, type_ignores=[])
++    ast.fix_missing_locations(module)
++    namespace = {
++        "np": np,
++        "_partition_clients_lenet5": _partition_clients_lenet5,
++        "_split_client_indices": _split_client_indices,
++    }
++    exec(compile(module, str(RUNNER), "exec"), namespace)
++    return namespace["build_diagnostic_client_splits"]
++
++
++def test_iid_zero_holdout_preserves_previous_diagnostic_partition():
++    build_splits = _load_split_builder()
+     y = np.arange(600) % 10
+     expected = np.array_split(np.random.default_rng(42).permutation(len(y)), 100)
+-    actual = _partition_clients_lenet5(y, 100, 10, True, "iid", 42)
+-    assert all(np.array_equal(a, b) for a, b in zip(actual, expected))
++    full, train, held = build_splits(
++        y, num_clients=100, num_edges=10, partition_mode="iid", holdout_ratio=0.0, seed=42
++    )
++    assert all(np.array_equal(a, b) for a, b in zip(full, expected))
++    assert all(np.array_equal(a, b) for a, b in zip(train, expected))
++    assert all(len(part) == 0 for part in held)
+ 
+ 
+-def test_extreme_partition_and_holdout_are_disjoint_and_complete():
++def test_extreme_partition_holdout_is_disjoint_and_complete():
++    build_splits = _load_split_builder()
+     y = np.repeat(np.arange(10), 1200)
+-    parts = _partition_clients_lenet5(y, 100, 10, False, "extreme_edge_label_skew", 42)
+-    train, held = _split_client_indices(parts, test_ratio=.2, seed=42)
++    full, train, held = build_splits(
++        y,
++        num_clients=100,
++        num_edges=10,
++        partition_mode="extreme_edge_label_skew",
++        holdout_ratio=0.2,
++        seed=42,
++    )
++    assert sum(map(len, full)) == 12000
+     assert sum(map(len, train)) == 9600
+     assert sum(map(len, held)) == 2400
+     all_indices = np.concatenate(train + held)
+     assert np.array_equal(np.sort(all_indices), np.arange(len(y)))
+     for client, indices in enumerate(train):
+         assert set(y[indices]) == {client % 10}
++        assert set(train[client]).isdisjoint(set(held[client]))
++
++
++def test_runner_uses_holdout_cli_name_and_records_split_counts():
++    source = RUNNER.read_text(encoding="utf-8")
++    assert '"--client-holdout-ratio"' in source
++    assert "args.local_test_ratio" not in source
++    assert "client_full_counts=" in source
++    assert "client_train_counts=" in source
++    assert "client_holdout_counts=" in source

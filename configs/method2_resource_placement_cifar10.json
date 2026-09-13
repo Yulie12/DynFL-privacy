@@ -1,0 +1,42 @@
+{
+  "name": "method2_resource_placement_cifar10",
+  "execution_protocol": "independent_fixed_he_dp_v1",
+  "output_root": "out/method2_resource_placement",
+  "seeds": [
+    40,
+    42,
+    44
+  ],
+  "policies": [
+    "resource_placement"
+  ],
+  "training": {
+    "dataset": "cifar10",
+    "model": "resnet18_pretrained_head",
+    "rounds": 100,
+    "train_limit": 12000,
+    "test_limit": 2000,
+    "partition_mode": "extreme_edge_label_skew",
+    "client_holdout_ratio": 0.2,
+    "local_epochs": 3,
+    "learning_rate": 0.01,
+    "device": "cuda",
+    "executor": "serial",
+    "execution_layout": "resource_dynamic"
+  },
+  "system": {
+    "clients": 100,
+    "edges": 10
+  },
+  "privacy": {
+    "epsilon": 8,
+    "delta": 0.00001,
+    "clip_norm": 0.1
+  },
+  "he": {
+    "backend": "seal",
+    "execution": "real",
+    "custody": "trusted_edge"
+  },
+  "resource_profile": "configs/method2_resource_profile.json"
+}

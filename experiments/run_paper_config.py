@@ -18,6 +18,7 @@ from dynfed.he_backend import (
     CKKS_SCALE_BITS,
 )
 from dynfed.version import CURRENT_EXECUTION_REVISION
+from experiments import method2_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,6 +65,9 @@ def build_command(
     max_new_rounds: int | None = None,
     resume_from_run: Path | None = None,
 ) -> list[str]:
+    if config.get("execution_protocol") == method2_config.PROTOCOL:
+        return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
+                                    max_new_rounds=max_new_rounds, resume_from_run=resume_from_run)
     training = config["training"]
     system = config["system"]
     privacy = config["privacy"]
@@ -160,10 +164,13 @@ def main() -> None:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if args.he_execution is not None:
         config["he"]["execution"] = args.he_execution
-        config["he"]["require_real_he"] = args.he_execution == "real"
+        if config.get("execution_protocol") != method2_config.PROTOCOL:
+            config["he"]["require_real_he"] = args.he_execution == "real"
     if args.output_root is not None:
         config["output_root"] = args.output_root
     validate_config(config)
+    if config.get("execution_protocol") == method2_config.PROTOCOL and args.max_new_rounds is not None:
+        print("Fixed-protocol smoke run: original privacy horizon retained; no resumable checkpoint is written.", flush=True)
     seeds = args.seeds or [int(seed) for seed in config["seeds"]]
     policies = args.policies or list(config["policies"])
     if args.resume_from_run is not None and len(seeds) != 1:
@@ -186,6 +193,9 @@ def main() -> None:
 
 
 def validate_config(config: dict) -> None:
+    if config.get("execution_protocol") is not None:
+        method2_config.validate(config)
+        return
     if config.get("execution_revision") != CURRENT_EXECUTION_REVISION:
         raise RuntimeError(
             f"Paper experiments require {CURRENT_EXECUTION_REVISION}"

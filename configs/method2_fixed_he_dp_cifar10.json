@@ -1,0 +1,23 @@
+{
+  "name": "method2_fixed_he_dp_cifar10",
+  "execution_protocol": "independent_fixed_he_dp_v1",
+  "output_root": "out/method2_system_fixed_he_dp",
+  "seeds": [40, 42, 44],
+  "policies": ["fixed_secure_aggregate"],
+  "training": {
+    "dataset": "cifar10",
+    "model": "resnet18_pretrained_head",
+    "rounds": 100,
+    "train_limit": 12000,
+    "test_limit": 2000,
+    "partition_mode": "extreme_edge_label_skew",
+    "client_holdout_ratio": 0.2,
+    "local_epochs": 3,
+    "learning_rate": 0.01,
+    "device": "cuda",
+    "executor": "serial"
+  },
+  "system": {"clients": 100, "edges": 10},
+  "privacy": {"epsilon": 8.0, "delta": 0.00001, "clip_norm": 0.1},
+  "he": {"backend": "seal", "execution": "real", "custody": "trusted_edge"}
+}

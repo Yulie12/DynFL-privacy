@@ -1,0 +1,14 @@
+{
+  "source": "analytical_assumption_not_device_measurement",
+  "end_sec_per_sample": 0.0004,
+  "tail_sec_per_sample": 0.0006,
+  "rate_mb_s": 5.0,
+  "base_latency_sec": 0.015,
+  "jitter": 0.25,
+  "client_heterogeneity": 2.0,
+  "edge_heterogeneity": 1.5,
+  "edge_work_limit_sec": 30.0,
+  "communication_weight": 0.1,
+  "resource_weight": 0.1,
+  "search_passes": 3
+}
