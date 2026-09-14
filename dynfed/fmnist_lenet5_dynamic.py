@@ -147,7 +147,28 @@ def _validate_mainline_fusion(selection: SelectionConfig, train_config: Lenet5Co
 
 
 
-def _privacy_reporting_scope(mainline_fusion: bool) -> dict[str, str]:
+def _privacy_reporting_scope(
+    mainline_fusion: bool,
+    *,
+    mainline_dp_enabled: bool = True,
+    mainline_clip_enabled: bool = True,
+) -> dict[str, str]:
+    if mainline_fusion and not mainline_dp_enabled:
+        return {
+            "dp_accountant_scope": "diagnostic_disabled",
+            "privacy_policy_scope": "dynamic_mode_fixed_roster_diagnostic",
+            "protected_object": "global_aggregate_release",
+            "privacy_mechanism_scope": (
+                "real_he_plus_update_clipping_no_noise"
+                if mainline_clip_enabled
+                else "real_he_only_no_update_dp"
+            ),
+            "privacy_guarantee": (
+                "diagnostic_clip_only_no_dp_guarantee"
+                if mainline_clip_enabled
+                else "diagnostic_no_dp"
+            ),
+        }
     if mainline_fusion:
         return {
             "dp_accountant_scope": "one_global_release_per_round_fixed_public_roster",
@@ -167,8 +188,10 @@ def _privacy_reporting_scope(mainline_fusion: bool) -> dict[str, str]:
 
 def _global_release_summary(
     release_account: IndependentReleaseAccount | None,
+    *,
+    enabled: bool = True,
 ) -> dict[str, float | int | None]:
-    if release_account is None:
+    if release_account is None or not enabled:
         return {
             "global_release_count": 0,
             "global_release_epsilon": 0.0,
@@ -270,10 +293,11 @@ def _reported_release_mechanism(
     candidate: Candidate | None,
     *,
     mainline_fusion: bool,
+    mainline_dp_enabled: bool = True,
 ) -> str:
-    """Return the protection applied at the formal global release boundary."""
+    """Return the protection applied at the global release boundary."""
     if mainline_fusion:
-        return "dp_he3"
+        return "dp_he3" if mainline_dp_enabled else "he3"
     return _candidate_cloud_update_mechanism(candidate)
 
 
@@ -917,7 +941,46 @@ def _run_lenet5_policy(
         omega_update_clip_norm=train_config.dp_clip_norm,
     )
     _validate_mainline_fusion(effective_selection, train_config)
-    privacy_reporting_scope = _privacy_reporting_scope(effective_selection.mainline_fusion)
+    diagnostic_update_ablation = os.environ.get(
+        "DYNFL_DIAGNOSTIC_UPDATE_ABLATION", ""
+    ).strip().lower()
+    if diagnostic_update_ablation not in {"", "clip_only"}:
+        raise ValueError(
+            "DYNFL_DIAGNOSTIC_UPDATE_ABLATION must be empty or 'clip_only'"
+        )
+    mainline_dp_enabled = (
+        effective_selection.mainline_fusion and train_config.dp_update_mode != "off"
+    )
+    diagnostic_clip_only = (
+        effective_selection.mainline_fusion
+        and not mainline_dp_enabled
+        and diagnostic_update_ablation == "clip_only"
+    )
+    diagnostic_no_dp = (
+        effective_selection.mainline_fusion
+        and not mainline_dp_enabled
+        and not diagnostic_clip_only
+    )
+    mainline_clip_enabled = mainline_dp_enabled or diagnostic_clip_only
+    privacy_reporting_scope = _privacy_reporting_scope(
+        effective_selection.mainline_fusion,
+        mainline_dp_enabled=mainline_dp_enabled,
+        mainline_clip_enabled=mainline_clip_enabled,
+    )
+    if diagnostic_clip_only:
+        print(
+            f"  [{policy}] DIAGNOSTIC: mainline clip-only ablation is enabled; "
+            "client update clipping remains active, Gaussian update noise and global DP "
+            "accounting are bypassed; real HE remains enabled.",
+            flush=True,
+        )
+    elif diagnostic_no_dp:
+        print(
+            f"  [{policy}] DIAGNOSTIC: mainline update DP is disabled; "
+            "client clipping, Gaussian update noise, and global DP accounting are bypassed; "
+            "real HE remains enabled.",
+            flush=True,
+        )
     emit_stage_status("Preparing privacy accountant", stage="privacy_accounting")
     privacy_parameters = resolved_privacy_parameters(effective_selection)
     release_account = None
@@ -1346,6 +1409,7 @@ def _run_lenet5_policy(
                         _reported_release_mechanism(
                             candidate,
                             mainline_fusion=effective_selection.mainline_fusion,
+                            mainline_dp_enabled=mainline_dp_enabled,
                         )
                         if effective_selection.mainline_fusion
                         else "/".join(
@@ -1793,6 +1857,26 @@ def _run_lenet5_policy(
         actual_cloud_fusion_ratio = actual_cloud_samples / total_profile_samples
         actual_cloud_share_of_admitted = actual_cloud_samples / actual_admitted_samples
 
+        direction_client_updates: list[dict[str, dict[str, torch.Tensor]]] = []
+        direction_client_sample_counts: list[float] = []
+        if effective_selection.mainline_fusion:
+            for client_id, state_diff, sample_count, _candidate in global_updates:
+                direction_client_updates.append(
+                    _state_difference_from_client_update(
+                        client_id=client_id,
+                        state_diff=state_diff,
+                        client_model_states={},
+                        global_end=global_end,
+                        global_edge=global_edge,
+                        device=torch.device("cpu"),
+                    )
+                )
+                direction_client_sample_counts.append(float(sample_count))
+        direction_diagnostics = _client_update_direction_diagnostics(
+            direction_client_updates,
+            direction_client_sample_counts,
+        )
+
         cloud_updates: list[tuple[Any, int, Candidate | None, list[int]]] = []
         cloud_signal_updates: list[Any] = []
         secure_aggregate_dp_client_fractions: list[float] = []
@@ -1813,17 +1897,18 @@ def _run_lenet5_policy(
                     global_edge=global_edge,
                     device=torch.device("cpu"),
                 )
-                relative_update, original_norm, clip_scale = clip_state_difference(
-                    relative_update,
-                    train_config.dp_clip_norm,
-                    torch.device("cpu"),
-                )
-                update_dp_clip_scales.append(clip_scale)
-                update_dp_preclip_norms.append(float(original_norm))
-                update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+                if mainline_clip_enabled:
+                    relative_update, original_norm, clip_scale = clip_state_difference(
+                        relative_update,
+                        train_config.dp_clip_norm,
+                        torch.device("cpu"),
+                    )
+                    update_dp_clip_scales.append(clip_scale)
+                    update_dp_preclip_norms.append(float(original_norm))
+                    update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
                 cloud_signal_updates.append(relative_update)
                 cloud_updates.append((relative_update, sample_count, candidate, [client_id]))
-                secure_aggregate_dp_client_fractions.append(1.0)
+                secure_aggregate_dp_client_fractions.append(1.0 if mainline_dp_enabled else 0.0)
         else:
             for client_id, state_diff, sample_count, candidate in global_updates:
                 if candidate is not None and candidate.mode in EDGE_CLOUD_MODES:
@@ -2210,9 +2295,10 @@ def _run_lenet5_policy(
             if effective_selection.mainline_fusion:
                 if release_account is None:
                     raise RuntimeError("Missing mainline release account")
-                fixed_ids = sorted(flow_result.selected_client_ids)
-                release_account.check(round_idx, fixed_ids)
-                release_account.reserve(round_idx, fixed_ids)
+                if mainline_dp_enabled:
+                    fixed_ids = sorted(flow_result.selected_client_ids)
+                    release_account.check(round_idx, fixed_ids)
+                    release_account.reserve(round_idx, fixed_ids)
                 if not use_real_he:
                     raise RuntimeError("Mainline fusion refuses plaintext/profiled cloud aggregation")
             if use_real_he:
@@ -2270,6 +2356,7 @@ def _run_lenet5_policy(
             mechanism = _reported_release_mechanism(
                 candidate,
                 mainline_fusion=effective_selection.mainline_fusion,
+                mainline_dp_enabled=mainline_dp_enabled,
             )
             noise_location = (
                 "packet" if packet_index in packet_dp_indices else
@@ -2425,6 +2512,14 @@ def _run_lenet5_policy(
                 "cloud_input_update_norm_mean": _list_mean(cloud_input_update_norms),
                 "cloud_input_update_norm_max": max(cloud_input_update_norms, default=0.0),
                 "pre_dp_global_update_norm": pre_dp_global_update_norm,
+                "direction_client_count": direction_diagnostics["client_count"],
+                "direction_mean_client_cosine": direction_diagnostics["mean_client_cosine"],
+                "direction_negative_cosine_fraction": direction_diagnostics["negative_cosine_fraction"],
+                "direction_raw_aggregate_norm": direction_diagnostics["aggregate_norm"],
+                "direction_mean_client_norm": direction_diagnostics["mean_client_norm"],
+                "direction_aggregate_to_mean_client_norm_ratio": direction_diagnostics[
+                    "aggregate_to_mean_client_norm_ratio"
+                ],
                 "global_update_norm": global_update_norm,
                 "post_to_pre_update_norm_ratio": global_update_norm
                 / max(pre_dp_global_update_norm, 1e-12),
@@ -2807,6 +2902,15 @@ def _run_lenet5_policy(
             f"end_to_end_dp=not_established",
             flush=True,
         )
+        if effective_selection.mainline_fusion:
+            print(
+                f"    direction_cos={current_round['direction_mean_client_cosine']:.6g} "
+                f"neg_cos_frac={current_round['direction_negative_cosine_fraction']:.3f} "
+                f"agg/mean_client={current_round['direction_aggregate_to_mean_client_norm_ratio']:.6g} "
+                f"raw_agg_norm={current_round['direction_raw_aggregate_norm']:.6g} "
+                f"mean_client_norm={current_round['direction_mean_client_norm']:.6g}",
+                flush=True,
+            )
         worker_results.clear()
         flow_inputs.clear()
         initial_admitted_updates.clear()
@@ -2875,7 +2979,7 @@ def _run_lenet5_policy(
         )
         partial_summary.update(privacy_reporting_scope)
         partial_summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
-        partial_summary.update(_global_release_summary(release_account))
+        partial_summary.update(_global_release_summary(release_account, enabled=mainline_dp_enabled))
         if release_account is not None:
             partial_summary["larger_channel_epsilon"] = release_account.ledger.current_epsilon()
         _write_csv(output_dir / "client_decisions.csv", decision_rows)
@@ -3007,7 +3111,7 @@ def _run_lenet5_policy(
     summary["privacy_mechanism_scope"] = privacy_reporting_scope["privacy_mechanism_scope"]
     summary["privacy_guarantee"] = privacy_reporting_scope["privacy_guarantee"]
     summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
-    summary.update(_global_release_summary(release_account))
+    summary.update(_global_release_summary(release_account, enabled=mainline_dp_enabled))
     if release_account is not None:
         summary["larger_channel_epsilon"] = release_account.ledger.current_epsilon()
         summary["he_ciphertext_bytes_semantics"] = "serialized_bytes"
@@ -3751,6 +3855,71 @@ def _weighted_state_difference_norm(
         state_diffs,
         [float(count) / total for count in sample_counts],
     )
+
+
+def _state_difference_inner_product(
+    first: dict[str, dict[str, torch.Tensor]],
+    second: dict[str, dict[str, torch.Tensor]],
+) -> float:
+    total = 0.0
+    for part_name, values in first.items():
+        second_part = second.get(part_name, {})
+        for name, value in values.items():
+            other = second_part.get(name)
+            if other is None:
+                continue
+            if not torch.is_floating_point(value) or not torch.is_floating_point(other):
+                continue
+            left = value.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
+            right = other.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
+            total += float(torch.dot(left, right).item())
+    return total
+
+
+def _client_update_direction_diagnostics(
+    state_diffs: list[dict[str, dict[str, torch.Tensor]]],
+    sample_counts: list[float],
+) -> dict[str, float | int]:
+    if len(state_diffs) != len(sample_counts):
+        raise ValueError("Direction diagnostics require one sample count per client update")
+    if not state_diffs:
+        return {
+            "client_count": 0,
+            "mean_client_cosine": 0.0,
+            "negative_cosine_fraction": 0.0,
+            "aggregate_norm": 0.0,
+            "mean_client_norm": 0.0,
+            "aggregate_to_mean_client_norm_ratio": 0.0,
+        }
+
+    aggregate = _weighted_average_state_differences(
+        state_diffs,
+        sample_counts,
+        device=torch.device("cpu"),
+    )
+    aggregate_norm = _state_difference_l2_norm(aggregate)
+    client_norms = [_state_difference_l2_norm(state_diff) for state_diff in state_diffs]
+    cosines: list[float] = []
+    for state_diff, client_norm in zip(state_diffs, client_norms):
+        denominator = client_norm * aggregate_norm
+        if denominator <= 1e-18:
+            continue
+        cosine = _state_difference_inner_product(state_diff, aggregate) / denominator
+        cosines.append(float(max(-1.0, min(1.0, cosine))))
+
+    mean_client_norm = _list_mean(client_norms)
+    return {
+        "client_count": len(state_diffs),
+        "mean_client_cosine": _list_mean(cosines),
+        "negative_cosine_fraction": (
+            sum(cosine < 0.0 for cosine in cosines) / len(cosines) if cosines else 0.0
+        ),
+        "aggregate_norm": aggregate_norm,
+        "mean_client_norm": mean_client_norm,
+        "aggregate_to_mean_client_norm_ratio": (
+            aggregate_norm / max(mean_client_norm, 1e-12)
+        ),
+    }
 
 
 def _linear_combination_state_difference_norm(
