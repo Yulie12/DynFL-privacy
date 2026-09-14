@@ -317,7 +317,9 @@ def _client_train_worker(
     rng = np.random.default_rng(int(payload["dp_seed"]))
     worker_device = torch.device(payload.get("device", "cpu"))
     _set_torch_seed(int(payload["training_seed"]), worker_device)
+    training_diagnostics = {}
     state_diff = split_local_train_lenet5(
+        training_diagnostics=training_diagnostics,
         mode=payload["mode"],
         global_end_state=payload["global_end_state"],
         global_edge_state=payload["global_edge_state"],
@@ -358,6 +360,7 @@ def _client_train_worker(
         "client_id": payload["client_id"],
         "state_diff": returned_diff,
         "measured_local": time.perf_counter() - start,
+        **training_diagnostics,
         "finite": finite,
     }
 
@@ -1451,6 +1454,11 @@ def _run_lenet5_policy(
             progress_event_callback=training_event_callback,
         )
         training_wall_time_sec = time.perf_counter() - training_wall_started_at
+        for row in decision_rows:
+            if row.get("round") == round_idx and row.get("client_id") in worker_results:
+                result = worker_results[row["client_id"]]
+                for field in ("actual_local_batches", "actual_optimizer_steps"):
+                    row[field] = result.get(field, 0)
 
         for client_id, candidate, idx, sequence in train_tasks:
             result = worker_results.get(client_id)
@@ -2351,6 +2359,8 @@ def _run_lenet5_policy(
                 "cumulative_wall_time_sec": cumulative_wall_time_sec,
                 "selection_wall_time_sec": selection_wall_time_sec,
                 "training_wall_time_sec": training_wall_time_sec,
+                "actual_local_batches": sum(r.get("actual_local_batches", 0) for r in worker_results.values()),
+                "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
                 "flow_wall_time_sec": flow_wall_time_sec,
                 "aggregation_wall_time_sec": aggregation_wall_time_sec,
                 "evaluation_wall_time_sec": evaluation_wall_time_sec,
@@ -3132,6 +3142,11 @@ def _round_communication_volume(inputs, candidates, fused):
     return total + sum(shared.values())
 
 
+def _client_step_limit(selection):
+    # L_block_cycles models logical link cost; it must not truncate FL epochs.
+    return None if selection.mainline_fusion else selection.L_block_cycles
+
+
 def _client_epoch_count(train_config, selection, candidate):
     stages = max(1, int(MODE_SPECS[candidate.mode].E_edge_loops)) if selection.mainline_fusion else 1
     # Continuous local optimizer state, private to this client, across stages.
@@ -3192,7 +3207,7 @@ def _run_client_training_tasks(
             "epochs": _client_epoch_count(train_config, selection, candidate),
             "lr": train_config.learning_rate,
             "l2": train_config.l2,
-            "local_steps": selection.L_block_cycles,
+            "local_steps": _client_step_limit(selection),
             "model_name": model_name,
             "input_shape": input_shape,
             "num_classes": num_classes,
@@ -3228,7 +3243,7 @@ def _run_client_training_tasks(
             client_label = (
                 f"client {client_id} mode {candidate.mode} "
                 f"samples {len(idx)} epochs {_client_epoch_count(train_config, selection, candidate)} "
-                f"max steps {selection.L_block_cycles}"
+                f"step limit {_client_step_limit(selection)}"
             )
             if progress_event_callback is not None:
                 progress_event_callback(f"preparing {client_label}", completed - 1, total)
@@ -4054,7 +4069,7 @@ def _coordinate_accuracy_oracle_round(
                 global_edge_state=global_edge.state_dict(),
                 x=x_train[idx],
                 y=y_train[idx],
-                epochs=train_config.local_epochs,
+                epochs=_client_epoch_count(train_config, selection_config, candidate),
                 lr=train_config.learning_rate,
                 device=device,
                 model_name=model_name,
@@ -4069,7 +4084,7 @@ def _coordinate_accuracy_oracle_round(
                 dp_rng=eval_rng,
                 dp_epsilon=max(selection_config.dp_emb_epsilon, 1e-6),
                 l2=train_config.l2,
-                local_steps=selection_config.L_block_cycles,
+                local_steps=_client_step_limit(selection_config),
                 training_seed=_client_training_seed(
                     selection_config.seed,
                     round_idx,

@@ -1,6 +1,6 @@
 {
   "name": "paper_v30_fmnist_lenet5",
-  "execution_revision": "paper_flow_v30_mainline_fusion_method2",
+  "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
   "output_root": "out/paper_v30_fmnist_lenet5",
   "seeds": [
     40,

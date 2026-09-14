@@ -1,22 +1,13 @@
 {
-  "name": "paper_v30_cifar10_resnet18",
+  "name": "method2_epochs_5round_diagnostic",
   "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
-  "output_root": "out/paper_v30_cifar10_resnet18_head_method2",
+  "output_root": "out/method2_epochs_5round_diagnostic",
   "seeds": [
-    40,
-    41,
-    42,
-    43,
-    44
+    42
   ],
   "policies": [
     "ours",
-    "individual_optimal",
-    "random",
-    "fixed_fedavg",
-    "fixed_splitfed",
-    "fixed_hfl",
-    "nsga2"
+    "random"
   ],
   "training": {
     "dataset": "cifar10",
@@ -29,7 +20,7 @@
     "learning_rate": 0.01,
     "device": "cuda",
     "executor": "serial",
-    "selection_period": 1
+    "selection_period": 5
   },
   "system": {
     "clients": 100,
@@ -41,9 +32,9 @@
     "aggregation_fraction": 1.0,
     "client_heterogeneity": 2,
     "edge_heterogeneity": 1.5,
-    "require_feasible": true,
-    "require_edge_cloud_coverage": true,
-    "min_edge_cloud_fusion_ratio": 0.5,
+    "require_feasible": false,
+    "require_edge_cloud_coverage": false,
+    "min_edge_cloud_fusion_ratio": 0.0,
     "trusted_edge_split_execution": true,
     "mainline_fusion": true
   },
@@ -61,13 +52,14 @@
   "privacy": {
     "protection_scope": "global_release_dp_plus_he_confidentiality",
     "candidate_mechanisms": [
+      "dp",
       "he3"
     ],
     "accounting_mode": "rdp_auto",
     "initial_epsilon": 8,
     "update_epsilon_budget": 8,
     "delta": 1e-05,
-    "clip_norm": 0.1,
+    "clip_norm": 0.2,
     "update_mode": "upd_only",
     "enforce_cloud_dp_stability": false,
     "cloud_dp_stability_threshold": 1,
@@ -79,7 +71,7 @@
     "execution": "real",
     "require_real_he": true,
     "aggregation_size": 0,
-    "workers": 4,
+    "workers": 1,
     "poly_modulus_degree": 8192,
     "coeff_modulus_bits": [
       50,

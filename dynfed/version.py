@@ -1,2 +1,2 @@
-CURRENT_EXECUTION_REVISION = "paper_flow_v30_mainline_fusion_method2"
+CURRENT_EXECUTION_REVISION = "paper_flow_v30_mainline_fusion_method2_epochs"
 CURRENT_UPDATE_PARAMETER_SCOPE = "trainable_parameters_v1"

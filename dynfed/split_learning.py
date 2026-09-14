@@ -729,6 +729,7 @@ def split_local_train_lenet5(
     local_steps: int | None = None,
     training_seed: int | None = None,
     model_cache: dict[str, Any] | None = None,
+    training_diagnostics: dict[str, int] | None = None,
 ) -> dict[str, dict[str, torch.Tensor]]:
     """Split learning with labels retained at the client.
 
@@ -737,6 +738,8 @@ def split_local_train_lenet5(
         where each is a state_dict of parameter differences.
         For no-split modes, only "end" contains the full model diff.
     """
+    diagnostics = training_diagnostics if training_diagnostics is not None else {}
+    diagnostics.update(actual_local_batches=0, actual_optimizer_steps=0)
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
         "resnet18pretrainedadapter",
         "resnet18pretrainedhead",
@@ -793,6 +796,7 @@ def split_local_train_lenet5(
         opt = _make_optimizer(model, lr, model_name, weight_decay=l2)
 
         for bx, by in _training_batches(loader, epochs, local_steps):
+            diagnostics["actual_local_batches"] += 1
             if opt is None:
                 continue
             opt.zero_grad()
@@ -800,6 +804,7 @@ def split_local_train_lenet5(
             loss.backward()
             torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], max_norm=5.0)
             opt.step()
+            diagnostics["actual_optimizer_steps"] += 1
 
         diff = {}
         for name, param in model.named_parameters():
@@ -837,6 +842,7 @@ def split_local_train_lenet5(
     edge_opt = _make_optimizer(edge, lr, model_name, weight_decay=l2)
 
     for bx, by in _training_batches(loader, epochs, local_steps):
+        diagnostics["actual_local_batches"] += 1
         if end_opt is not None:
             end_opt.zero_grad()
         if edge_opt is not None:
@@ -875,12 +881,14 @@ def split_local_train_lenet5(
         if edge_opt is not None and edge_trainable:
             torch.nn.utils.clip_grad_norm_(edge_trainable, max_norm=5.0)
             edge_opt.step()
+            diagnostics["actual_optimizer_steps"] += 1
 
         end_trainable = [p for p in end.parameters() if p.requires_grad]
         if end_opt is not None and end_trainable and emb.requires_grad:
             transmitted_emb.backward(grad_to_end)
             torch.nn.utils.clip_grad_norm_(end_trainable, max_norm=5.0)
             end_opt.step()
+            diagnostics["actual_optimizer_steps"] += 1
 
     end_diff = {
         name: param.data - global_end_state[name]
