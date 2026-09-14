@@ -1,0 +1,219 @@
+--- a/experiments/monitor_lenet5_training.py
++++ b/experiments/monitor_lenet5_training.py
+@@ -27,6 +27,7 @@
+ TRAINING_PROCESS: subprocess.Popen | None = None
+ ACTIVE_OUTPUT_ROOT: Path | None = None
+ LAST_STOP_MESSAGE: str | None = None
++MONITOR_CLEARED = False
+ TRAINING_STATE_LOCK = threading.RLock()
+ TRAINING_PYTHON_ENV = "DYNFED_TRAINING_PYTHON"
+ PRIVACY_SCHEMA_VERSION = "rdp_total_v1"
+@@ -607,6 +608,26 @@
+ 
+ 
+ def read_status(output_root: Path) -> dict:
++    # A manual Stop/Clear action should leave the headline monitor empty instead
++    # of immediately resurrecting the newest historical run. Starting a new
++    # training job resets this flag.
++    if MONITOR_CLEARED and not _training_process_is_running():
++        return {
++            "status": "stopped",
++            "message": LAST_STOP_MESSAGE or "Run Monitor cleared. Start a new experiment or choose one from Experiment View.",
++            "output_root": str(output_root),
++            "recent_rounds": [],
++            "policy_statuses": [],
++            "run_figures": [],
++            "paper_experiments": available_paper_experiments(),
++            "merged_runs": available_merged_runs(),
++            "merge_sources": available_merge_sources(),
++            "delete_targets": available_delete_targets(),
++            "experiments": available_experiments(),
++            "experiment_category": "cleared",
++            "monitor_cleared": True,
++        }
++
+     # When the dashboard monitors the shared out/ tree and no job is active,
+     # do not let a stale legacy live_status.json become the headline run.
+     if not _training_process_is_running():
+@@ -2069,7 +2090,7 @@
+     resume_from_run: str = "",
+     reuse_completed: bool = False,
+ ) -> dict:
+-    global ACTIVE_OUTPUT_ROOT, LAST_STOP_MESSAGE, TRAINING_PROCESS
++    global ACTIVE_OUTPUT_ROOT, LAST_STOP_MESSAGE, MONITOR_CLEARED, TRAINING_PROCESS
+     if preset_name == "paper50":
+         preset_name = "paper100"
+     if preset_name in {"configured", "custom"}:
+@@ -2133,6 +2154,7 @@
+         return {"ok": False, "message": f"Training process is already running, PID {TRAINING_PROCESS.pid}"}
+ 
+     LAST_STOP_MESSAGE = None
++    MONITOR_CLEARED = False
+ 
+     if reuse_completed:
+         reusable_run = find_reusable_run(output_root, preset)
+@@ -2237,8 +2259,9 @@
+ 
+ 
+ def _stop_result(message: str, cleanup: dict, stopped: list[str]) -> dict:
+-    global LAST_STOP_MESSAGE
++    global LAST_STOP_MESSAGE, MONITOR_CLEARED
+     LAST_STOP_MESSAGE = message
++    MONITOR_CLEARED = True
+     return {"ok": True, "message": message, "cleanup": cleanup, "stopped_pids": stopped}
+ 
+ 
+@@ -2806,20 +2829,20 @@
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+-<title>DynFedPrivacy LeNet5 Monitor</title>
++<title>DynFedPrivacy Experiment Monitor — WEBFIX 4</title>
+ <style>
+ :root {
+   color-scheme: dark;
+-  --bg: #101214;
+-  --panel: #191d20;
+-  --panel-2: #20262a;
+-  --text: #eef2f3;
+-  --muted: #aab4b8;
+-  --line: #2e383d;
+-  --green: #4fd08a;
+-  --blue: #5ca8ff;
++  --bg: #120d1f;
++  --panel: #1d1530;
++  --panel-2: #281c40;
++  --text: #f7f2ff;
++  --muted: #c5b8dc;
++  --line: #4a3768;
++  --green: #70e1b2;
++  --blue: #b08cff;
+   --amber: #f3c65f;
+-  --red: #ee6f70;
++  --red: #ff7f9f;
+ }
+ * { box-sizing: border-box; }
+ body {
+@@ -2831,6 +2854,8 @@
+ main { width: min(1320px, calc(100vw - 32px)); margin: 0 auto; padding: 22px 0 32px; }
+ header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-end; margin-bottom: 18px; }
+ h1 { margin: 0; font-size: 26px; font-weight: 650; letter-spacing: 0; }
++.version-badge { display:inline-block; margin-left:10px; padding:4px 9px; border-radius:999px; background:#7c3aed; color:#fff; font-size:12px; font-weight:700; vertical-align:middle; box-shadow:0 0 18px rgba(124,58,237,.45); }
++body::before { content:""; position:fixed; inset:0 0 auto 0; height:4px; background:linear-gradient(90deg,#7c3aed,#b08cff,#e879f9); z-index:9999; }
+ .sub { color: var(--muted); font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
+ .pill { padding: 8px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--muted); font-size: 13px; }
+ .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+@@ -2839,15 +2864,15 @@
+ button:disabled { cursor: not-allowed; opacity: .55; }
+ .control-panel { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+ .control-panel button { min-width: 148px; }
+-.control-panel button.secondary { border-color: var(--blue); background: rgba(92, 168, 255, .12); }
+-.control-panel button.secondary:hover { background: rgba(92, 168, 255, .2); }
++.control-panel button.secondary { border-color: var(--blue); background: rgba(176, 140, 255, .16); }
++.control-panel button.secondary:hover { background: rgba(176, 140, 255, .28); }
+ .control-panel button.danger { border-color: var(--red); background: rgba(239, 100, 97, .12); }
+ .control-panel button.danger:hover { background: rgba(239, 100, 97, .2); }
+ .compact-controls { margin-top: 12px; margin-bottom: 0; }
+ .experiment-form { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 12px; align-items: end; margin-bottom: 12px; }
+ .field { display: grid; gap: 6px; }
+ .field label { color: var(--muted); font-size: 12px; }
+-.round-input, select { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #0f1315; color: var(--text); padding: 9px 10px; font: inherit; }
++.round-input, select { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #100a1c; color: var(--text); padding: 9px 10px; font: inherit; }
+ .round-input:focus, select:focus { outline: 1px solid var(--green); }
+ .method-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+ .method-list label { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: var(--muted); cursor: pointer; }
+@@ -2867,16 +2892,16 @@
+ .status-tag.failed { color: var(--red); border-color: var(--red); background: rgba(238, 111, 112, .1); }
+ .figure-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 14px; }
+ .figure-grid.large-figures { grid-template-columns: 1fr; }
+-.figure-card { border: 1px solid var(--line); border-radius: 8px; background: #111518; overflow: hidden; }
++.figure-card { border: 1px solid var(--line); border-radius: 8px; background: #140d22; overflow: hidden; }
+ .figure-card img { display: block; width: 100%; min-height: 360px; max-height: 76vh; object-fit: contain; background: #fff; }
+ .figure-caption { padding: 9px 10px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; border-top: 1px solid var(--line); }
+ .figure-caption a { color: var(--blue); text-decoration: none; font-weight: 650; margin-left: 8px; }
+-.merge-list { display: grid; gap: 8px; max-height: 280px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #111518; margin-bottom: 12px; }
++.merge-list { display: grid; gap: 8px; max-height: 280px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #140d22; margin-bottom: 12px; }
+ .merge-item { display: grid; grid-template-columns: 24px 200px 1fr 88px 88px 110px; gap: 8px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 12px; }
+ .merge-item strong { color: var(--text); font-size: 13px; }
+ .merge-item .run-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ .merge-item:has(input:checked) { border-color: var(--green); background: rgba(79, 208, 138, .08); }
+-.delete-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #111518; margin-bottom: 12px; }
++.delete-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #140d22; margin-bottom: 12px; }
+ .delete-item { display: grid; grid-template-columns: 24px 112px 1fr; gap: 8px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 12px; }
+ .delete-item strong { color: var(--text); font-size: 13px; }
+ .delete-item .dir-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@@ -2885,16 +2910,16 @@
+ .live-svg { width: 100%; height: 340px; display: block; border: 1px solid var(--line); border-radius: 6px; background: #ffffff; }
+ .live-chart-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+ .mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+-.mode-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #111518; }
++.mode-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #140d22; }
+ .mode-title { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 10px; font-weight: 650; }
+ .mode-bar-row { display: grid; grid-template-columns: 72px 1fr 46px; gap: 8px; align-items: center; margin: 7px 0; font-size: 12px; }
+-.mode-bar-track { height: 9px; border: 1px solid var(--line); border-radius: 999px; background: #0b0d0f; overflow: hidden; }
++.mode-bar-track { height: 9px; border: 1px solid var(--line); border-radius: 999px; background: #0d0816; overflow: hidden; }
+ .mode-bar-fill { height: 100%; background: var(--green); }
+ .card, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+ .card { padding: 13px 14px; min-height: 82px; }
+ .label { color: var(--muted); font-size: 12px; }
+ .value { font-size: 24px; line-height: 1.2; margin-top: 8px; font-weight: 650; }
+-.bar-wrap { height: 14px; background: #0b0d0f; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; margin: 12px 0 4px; }
++.bar-wrap { height: 14px; background: #0d0816; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; margin: 12px 0 4px; }
+ .bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--green), var(--blue)); transition: width .25s ease; }
+ .panel { padding: 15px; margin-bottom: 14px; }
+ .panel h2 { margin: 0 0 12px; font-size: 15px; font-weight: 650; }
+@@ -2907,10 +2932,10 @@
+ .section-kicker { color: var(--muted); font-size: 12px; margin: -4px 0 12px; }
+ .module-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+ .wide-panel { grid-column: 1 / -1; }
+-canvas { width: 100%; height: 285px; display: block; background: #111518; border: 1px solid var(--line); border-radius: 6px; }
+-.viz { height: 285px; position: relative; overflow: hidden; background: #111518; border: 1px solid var(--line); border-radius: 6px; }
++canvas { width: 100%; height: 285px; display: block; background: #140d22; border: 1px solid var(--line); border-radius: 6px; }
++.viz { height: 285px; position: relative; overflow: hidden; background: #140d22; border: 1px solid var(--line); border-radius: 6px; }
+ .cloud { position: absolute; left: 50%; top: 26px; transform: translateX(-50%); width: 142px; height: 70px; border: 2px solid var(--blue); border-radius: 38px; display: grid; place-items: center; color: var(--blue); font-weight: 650; opacity: .55; }
+-.cloud.active { opacity: 1; background: rgba(92, 168, 255, .12); box-shadow: 0 0 18px rgba(92, 168, 255, .35); }
++.cloud.active { opacity: 1; background: rgba(176, 140, 255, .16); box-shadow: 0 0 18px rgba(92, 168, 255, .35); }
+ .topology-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+ .topology-lines line { stroke: rgba(170, 180, 184, .32); stroke-width: 1.4; stroke-dasharray: 4 5; }
+ .edge { position: absolute; width: 112px; height: 52px; border: 2px solid var(--green); border-radius: 7px; display: grid; place-items: center; color: var(--green); bottom: 92px; transform: translateX(-50%); }
+@@ -2931,7 +2956,7 @@
+   100% { transform: scale(.45); opacity: .2; }
+ }
+ .mode-row { display: grid; grid-template-columns: 86px 1fr 54px; align-items: center; gap: 10px; margin: 9px 0; font-size: 13px; }
+-.mode-meter { height: 10px; background: #0b0d0f; border-radius: 99px; overflow: hidden; border: 1px solid var(--line); }
++.mode-meter { height: 10px; background: #0d0816; border-radius: 99px; overflow: hidden; border: 1px solid var(--line); }
+ .mode-fill { height: 100%; width: 0%; background: var(--green); }
+ table { width: 100%; border-collapse: collapse; font-size: 12px; }
+ th, td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+@@ -2961,7 +2986,7 @@
+ <main>
+   <header>
+     <div>
+-      <h1>DynFedPrivacy LeNet5 Monitor</h1>
++      <h1>DynFedPrivacy Experiment Monitor <span class="version-badge">WEBFIX 4</span></h1>
+       <div id="path" class="sub">waiting for run output</div>
+     </div>
+     <div class="actions">
+@@ -3435,7 +3460,7 @@
+     <div class="bar-wrap"><div class="bar" id="progress"></div></div>
+     <div class="sub" id="message"></div>
+     <div class="control-panel compact-controls">
+-      <button class="secondary danger" type="button" id="stopRunStatusBtn">Stop Run</button>
++      <button class="secondary danger" type="button" id="stopRunStatusBtn">Stop / Clear Run Monitor</button>
+     </div>
+   </section>
+ 
+@@ -4716,8 +4741,11 @@
+   try {
+     const res = await fetch("/stop", {method: "POST"});
+     const result = await res.json();
+-    $("message").textContent = result.message || "Stop request finished";
+-    $("controlStatus").textContent = result.message || "Stop request finished";
++    $("message").textContent = result.message || "Stop / clear request finished";
++    $("controlStatus").textContent = result.message || "Stop / clear request finished";
++    // Stop/Clear is also a view action: drop any explicitly selected historical
++    // run so it cannot immediately repopulate the headline monitor.
++    if ($("experimentSelect")) $("experimentSelect").value = "";
+     await refresh();
+   } catch (err) {
+     $("message").textContent = String(err);

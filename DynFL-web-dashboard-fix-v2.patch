@@ -1,0 +1,379 @@
+--- experiments/monitor_lenet5_training.py	2026-09-13 13:59:15.000000000 +0000
++++ experiments/monitor_lenet5_training.py	2026-09-14 11:58:56.312479165 +0000
+@@ -463,11 +463,140 @@
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description="Monitor live LeNet5 experiment progress.")
+-    parser.add_argument("--output-root", default="out/fmnist_lenet5")
++    parser.add_argument("--output-root", default="out")
+     parser.add_argument("--port", type=int, default=8765)
+     return parser.parse_args()
+ 
+ 
++
++def _experiment_category(run_dir: Path) -> str:
++    """Classify a run for the dashboard without treating folder names as the primary truth."""
++    config = _read_run_config(run_dir)
++    selection = config.get("selection", {}) if isinstance(config, dict) else {}
++    training = config.get("training", {}) if isinstance(config, dict) else {}
++    name = str(run_dir).lower()
++
++    # Diagnostic runs deliberately bypass or alter the formal DP release contract.
++    dp_mode = str(training.get("dp_update_mode", "")).lower()
++    if dp_mode == "off" or "diag" in name or "diagnostic" in name or "cliponly" in name or "clip_only" in name:
++        return "diagnostic"
++
++    # A formal v30-style run must use the fused global-release contract.  This
++    # positive check prevents old/legacy output directories from silently
++    # entering paper-facing tables just because their folder name looks new.
++    if (
++        bool(selection.get("mainline_fusion"))
++        and str(selection.get("dp_accounting_mode", "")).lower() == "rdp_auto"
++        and dp_mode not in {"", "off"}
++        and str(training.get("he_execution", "")).lower() == "real"
++        and bool(training.get("require_real_he"))
++    ):
++        return "formal"
++    return "legacy"
++
++
++def available_experiments(limit: int = 120) -> list[dict]:
++    """Return formal/diagnostic runs for the experiment selector; legacy runs stay hidden."""
++    out_root = ROOT / "out"
++    if not out_root.exists():
++        return []
++    items: list[dict] = []
++    seen: set[Path] = set()
++    for config_path in _safe_rglob(out_root, "config.json"):
++        run_dir = config_path.parent
++        if run_dir in seen or "paper_experiments" in run_dir.parts or "merged_runs" in run_dir.parts:
++            continue
++        seen.add(run_dir)
++        category = _experiment_category(run_dir)
++        if category == "legacy":
++            continue
++        config = _read_run_config(run_dir)
++        selection = config.get("selection", {}) if config else {}
++        training = config.get("training", {}) if config else {}
++        items.append({
++            "id": str(run_dir.relative_to(out_root)).replace("\\", "/"),
++            "name": run_dir.name,
++            "path": str(run_dir),
++            "category": category,
++            "mtime": config_path.stat().st_mtime,
++            "dataset": training.get("dataset_name"),
++            "model": training.get("model_name"),
++            "partition": training.get("partition_mode"),
++            "dp_update_mode": training.get("dp_update_mode"),
++            "he_execution": training.get("he_execution"),
++            "rounds": selection.get("rounds"),
++        })
++    items.sort(key=lambda item: (0 if item["category"] == "formal" else 1, -float(item["mtime"])))
++    return items[:limit]
++
++
++def _status_payload_from_run(run_dir: Path, *, fallback_message: str | None = None) -> dict | None:
++    status_path = run_dir / "live_status.json"
++    payload: dict = {}
++    if status_path.exists():
++        try:
++            with status_path.open("r", encoding="utf-8-sig") as file:
++                payload = json.load(file)
++        except (json.JSONDecodeError, OSError):
++            payload = {}
++    config = _read_run_config(run_dir)
++    policies = list(config.get("policies", [])) if config else []
++    if not payload and policies:
++        for policy in policies:
++            summary_path = run_dir / str(policy) / "summary.json"
++            if not summary_path.exists():
++                continue
++            try:
++                with summary_path.open("r", encoding="utf-8-sig") as file:
++                    summary = json.load(file)
++            except (json.JSONDecodeError, OSError):
++                continue
++            payload = {
++                "status": summary.get("status", "completed"),
++                "active_policy": str(policy),
++                "policy": str(policy),
++                "round": summary.get("rounds", 0),
++                "rounds": summary.get("rounds", 0),
++                "progress": 1.0,
++                "test_accuracy": summary.get("final_test_accuracy"),
++                "best_test_accuracy": summary.get("best_test_accuracy"),
++                "logical_time": summary.get("total_logical_time"),
++                "cumulative_communication_volume": summary.get("total_communication_volume"),
++            }
++            break
++    if not payload:
++        return None
++    payload["status_path"] = str(status_path if status_path.exists() else run_dir)
++    payload["run_dir"] = str(run_dir)
++    payload["output_root"] = str(run_dir.parent)
++    payload["experiment_category"] = _experiment_category(run_dir)
++    payload["message"] = fallback_message or payload.get("message") or f"Loaded {payload['experiment_category']} run: {run_dir.name}"
++    payload["policy_statuses"] = read_policy_statuses(run_dir, payload)
++    payload["run_figures"] = available_run_figures(run_dir)
++    payload["paper_experiments"] = available_paper_experiments()
++    payload["merged_runs"] = available_merged_runs()
++    payload["merge_sources"] = available_merge_sources()
++    payload["delete_targets"] = available_delete_targets()
++    payload["experiments"] = available_experiments()
++    return payload
++
++
++def latest_preferred_completed_status_payload() -> dict | None:
++    """Prefer the newest formal run; fall back to the newest diagnostic run."""
++    experiments = available_experiments()
++    for category in ("formal", "diagnostic"):
++        for item in experiments:
++            if item.get("category") != category:
++                continue
++            payload = _status_payload_from_run(
++                Path(str(item["path"])),
++                fallback_message=f"Loaded latest {category} experiment: {item['name']}",
++            )
++            if payload is not None:
++                payload["preferred_experiment_fallback"] = True
++                return payload
++    return None
++
+ def latest_status_path(output_root: Path) -> Path | None:
+     candidates = list(output_root.rglob("live_status.json"))
+     if output_root.name == "live_status.json" and output_root.exists():
+@@ -478,6 +607,16 @@
+ 
+ 
+ def read_status(output_root: Path) -> dict:
++    # When the dashboard monitors the shared out/ tree and no job is active,
++    # do not let a stale legacy live_status.json become the headline run.
++    if not _training_process_is_running():
++        try:
++            if output_root.resolve() == (ROOT / "out").resolve():
++                preferred = latest_preferred_completed_status_payload()
++                if preferred is not None:
++                    return preferred
++        except OSError:
++            pass
+     status_path = latest_status_path(output_root)
+     if status_path is None:
+         if (
+@@ -534,6 +673,8 @@
+     payload["merged_runs"] = available_merged_runs()
+     payload["merge_sources"] = available_merge_sources()
+     payload["delete_targets"] = available_delete_targets()
++    payload["experiments"] = available_experiments()
++    payload["experiment_category"] = _experiment_category(run_dir)
+     return payload
+ 
+ 
+@@ -542,6 +683,9 @@
+ 
+ 
+ def latest_completed_status_payload() -> dict | None:
++    preferred = latest_preferred_completed_status_payload()
++    if preferred is not None:
++        return preferred
+     latest_path = ROOT / "out" / "_latest_status.json"
+     if not latest_path.exists():
+         return None
+@@ -576,6 +720,8 @@
+     payload["merged_runs"] = available_merged_runs()
+     payload["merge_sources"] = available_merge_sources()
+     payload["delete_targets"] = available_delete_targets()
++    payload["experiments"] = available_experiments()
++    payload["experiment_category"] = _experiment_category(run_dir)
+     payload["latest_status_fallback"] = True
+     return payload
+ 
+@@ -1460,6 +1606,25 @@
+             ]
+             if global_counts:
+                 item["mean_global_update_clients"] = sum(global_counts) / len(global_counts)
++            if metric_rows:
++                last_metric = metric_rows[-1]
++                diagnostic_keys = [
++                    "update_dp_clip_fraction",
++                    "pre_dp_global_update_norm",
++                    "update_dp_noise_norm",
++                    "aggregate_dp_noise_norm",
++                    "update_dp_noise_to_signal_ratio",
++                    "direction_client_count",
++                    "direction_mean_client_cosine",
++                    "direction_negative_cosine_fraction",
++                    "direction_raw_aggregate_norm",
++                    "direction_mean_client_norm",
++                    "direction_aggregate_to_mean_client_norm_ratio",
++                    "he_execution",
++                    "privacy_guarantee",
++                    "release_count",
++                ]
++                item["diagnostics"] = {key: last_metric.get(key) for key in diagnostic_keys if key in last_metric}
+             item["curve"] = [
+                 {
+                     "round": int(row["round"]) + 1,
+@@ -2290,6 +2455,21 @@
+             payload = _json_response(status)
+             self._send(200, "application/json; charset=utf-8", payload)
+             return
++        if route == "/experiment-status":
++            query = parse_qs(urlparse(self.path).query)
++            experiment_id = query.get("id", [""])[0]
++            out_root = (ROOT / "out").resolve()
++            candidate = (out_root / experiment_id).resolve()
++            if not experiment_id or out_root not in candidate.parents:
++                self._send(400, "application/json; charset=utf-8", _json_response({"ok": False, "message": "Invalid experiment id"}))
++                return
++            payload = _status_payload_from_run(candidate) if candidate.exists() else None
++            if payload is None:
++                self._send(404, "application/json; charset=utf-8", _json_response({"ok": False, "message": "Experiment not found"}))
++                return
++            payload["training_process_running"] = _training_process_is_running()
++            self._send(200, "application/json; charset=utf-8", _json_response(payload))
++            return
+         if route.startswith("/figures/"):
+             name = Path(route.removeprefix("/figures/")).name
+             figure_path = ROOT / "Privacy_Utility_Tradeoff__20260525" / "figures" / name
+@@ -2757,7 +2937,17 @@
+ th, td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+ th:first-child, td:first-child { text-align: left; }
+ th { color: var(--muted); font-weight: 500; }
+-@media (max-width: 960px) { .grid, .cards, .experiment-form, .live-svg-grid, .module-grid { grid-template-columns: 1fr; } header { align-items: flex-start; flex-direction: column; } }
++.dashboard-toolbar { display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:14px; }
++.dashboard-toolbar .field { min-width:220px; flex:1; }
++.category-badge { display:inline-block; padding:4px 9px; border-radius:999px; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; background:#e8edf5; color:#334155; }
++.category-badge.formal { background:#dcfce7; color:#166534; }
++.category-badge.diagnostic { background:#fef3c7; color:#92400e; }
++.paper-view .dev-only { display:none !important; }
++.paper-view main { max-width:1400px; }
++.diagnostic-grid { display:grid; grid-template-columns:repeat(3,minmax(180px,1fr)); gap:12px; }
++.diagnostic-card { border:1px solid #dbe3ee; border-radius:12px; padding:12px; background:#fbfdff; }
++.diagnostic-card .metric { font-size:22px; font-weight:700; margin-top:4px; }
++@media (max-width: 960px) { .grid, .cards, .experiment-form, .live-svg-grid, .module-grid, .diagnostic-grid { grid-template-columns: 1fr; } header { align-items: flex-start; flex-direction: column; } }
+ @media (max-width: 620px) {
+   .viz { height: 330px; }
+   .client { bottom: 54px; }
+@@ -3227,6 +3417,19 @@
+   </div>
+ 
+   <section class="panel">
++    <h2>Experiment View</h2>
++    <div class="dashboard-toolbar">
++      <div class="field">
++        <label for="experimentSelect">Formal / diagnostic experiment</label>
++        <select id="experimentSelect"><option value="">Automatic (latest formal)</option></select>
++      </div>
++      <div><span id="experimentCategory" class="category-badge">automatic</span></div>
++      <label class="pill"><input id="paperViewToggle" type="checkbox"> Paper View</label>
++    </div>
++    <div class="sub">Legacy runs are hidden from this selector. Formal results and diagnostic ablations remain separated.</div>
++  </section>
++
++  <section class="panel">
+     <h2>Run Monitor</h2>
+     <div class="label" id="headline">Waiting for experiment status</div>
+     <div class="bar-wrap"><div class="bar" id="progress"></div></div>
+@@ -3255,7 +3458,13 @@
+     <div id="policyRuns"></div>
+   </section>
+ 
+-  <section class="panel">
++  <section class="panel" id="diagnosticsPanel">
++    <h2>Diagnostics</h2>
++    <div class="section-kicker">Mechanism diagnostics are shown separately from formal paper metrics.</div>
++    <div id="diagnosticGrid" class="diagnostic-grid"></div>
++  </section>
++
++  <section class="panel dev-only">
+     <h2>Merge Runs</h2>
+     <div class="section-kicker">Select method outputs from different runs and build one combined run directory.</div>
+     <div class="experiment-form">
+@@ -3280,7 +3489,7 @@
+     <div class="figure-grid large-figures" id="mergeFigureGrid"></div>
+   </section>
+ 
+-  <section class="panel">
++  <section class="panel dev-only">
+     <h2>Clean Output Directories</h2>
+     <div class="section-kicker">Select old experiment directories under out/ and delete only the checked items. Deletion is disabled while training is running.</div>
+     <div class="delete-list" id="deleteTargetList"></div>
+@@ -3525,6 +3734,47 @@
+   }[policy] || policy || "-";
+ }
+ 
++function renderExperimentSelector(items, currentRunDir) {
++  const select = $("experimentSelect");
++  if (!select) return;
++  const previous = select.value;
++  const options = [`<option value="">Automatic (latest formal)</option>`].concat((items || []).map(item => {
++    const label = `${item.category === "formal" ? "FORMAL" : "DIAG"} · ${item.name}${item.dataset ? " · " + item.dataset : ""}${item.partition ? " · " + item.partition : ""}`;
++    return `<option value="${item.id}">${label}</option>`;
++  }));
++  select.innerHTML = options.join("");
++  const match = (items || []).find(item => item.path === currentRunDir);
++  if (match) select.value = match.id;
++  else if ([...select.options].some(o => o.value === previous)) select.value = previous;
++}
++
++function renderDiagnostics(items, category) {
++  const target = $("diagnosticGrid");
++  if (!target) return;
++  const activePol = latestStatus.active_policy || latestStatus.policy;
++  const item = (items || []).find(p => p.policy === activePol) || (items || [])[0];
++  const d = item?.diagnostics || {};
++  const fields = [
++    ["Clip fraction", "update_dp_clip_fraction", 3],
++    ["Signal norm", "pre_dp_global_update_norm", 6],
++    ["DP noise norm", "update_dp_noise_norm", 6],
++    ["Noise / signal", "update_dp_noise_to_signal_ratio", 3],
++    ["Mean direction cosine", "direction_mean_client_cosine", 4],
++    ["Negative cosine fraction", "direction_negative_cosine_fraction", 3],
++    ["Aggregate / mean-client norm", "direction_aggregate_to_mean_client_norm_ratio", 4],
++    ["Raw aggregate norm", "direction_raw_aggregate_norm", 6],
++    ["Mean client norm", "direction_mean_client_norm", 6]
++  ];
++  const available = fields.filter(([, key]) => d[key] != null && d[key] !== "");
++  if (!available.length) {
++    target.innerHTML = `<div class="sub">No diagnostic fields in this run's round_metrics.csv.</div>`;
++    return;
++  }
++  target.innerHTML = available.map(([label, key, digits]) =>
++    `<div class="diagnostic-card"><div class="label">${label}</div><div class="metric">${fmt(d[key], digits)}</div></div>`
++  ).join("");
++}
++
+ function renderPolicyRuns(items) {
+   const target = $("policyRuns");
+   if (!Array.isArray(items) || !items.length) {
+@@ -3973,10 +4223,17 @@
+ }
+ 
+ async function refreshOnce() {
+-  const res = await fetch("/status", {cache: "no-store"});
++  const selectedExperiment = $("experimentSelect")?.value || "";
++  const statusUrl = selectedExperiment ? `/experiment-status?id=${encodeURIComponent(selectedExperiment)}` : "/status";
++  const res = await fetch(statusUrl, {cache: "no-store"});
+   if (!res.ok) throw new Error(`Status request failed: HTTP ${res.status}`);
+   const s = await res.json();
+   latestStatus = s;
++  renderExperimentSelector(s.experiments || [], s.run_dir || "");
++  const category = s.experiment_category || "automatic";
++  const categoryBadge = $("experimentCategory");
++  if (categoryBadge) { categoryBadge.textContent = category; categoryBadge.className = `category-badge ${category}`; }
++  renderDiagnostics(s.policy_statuses || [], category);
+   const progress = Math.max(0, Math.min(100, Number(s.progress || 0) * 100));
+   $("progress").style.width = progress + "%";
+   $("headline").textContent = `${s.status || "unknown"} ${progress.toFixed(1)}%`;
+@@ -4619,6 +4876,11 @@
+ document.addEventListener("visibilitychange", () => {
+   if (!document.hidden) refresh().catch(() => {});
+ });
++$("experimentSelect")?.addEventListener("change", () => refresh());
++$("paperViewToggle")?.addEventListener("change", event => {
++  document.body.classList.toggle("paper-view", Boolean(event.target.checked));
++});
++
+ pollStatus();
+ </script>
+ </body>

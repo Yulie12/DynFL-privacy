@@ -1,0 +1,132 @@
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -1793,6 +1793,26 @@
+         actual_cloud_fusion_ratio = actual_cloud_samples / total_profile_samples
+         actual_cloud_share_of_admitted = actual_cloud_samples / actual_admitted_samples
+ 
++        direction_client_updates: list[dict[str, dict[str, torch.Tensor]]] = []
++        direction_client_sample_counts: list[float] = []
++        if effective_selection.mainline_fusion:
++            for client_id, state_diff, sample_count, _candidate in global_updates:
++                direction_client_updates.append(
++                    _state_difference_from_client_update(
++                        client_id=client_id,
++                        state_diff=state_diff,
++                        client_model_states={},
++                        global_end=global_end,
++                        global_edge=global_edge,
++                        device=torch.device("cpu"),
++                    )
++                )
++                direction_client_sample_counts.append(float(sample_count))
++        direction_diagnostics = _client_update_direction_diagnostics(
++            direction_client_updates,
++            direction_client_sample_counts,
++        )
++
+         cloud_updates: list[tuple[Any, int, Candidate | None, list[int]]] = []
+         cloud_signal_updates: list[Any] = []
+         secure_aggregate_dp_client_fractions: list[float] = []
+@@ -2425,6 +2445,14 @@
+                 "cloud_input_update_norm_mean": _list_mean(cloud_input_update_norms),
+                 "cloud_input_update_norm_max": max(cloud_input_update_norms, default=0.0),
+                 "pre_dp_global_update_norm": pre_dp_global_update_norm,
++                "direction_client_count": direction_diagnostics["client_count"],
++                "direction_mean_client_cosine": direction_diagnostics["mean_client_cosine"],
++                "direction_negative_cosine_fraction": direction_diagnostics["negative_cosine_fraction"],
++                "direction_raw_aggregate_norm": direction_diagnostics["aggregate_norm"],
++                "direction_mean_client_norm": direction_diagnostics["mean_client_norm"],
++                "direction_aggregate_to_mean_client_norm_ratio": direction_diagnostics[
++                    "aggregate_to_mean_client_norm_ratio"
++                ],
+                 "global_update_norm": global_update_norm,
+                 "post_to_pre_update_norm_ratio": global_update_norm
+                 / max(pre_dp_global_update_norm, 1e-12),
+@@ -2807,6 +2835,15 @@
+             f"end_to_end_dp=not_established",
+             flush=True,
+         )
++        if effective_selection.mainline_fusion:
++            print(
++                f"    direction_cos={current_round['direction_mean_client_cosine']:.6g} "
++                f"neg_cos_frac={current_round['direction_negative_cosine_fraction']:.3f} "
++                f"agg/mean_client={current_round['direction_aggregate_to_mean_client_norm_ratio']:.6g} "
++                f"raw_agg_norm={current_round['direction_raw_aggregate_norm']:.6g} "
++                f"mean_client_norm={current_round['direction_mean_client_norm']:.6g}",
++                flush=True,
++            )
+         worker_results.clear()
+         flow_inputs.clear()
+         initial_admitted_updates.clear()
+@@ -3753,6 +3790,71 @@
+     )
+ 
+ 
++def _state_difference_inner_product(
++    first: dict[str, dict[str, torch.Tensor]],
++    second: dict[str, dict[str, torch.Tensor]],
++) -> float:
++    total = 0.0
++    for part_name, values in first.items():
++        second_part = second.get(part_name, {})
++        for name, value in values.items():
++            other = second_part.get(name)
++            if other is None:
++                continue
++            if not torch.is_floating_point(value) or not torch.is_floating_point(other):
++                continue
++            left = value.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
++            right = other.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
++            total += float(torch.dot(left, right).item())
++    return total
++
++
++def _client_update_direction_diagnostics(
++    state_diffs: list[dict[str, dict[str, torch.Tensor]]],
++    sample_counts: list[float],
++) -> dict[str, float | int]:
++    if len(state_diffs) != len(sample_counts):
++        raise ValueError("Direction diagnostics require one sample count per client update")
++    if not state_diffs:
++        return {
++            "client_count": 0,
++            "mean_client_cosine": 0.0,
++            "negative_cosine_fraction": 0.0,
++            "aggregate_norm": 0.0,
++            "mean_client_norm": 0.0,
++            "aggregate_to_mean_client_norm_ratio": 0.0,
++        }
++
++    aggregate = _weighted_average_state_differences(
++        state_diffs,
++        sample_counts,
++        device=torch.device("cpu"),
++    )
++    aggregate_norm = _state_difference_l2_norm(aggregate)
++    client_norms = [_state_difference_l2_norm(state_diff) for state_diff in state_diffs]
++    cosines: list[float] = []
++    for state_diff, client_norm in zip(state_diffs, client_norms):
++        denominator = client_norm * aggregate_norm
++        if denominator <= 1e-18:
++            continue
++        cosine = _state_difference_inner_product(state_diff, aggregate) / denominator
++        cosines.append(float(max(-1.0, min(1.0, cosine))))
++
++    mean_client_norm = _list_mean(client_norms)
++    return {
++        "client_count": len(state_diffs),
++        "mean_client_cosine": _list_mean(cosines),
++        "negative_cosine_fraction": (
++            sum(cosine < 0.0 for cosine in cosines) / len(cosines) if cosines else 0.0
++        ),
++        "aggregate_norm": aggregate_norm,
++        "mean_client_norm": mean_client_norm,
++        "aggregate_to_mean_client_norm_ratio": (
++            aggregate_norm / max(mean_client_norm, 1e-12)
++        ),
++    }
++
++
+ def _linear_combination_state_difference_norm(
+     state_diffs: list[dict[str, dict[str, torch.Tensor]]],
+     factors: list[float],
