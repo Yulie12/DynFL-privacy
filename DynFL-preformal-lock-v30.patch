@@ -1,0 +1,192 @@
+diff -ruN a/configs/paper_v30_cifar10_resnet18.json b/configs/paper_v30_cifar10_resnet18.json
+--- a/configs/paper_v30_cifar10_resnet18.json	2026-09-15 01:36:41.325352948 +0000
++++ b/configs/paper_v30_cifar10_resnet18.json	2026-09-15 01:36:41.977880927 +0000
+@@ -3,8 +3,6 @@
+   "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
+   "output_root": "out/paper_v30_cifar10_resnet18_head_method2",
+   "seeds": [
+-    40,
+-    41,
+     42,
+     43,
+     44
+@@ -24,7 +22,7 @@
+     "rounds": 100,
+     "train_limit": 12000,
+     "test_limit": 2000,
+-    "partition_mode": "extreme_edge_label_skew",
++    "partition_mode": "edge_label_skew",
+     "local_epochs": 3,
+     "learning_rate": 0.01,
+     "device": "cuda",
+diff -ruN a/configs/paper_v30_fmnist_lenet5.json b/configs/paper_v30_fmnist_lenet5.json
+--- a/configs/paper_v30_fmnist_lenet5.json	2026-09-15 01:36:41.326643040 +0000
++++ b/configs/paper_v30_fmnist_lenet5.json	2026-09-15 01:36:41.978061780 +0000
+@@ -3,8 +3,6 @@
+   "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
+   "output_root": "out/paper_v30_fmnist_lenet5",
+   "seeds": [
+-    40,
+-    41,
+     42,
+     43,
+     44
+@@ -24,7 +22,7 @@
+     "rounds": 100,
+     "train_limit": 12000,
+     "test_limit": 2000,
+-    "partition_mode": "extreme_edge_label_skew",
++    "partition_mode": "edge_label_skew",
+     "local_epochs": 1,
+     "learning_rate": 0.15,
+     "device": "cuda",
+diff -ruN a/tex/paper/main.tex b/tex/paper/main.tex
+--- a/tex/paper/main.tex	2026-09-15 01:36:41.327692170 +0000
++++ b/tex/paper/main.tex	2026-09-15 01:37:17.214535860 +0000
+@@ -1131,10 +1131,10 @@
+ We evaluate the proposed method with real model training supported by the system
+ simulator. The cloud-edge-end system contains 100 end devices, 10 edge nodes,
+ and one cloud node. The main comparison trains only the classification head of a pretrained ResNet 18 model on
+-CIFAR 10 for 100 communication rounds under extreme edge label skew. Each round
++CIFAR 10 for 100 communication rounds under moderate edge label skew. Each round
+ uses three local epochs per private stage and a learning rate of 0.01.
+-LIEIIIC and LIIEIIIC use three stages; the other executable modes use one. Five runs use random seeds
+-40 to 44. Fashion MNIST with LeNet 5 provides a second dataset and model
++LIEIIIC and LIIEIIIC use three stages; the other executable modes use one. Three runs use random seeds
++42, 43, and 44. Fashion MNIST with LeNet 5 provides a second dataset and model
+ setting. The main parameters are listed in \tabref{tab:sim_params}.
+ 
+ \begin{table*}[t]
+@@ -1148,7 +1148,7 @@
+ \textbf{Parameter} & \textbf{Value} & \textbf{Parameter} & \textbf{Value} \\
+ \hline
+ End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=100\) \\
+-Training and test samples & 12000 and 2000 & Random seeds & 40, 41, 42, 43, and 44 \\
++Training and test samples & 12000 and 2000 & Random seeds & 42, 43, and 44 \\
+ Client computation and memory factors & Independent $\mathcal U(0.5,2.0)$ & Edge computation factor & $\mathcal U(2/3,1.5)$ \\
+ Logical link block reference & \(L_B=5\) & Independent stages in multilevel modes & \(E_B=3\) \\
+ Fixed total DP target & \(\bar\epsilon_{\mathrm{upd}}=8.0\) & DP slack parameter & \(\delta_{\mathrm{upd}}=10^{-5}\) \\
+@@ -1195,8 +1195,9 @@
+ corresponding backward gradient event uses the same payload profile. This value
+ is a reproducible simulation input rather than a per sample or per layer tensor
+ size.
+-The ResNet 18 update payload is computed from 11181642 parameter values stored
+-as 32 bit floating point numbers. The CKKS processing profile uses 4 MB as its
++The ResNet 18 update payload in the formal configuration contains the 5130
++trainable classifier parameters stored as 32 bit floating point values, giving
++20520 bytes before encryption. The CKKS processing profile uses 4 MB as its
+ reference granularity and scales linearly with the actual update payload.
+ 
+ The pretrained model uses \texttt{ResNet18\_Weights.DEFAULT} from torchvision.
+@@ -1235,10 +1236,12 @@
+ For each seed, a seeded permutation selects 12000 CIFAR 10 training samples
+ and 2000 test samples. Images use channel means
+ $(0.4914,0.4822,0.4465)$ and standard deviations
+-$(0.2023,0.1994,0.2010)$. Under extreme edge label skew, each of the ten labels
+-is assigned to one of the ten edge domains and its samples are divided among
+-the ten clients associated with that edge. Each client then reserves 20\% of
+-its assigned samples for validation.
++$(0.2023,0.1994,0.2010)$. Under the main moderate edge label skew, each label
++is shared equally across two adjacent edge domains with cyclic wraparound, and
++each edge therefore contains two neighboring labels. The samples assigned to
++each edge are divided among its ten associated clients. The extreme edge label
++skew variant used for stress testing instead assigns each label to one edge
++domain. Each client then reserves 20\% of its assigned samples for validation.
+ 
+ Client computation and memory factors are independently drawn from
+ $\mathcal U(0.5,2.0)$, and edge computation factors are drawn from
+@@ -1268,9 +1271,9 @@
+ All methods
+ use the same data partition, optimizer, epochs per stage, and edge normalized
+ aggregation rule in \equref{eq:edge_normalized_fedavg}. The main
+-comparison uses five random seeds. Controlled studies use seeds 40, 42, and 44
++comparison uses three random seeds, 42, 43, and 44. Controlled studies use seeds 40, 42, and 44
+ and change only the parameter or component under evaluation. The key ablation
+-uses all five seeds from 40 to 44.
++uses the three main-comparison seeds 42, 43, and 44.
+ 
+ Every run stores the complete configuration, runtime environment, exact client
+ partition, generated system profiles, model parameter partition, raw client
+@@ -1297,7 +1300,7 @@
+ requires a fresh CKKS cost calibration; old costs must not be presented as
+ measured classifier-only system performance.
+ % The numerical tables and figures below must be regenerated with execution
+-% revision paper_flow_v30_mainline_fusion_method2 before submission.
++% revision paper_flow_v30_mainline_fusion_method2_epochs before submission.
+ \subsection{Compared Methods and Main Results}
+ Ours performs joint Pareto search over the global client profile and selects a
+ compromise between system latency and estimated convergence error cost. Individual Optimal
+@@ -1323,17 +1326,17 @@
+ conditions.
+ 
+ \tabref{tab:main_comparison} and \figref{fig:accuracy_convergence} present the
+-five random seeds. The primary efficiency value is system time, which combines
++three random seeds. The primary efficiency value is system time, which combines
+ modeled workflow execution with measured decision time. The privacy column
+ reports the accounted epsilon of the formal global aggregate release. The figure uses the common measured time
+ system time interval determined by the shortest completed run and shows raw accuracy
+ without temporal smoothing. Numerical values from execution revisions before
+-\texttt{paper\_flow\_v30\_mainline\_fusion\_method2} are not retained because they used different
++\texttt{paper\_flow\_v30\_mainline\_fusion\_method2\_epochs} are not retained because they used different
+ privacy, encrypted aggregation, feasible set, and timing semantics.
+ 
+ \begin{table*}[t]
+ \centering
+-\caption{Main comparison on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over five random seeds}
++\caption{Main comparison on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over three random seeds}
+ \label{tab:main_comparison}
+ \scriptsize
+ \begin{adjustbox}{max width=\textwidth}
+@@ -1362,7 +1365,7 @@
+ }{
+ \fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 main experiment figure pending}}
+ }
+-\caption{Raw test accuracy against system time on CIFAR 10 with ResNet 18. All curves use the common interval determined by the shortest completed run. The curves show the mean over five random seeds, the shaded regions show 95\% confidence intervals, and the inset enlarges the final quarter of the common interval.}
++\caption{Raw test accuracy against system time on CIFAR 10 with ResNet 18. All curves use the common interval determined by the shortest completed run. The curves show the mean over three random seeds, the shaded regions show 95\% confidence intervals, and the inset enlarges the final quarter of the common interval.}
+ \label{fig:accuracy_convergence}
+ \end{figure}
+ 
+@@ -1384,7 +1387,7 @@
+ }{
+ \fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 reconfiguration figure pending}}
+ }
+-\caption{Raw collaboration mode shares, fixed global release protection coverage, and client mode switch rate over communication rounds. The curves report the mean over five random seeds.}
++\caption{Raw collaboration mode shares, fixed global release protection coverage, and client mode switch rate over communication rounds. The curves report the mean over three random seeds.}
+ \label{fig:reconfiguration_behavior}
+ \end{figure}
+ 
+@@ -1393,7 +1396,7 @@
+ 
+ Fashion MNIST with LeNet 5 evaluates the comparison in a different image
+ domain and model scale. The experiment uses the same 100 clients, 10 edge
+-nodes, 100 communication rounds, five random seeds, privacy targets, and
++nodes, 100 communication rounds, three random seeds (42, 43, and 44), privacy targets, and
+ collaboration policies. The local learning rate is 0.15 and each round uses one
+ local epoch. The split is placed between the convolutional encoder and the
+ fully connected classifier.
+@@ -1426,7 +1429,7 @@
+ }{
+ \fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 second dataset figure pending}}
+ }
+-\caption{Raw Fashion MNIST test accuracy against system time with LeNet 5. The curves report the mean and 95\% confidence interval over five random seeds.}
++\caption{Raw Fashion MNIST test accuracy against system time with LeNet 5. The curves report the mean and 95\% confidence interval over three random seeds.}
+ \label{fig:second_dataset}
+ \end{figure}
+ 
+@@ -1557,14 +1560,14 @@
+ restricts every feasible client to the LIIEIIIC
+ mode while retaining the same training and feasibility checks.
+ 
+-The controlled comparison uses seeds 40 to 44. The table reports the
++The controlled comparison uses seeds 42, 43, and 44. The table reports the
+ complete 100 round utility, communication, privacy, participation, and system
+ time results. The figure shows raw accuracy within the common system time
+ interval determined by the shortest completed ablation run.
+ 
+ \begin{table*}[t]
+ \centering
+-\caption{Ablation results on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over five random seeds}
++\caption{Ablation results on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over three random seeds}
+ \label{tab:ablation}
+ \scriptsize
+ \begin{adjustbox}{max width=\textwidth}
