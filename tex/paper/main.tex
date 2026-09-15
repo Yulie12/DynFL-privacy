@@ -409,6 +409,10 @@ use one stage of three epochs. A client continues its own model and optimizer
 state across stages, starting from the previous released global model. There is
 no same-round cross-client aggregate feedback. Clipping and distributed Gaussian
 noise are applied once to the final client contribution, after all its stages.
+As a supplementary fairness control, we also provide an equal-optimizer-work setting
+that caps every collaboration mode at the same total local-epoch budget. This control
+is disabled for the main Method-2 experiments and is reported separately; it tests
+whether gains persist when the additional private-stage optimizer work is removed.
 Every executable mode, including LIE and LIIE, then joins the same release overlay:
 one trusted noisy packet per edge domain, ciphertext-only cloud aggregation,
 authorized custodian decryption, and global update return. The basic templates'
@@ -894,8 +898,7 @@ Here \(\prec\) denotes Pareto dominance. The latency range is
 \label{eq:pareto_normalization}
 \end{equation}
 Here \(\varepsilon_n>0\) prevents division by zero. The reference point
-\(\mathbf z^{r,t}=[z_T^{r,t},z_\Omega^{r,t}]^\top\) can be prescribed or set
-to the computed ideal point
+\(\mathbf z^{r,t}=[z_T^{r,t},z_\Omega^{r,t}]^\top\) is set to the computed ideal point
 \([T_{\min}^t,\widehat\Omega_{\min}^t]^\top\). Its normalized form is
 \(\bar{\mathbf z}^{r,t}=[\bar z_T^{r,t},\bar z_\Omega^{r,t}]^\top\).
 Using the normalized Tchebycheff distance to the reference or ideal
@@ -974,8 +977,9 @@ by changing collaborative modes is included in \(T_i^t\).
 The fused mainline does not apply a DP-versus-HE substitution safeguard.
 Result DP is a mandatory release constraint and HE is the fixed confidentiality
 layer for the cloud aggregation path, so neither can be selected as a replacement
-for the other. Before the bounded search, the implementation checks that one
-additional release remains feasible under the fixed RDP horizon. The common
+for the other. The fixed release accountant is configured for the prospective
+round before selection, while its authoritative cohort and budget check is performed
+immediately before the global release. The common
 release-noise term is evaluated from the actual public aggregation weights via
 \equref{eq:fused_sensitivity}; because this protection contract is common to all
 feasible modes, it does not create an artificial mode-specific utility preference.
@@ -1009,10 +1013,10 @@ aggregate.
 \label{alg:selection}
 \small
 \begin{algorithmic}[1]
-\REQUIRE Device set \(\mathcal N\), executable resource-feasible modes \(\mathcal H_i^{\mathrm{res}}\subseteq\mathcal H\), fixed global release RDP state \(R_{\mathrm{upd}}^t(\alpha)\), target \((\bar\epsilon_{\mathrm{upd}},\delta_{\mathrm{upd}})\), round system state, path latency and buffer models, \(K_{\mathrm P},K_{\mathrm B},I_{\max},S_P\), optional \(\mathbf z^{r,t}\), and \(\mathbf x^{t-1}\)
+\REQUIRE Device set \(\mathcal N\), executable resource-feasible modes \(\mathcal H_i^{\mathrm{res}}\subseteq\mathcal H\), fixed global release RDP state \(R_{\mathrm{upd}}^t(\alpha)\), target \((\bar\epsilon_{\mathrm{upd}},\delta_{\mathrm{upd}})\), round system state, path latency and buffer models, \(K_{\mathrm P},K_{\mathrm B},I_{\max},S_P\), and \(\mathbf x^{t-1}\)
 \ENSURE Selected global collaboration profile \(\mathbf x^\star=\mathbf h_{\mathcal N}^\star\)
 \STATE \textbf{Preparation}
-\STATE Check that the fixed release accountant permits one additional global release at the calibrated noise multiplier.
+\STATE Verify that the fixed release accountant is configured for the prospective round; the authoritative cohort/budget check is performed immediately before the global release.
 \STATE For every \(i\in\mathcal N\), construct \(\mathcal S_i=\{h_i\mid h_i\in\mathcal H_i^{\mathrm{res}}\}\).
 \STATE \(\displaystyle
 \mathcal X^t=\left\{\mathbf x\in\prod_{i\in\mathcal N}\mathcal S_i
@@ -1063,7 +1067,7 @@ updates using \equref{eq:effective_aggregation_weight} and
 \frac{\widehat\Omega_{\mathrm{sys}}^t(\mathbf x)-
 \widehat\Omega_{\min}^t}
 {\widehat\Omega_{\max}^t-\widehat\Omega_{\min}^t+\varepsilon_n}\).
-\STATE Use the prescribed \(\mathbf z^{r,t}\), or set it to
+\STATE Set \(\mathbf z^{r,t}\) to
 \([T_{\min}^t,\widehat\Omega_{\min}^t]^\top\), and apply the same normalization to obtain
 \((\bar z_T^{r,t},\bar z_\Omega^{r,t})\).
 \STATE \(\displaystyle

@@ -40,6 +40,13 @@ def test_formal_method2_command_preserves_tested_scope_and_horizon():
     assert cmd[cmd.index("--rounds") + 1] == "100"
     assert cmd[cmd.index("--local-epochs") + 1] == "3"
     assert cmd[cmd.index("--he-execution") + 1] == "real"
+    assert "--equal-optimizer-work-control" not in cmd
+
+    control_cmd = build_command(
+        config, seed=42, policies=["ours"], rounds=None,
+        equal_optimizer_work_control=True,
+    )
+    assert "--equal-optimizer-work-control" in control_cmd
 
 
 def test_multilevel_stages_extend_only_the_clients_own_training():
@@ -51,6 +58,16 @@ def test_multilevel_stages_extend_only_the_clients_own_training():
     for mode in ("LIEIIIC", "LIIEIIIC"):
         assert _client_epoch_count(training, selection, SimpleNamespace(mode=mode)) == 9
     assert _client_epoch_count(training, selection, SimpleNamespace(mode="LIIC")) == 3
+
+
+def test_equal_optimizer_work_control_does_not_change_mainline_default():
+    from dynfed.fmnist_lenet5_dynamic import _client_epoch_count, Lenet5Config
+    from dynfed.selection import SelectionConfig
+    from types import SimpleNamespace
+    selection = SelectionConfig(mainline_fusion=True)
+    control = Lenet5Config(local_epochs=3, equal_optimizer_work_control=True)
+    for mode in ("LIIC", "LIEIIIC", "LIIEIIIC"):
+        assert _client_epoch_count(control, selection, SimpleNamespace(mode=mode)) == 3
 
 
 def test_all_fused_modes_reach_one_release_with_no_repeated_edge_aggregation():

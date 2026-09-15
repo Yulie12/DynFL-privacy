@@ -63,6 +63,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument(
+        "--equal-optimizer-work-control",
+        action="store_true",
+        help=(
+            "Fairness-control only: in fused Method 2, keep total optimizer epochs per "
+            "client equal to --local-epochs for every collaboration mode instead of "
+            "multiplying by the mode's private-stage count."
+        ),
+    )
+    parser.add_argument(
         "--model",
         default="lenet5",
         choices=[
@@ -280,6 +289,7 @@ def main() -> None:
         dataset_name=args.dataset,
         model_name=args.model,
         local_epochs=args.local_epochs,
+        equal_optimizer_work_control=args.equal_optimizer_work_control,
         learning_rate=args.lr,
         iid=args.iid,
         partition_mode="iid" if args.iid else args.partition_mode,

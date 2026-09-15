@@ -102,6 +102,7 @@ class Lenet5Config:
     update_parameter_scope: str = CURRENT_UPDATE_PARAMETER_SCOPE
     execution_revision: str = CURRENT_EXECUTION_REVISION
     local_epochs: int = 1
+    equal_optimizer_work_control: bool = False
     learning_rate: float = 0.15
     l2: float = 0.0001
     iid: bool = False
@@ -1062,6 +1063,11 @@ def _run_lenet5_policy(
                 f"checkpoint={saved_execution_revision!r}, "
                 f"requested={train_config.execution_revision!r}. Start a new run so "
                 "aggregation semantics do not change mid-training."
+            )
+        if bool(saved_training.get("equal_optimizer_work_control", False)) != bool(train_config.equal_optimizer_work_control):
+            raise RuntimeError(
+                "Cannot resume across different equal-optimizer-work control settings. "
+                "Start a new run so optimizer-work semantics do not change mid-training."
             )
         saved_he_execution = saved_training.get("he_execution", "real")
         if saved_he_execution != train_config.he_execution:
@@ -3095,6 +3101,7 @@ def _run_lenet5_policy(
     )
     summary["global_pareto_selection_rounds"] = global_pareto_selection_rounds
     summary["execution_revision"] = train_config.execution_revision
+    summary["equal_optimizer_work_control"] = bool(train_config.equal_optimizer_work_control)
     summary["dp_accounting_mode"] = privacy_parameters["accounting_mode"]
     summary["dp_delta"] = privacy_parameters["delta"]
     summary["dp_feature_epsilon_target"] = privacy_parameters["feature_budget"]
@@ -3253,6 +3260,10 @@ def _client_step_limit(selection):
 
 def _client_epoch_count(train_config, selection, candidate):
     stages = max(1, int(MODE_SPECS[candidate.mode].E_edge_loops)) if selection.mainline_fusion else 1
+    # Fairness control only: equalize optimizer work across collaboration modes without
+    # changing the main Method-2 execution semantics used by formal runs.
+    if selection.mainline_fusion and train_config.equal_optimizer_work_control:
+        return int(train_config.local_epochs)
     # Continuous local optimizer state, private to this client, across stages.
     return int(train_config.local_epochs) * stages
 

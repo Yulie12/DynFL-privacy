@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--he-execution", choices=["real", "profiled"])
     parser.add_argument("--output-root")
     parser.add_argument(
+        "--equal-optimizer-work-control",
+        action="store_true",
+        help="Run the supplementary equal-optimizer-work fairness control; main formal runs leave this off.",
+    )
+    parser.add_argument(
         "--max-new-rounds",
         type=int,
         help=(
@@ -64,6 +69,7 @@ def build_command(
     rounds: int | None,
     max_new_rounds: int | None = None,
     resume_from_run: Path | None = None,
+    equal_optimizer_work_control: bool = False,
 ) -> list[str]:
     if config.get("execution_protocol") == method2_config.PROTOCOL:
         return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
@@ -138,6 +144,8 @@ def build_command(
     for name, value in values.items():
         _append_value(command, name, value)
     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
+    if equal_optimizer_work_control:
+        command.append("--equal-optimizer-work-control")
     if max_new_rounds is not None:
         _append_value(command, "max_new_rounds", max_new_rounds)
     if resume_from_run is not None:
@@ -187,6 +195,7 @@ def main() -> None:
             rounds=args.rounds,
             max_new_rounds=args.max_new_rounds,
             resume_from_run=args.resume_from_run,
+            equal_optimizer_work_control=args.equal_optimizer_work_control,
         )
         print(subprocess.list2cmdline(command), flush=True)
         if not args.dry_run:
