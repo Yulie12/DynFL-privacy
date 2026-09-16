@@ -3,9 +3,7 @@
   "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
   "output_root": "out/paper_v30_cifar10_resnet18_head_method2",
   "seeds": [
-    42,
-    43,
-    44
+    42
   ],
   "policies": [
     "ours",

@@ -1,0 +1,39 @@
+--- orig/experiments/run_paper_config.py	2026-09-15 15:05:26.692010973 +0000
++++ mod/experiments/run_paper_config.py	2026-09-15 15:05:26.695563660 +0000
+@@ -50,6 +50,11 @@
+         help="Resume one seed from an existing run directory containing policy checkpoints.",
+     )
+     parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument(
++        "--disable-update-dp",
++        action="store_true",
++        help="Diagnostic mode: disable update DP for ablation runs.",
++    )
+     return parser.parse_args()
+ 
+ 
+@@ -70,6 +75,7 @@
+     max_new_rounds: int | None = None,
+     resume_from_run: Path | None = None,
+     equal_optimizer_work_control: bool = False,
++    disable_update_dp: bool = False,
+ ) -> list[str]:
+     if config.get("execution_protocol") == method2_config.PROTOCOL:
+         return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
+@@ -143,6 +149,8 @@
+         values["dp_feature_epsilon_budget"] = feature_budget
+     for name, value in values.items():
+         _append_value(command, name, value)
++    if disable_update_dp:
++        command.extend(["--dp-update-mode", "off"])
+     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
+     if equal_optimizer_work_control:
+         command.append("--equal-optimizer-work-control")
+@@ -196,6 +204,7 @@
+             max_new_rounds=args.max_new_rounds,
+             resume_from_run=args.resume_from_run,
+             equal_optimizer_work_control=args.equal_optimizer_work_control,
++            disable_update_dp=args.disable_update_dp,
+         )
+         print(subprocess.list2cmdline(command), flush=True)
+         if not args.dry_run:
