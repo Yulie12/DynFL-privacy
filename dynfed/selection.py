@@ -74,6 +74,7 @@ class SelectionConfig:
     num_clients: int = 100
     num_edges: int = 10
     seed: int = 42
+    excluded_modes: tuple[str, ...] = ()
     initial_epsilon: float = 8.0
     dp_event_epsilon: float = 0.05
     dp_emb_epsilon: float = 8.0
@@ -265,6 +266,8 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
 
     per_mode_counts = []
     for mode, spec in MODE_SPECS.items():
+        if mode in config.excluded_modes:
+            continue
         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
             continue
         events = _mode_link_transmissions(
@@ -645,6 +648,8 @@ def enumerate_candidates(
     validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
     for mode, spec in MODE_SPECS.items():
+        if mode in config.excluded_modes:
+            continue
         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
             continue
         if config.require_cloud_participation and not _mode_reaches_cloud(spec):

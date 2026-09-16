@@ -63,7 +63,7 @@
     "initial_epsilon": 8,
     "update_epsilon_budget": 8,
     "delta": 1e-05,
-    "clip_norm": 0.1,
+    "clip_norm": 0.25,
     "update_mode": "upd_only",
     "enforce_cloud_dp_stability": false,
     "cloud_dp_stability_threshold": 1,

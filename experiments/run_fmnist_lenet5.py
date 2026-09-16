@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
         choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
     )
     parser.add_argument("--selection-period", type=int, default=5)
+    parser.add_argument(
+        "--exclude-modes",
+        nargs="+",
+        default=[],
+        help="Exclude collaboration modes from dynamic selection, e.g. --exclude-modes LIE",
+    )
     parser.add_argument("--initial-epsilon", type=float, default=8.0)
     parser.add_argument("--dp-event-epsilon", type=float, default=0.05)
     parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
@@ -227,6 +233,7 @@ def main() -> None:
         num_clients=args.clients,
         num_edges=args.edges,
         seed=args.seed,
+        excluded_modes=tuple(args.exclude_modes),
         initial_epsilon=args.initial_epsilon,
         dp_event_epsilon=args.dp_event_epsilon,
         dp_emb_epsilon=args.dp_emb_epsilon,

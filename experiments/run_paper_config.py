@@ -55,6 +55,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Diagnostic mode: disable update DP for ablation runs.",
     )
+    parser.add_argument(
+        "--exclude-modes",
+        nargs="+",
+        default=[],
+        help="Exclude collaboration modes from dynamic selection, e.g. --exclude-modes LIE",
+    )
     return parser.parse_args()
 
 
@@ -76,6 +82,7 @@ def build_command(
     resume_from_run: Path | None = None,
     equal_optimizer_work_control: bool = False,
     disable_update_dp: bool = False,
+    exclude_modes: list[str] | None = None,
 ) -> list[str]:
     if config.get("execution_protocol") == method2_config.PROTOCOL:
         return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
@@ -151,6 +158,8 @@ def build_command(
         _append_value(command, name, value)
     if disable_update_dp:
         command.extend(["--dp-update-mode", "off"])
+    if exclude_modes:
+        command.extend(["--exclude-modes", *exclude_modes])
     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
     if equal_optimizer_work_control:
         command.append("--equal-optimizer-work-control")
@@ -205,6 +214,7 @@ def main() -> None:
             resume_from_run=args.resume_from_run,
             equal_optimizer_work_control=args.equal_optimizer_work_control,
             disable_update_dp=args.disable_update_dp,
+            exclude_modes=args.exclude_modes,
         )
         print(subprocess.list2cmdline(command), flush=True)
         if not args.dry_run:

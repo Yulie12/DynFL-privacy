@@ -1,0 +1,97 @@
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index f140e0f..ff092b2 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -74,6 +74,7 @@ class SelectionConfig:
+     num_clients: int = 100
+     num_edges: int = 10
+     seed: int = 42
++    excluded_modes: tuple[str, ...] = ()
+     initial_epsilon: float = 8.0
+     dp_event_epsilon: float = 0.05
+     dp_emb_epsilon: float = 8.0
+@@ -265,6 +266,8 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
+ 
+     per_mode_counts = []
+     for mode, spec in MODE_SPECS.items():
++        if mode in config.excluded_modes:
++            continue
+         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         events = _mode_link_transmissions(
+@@ -645,6 +648,8 @@ def enumerate_candidates(
+     validate_update_protection_goal(config, policy)
+     candidates: list[Candidate] = []
+     for mode, spec in MODE_SPECS.items():
++        if mode in config.excluded_modes:
++            continue
+         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
+diff --git a/experiments/run_fmnist_lenet5.py b/experiments/run_fmnist_lenet5.py
+index 1ba606b..f9d480e 100644
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
+         choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
+     )
+     parser.add_argument("--selection-period", type=int, default=5)
++    parser.add_argument(
++        "--exclude-modes",
++        nargs="+",
++        default=[],
++        help="Exclude collaboration modes from dynamic selection, e.g. --exclude-modes LIE",
++    )
+     parser.add_argument("--initial-epsilon", type=float, default=8.0)
+     parser.add_argument("--dp-event-epsilon", type=float, default=0.05)
+     parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
+@@ -227,6 +233,7 @@ def main() -> None:
+         num_clients=args.clients,
+         num_edges=args.edges,
+         seed=args.seed,
++        excluded_modes=tuple(args.exclude_modes),
+         initial_epsilon=args.initial_epsilon,
+         dp_event_epsilon=args.dp_event_epsilon,
+         dp_emb_epsilon=args.dp_emb_epsilon,
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index e2912f1..ef4527e 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -55,6 +55,12 @@ def parse_args() -> argparse.Namespace:
+         action="store_true",
+         help="Diagnostic mode: disable update DP for ablation runs.",
+     )
++    parser.add_argument(
++        "--exclude-modes",
++        nargs="+",
++        default=[],
++        help="Exclude collaboration modes from dynamic selection, e.g. --exclude-modes LIE",
++    )
+     return parser.parse_args()
+ 
+ 
+@@ -76,6 +82,7 @@ def build_command(
+     resume_from_run: Path | None = None,
+     equal_optimizer_work_control: bool = False,
+     disable_update_dp: bool = False,
++    exclude_modes: list[str] | None = None,
+ ) -> list[str]:
+     if config.get("execution_protocol") == method2_config.PROTOCOL:
+         return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
+@@ -151,6 +158,8 @@ def build_command(
+         _append_value(command, name, value)
+     if disable_update_dp:
+         command.extend(["--dp-update-mode", "off"])
++    if exclude_modes:
++        command.extend(["--exclude-modes", *exclude_modes])
+     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
+     if equal_optimizer_work_control:
+         command.append("--equal-optimizer-work-control")
+@@ -205,6 +214,7 @@ def main() -> None:
+             resume_from_run=args.resume_from_run,
+             equal_optimizer_work_control=args.equal_optimizer_work_control,
+             disable_update_dp=args.disable_update_dp,
++            exclude_modes=args.exclude_modes,
+         )
+         print(subprocess.list2cmdline(command), flush=True)
+         if not args.dry_run:

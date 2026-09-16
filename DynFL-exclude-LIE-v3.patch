@@ -1,0 +1,100 @@
+--- a/dynfed/selection.py	2026-09-15 13:09:26.000000000 +0000
++++ b/dynfed/selection.py	2026-09-16 07:29:41.474782934 +0000
+@@ -148,6 +148,7 @@
+     embedding_payload_mb: float = 1.6
+     update_payload_mb: float = 4.0
+     mainline_fusion: bool = False
++    excluded_modes: tuple[str, ...] = ()
+ 
+ 
+ @dataclass(frozen=True)
+@@ -265,6 +266,8 @@
+ 
+     per_mode_counts = []
+     for mode, spec in MODE_SPECS.items():
++        if mode in config.excluded_modes:
++            continue
+         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         events = _mode_link_transmissions(
+@@ -645,6 +648,8 @@
+     validate_update_protection_goal(config, policy)
+     candidates: list[Candidate] = []
+     for mode, spec in MODE_SPECS.items():
++        if mode in config.excluded_modes:
++            continue
+         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
+--- a/experiments/run_fmnist_lenet5.py	2026-09-15 13:09:26.000000000 +0000
++++ b/experiments/run_fmnist_lenet5.py	2026-09-16 07:29:54.524575889 +0000
+@@ -12,6 +12,7 @@
+ 
+ from dynfed.fmnist_lenet5_dynamic import Lenet5Config, run_fmnist_lenet5_training
+ from dynfed.selection import SelectionConfig
++from dynfed.training import MODE_SPECS
+ from dynfed.version import CURRENT_EXECUTION_REVISION
+ from dynfed.utils import timestamped_dir
+ 
+@@ -95,6 +96,13 @@
+         choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
+     )
+     parser.add_argument("--selection-period", type=int, default=5)
++    parser.add_argument(
++        "--exclude-modes",
++        nargs="*",
++        default=[],
++        choices=sorted(MODE_SPECS),
++        help="Collaboration modes excluded from dynamic selection, e.g. --exclude-modes LIE",
++    )
+     parser.add_argument("--initial-epsilon", type=float, default=8.0)
+     parser.add_argument("--dp-event-epsilon", type=float, default=0.05)
+     parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
+@@ -283,6 +291,7 @@
+             "released_model_dp" if args.mainline_fusion else args.update_protection_goal
+         ),
+         mainline_fusion=args.mainline_fusion,
++        excluded_modes=tuple(args.exclude_modes),
+     )
+     train_config = Lenet5Config(
+         execution_revision=args.execution_revision,
+--- a/experiments/run_paper_config.py	2026-09-15 13:09:26.000000000 +0000
++++ b/experiments/run_paper_config.py	2026-09-16 07:29:41.475274771 +0000
+@@ -32,6 +32,12 @@
+     parser.add_argument("--he-execution", choices=["real", "profiled"])
+     parser.add_argument("--output-root")
+     parser.add_argument(
++        "--exclude-modes",
++        nargs="*",
++        default=[],
++        help="Collaboration modes excluded from dynamic selection, e.g. --exclude-modes LIE",
++    )
++    parser.add_argument(
+         "--equal-optimizer-work-control",
+         action="store_true",
+         help="Run the supplementary equal-optimizer-work fairness control; main formal runs leave this off.",
+@@ -70,6 +76,7 @@
+     max_new_rounds: int | None = None,
+     resume_from_run: Path | None = None,
+     equal_optimizer_work_control: bool = False,
++    exclude_modes: list[str] | None = None,
+ ) -> list[str]:
+     if config.get("execution_protocol") == method2_config.PROTOCOL:
+         return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
+@@ -144,6 +151,8 @@
+     for name, value in values.items():
+         _append_value(command, name, value)
+     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
++    if exclude_modes:
++        command.extend(["--exclude-modes", *exclude_modes])
+     if equal_optimizer_work_control:
+         command.append("--equal-optimizer-work-control")
+     if max_new_rounds is not None:
+@@ -196,6 +205,7 @@
+             max_new_rounds=args.max_new_rounds,
+             resume_from_run=args.resume_from_run,
+             equal_optimizer_work_control=args.equal_optimizer_work_control,
++            exclude_modes=args.exclude_modes,
+         )
+         print(subprocess.list2cmdline(command), flush=True)
+         if not args.dry_run:

@@ -1,0 +1,97 @@
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index f140e0f..5f93cf4 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -108,6 +108,7 @@ class SelectionConfig:
+     trusted_edge_split_execution: bool = False
+     allow_he: bool = True
+     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3")
++    excluded_modes: tuple[str, ...] = ()
+     update_protection_goal: str = "packet_protection"
+     assume_encoder_feasible: bool = False
+     minibatch_reference_samples: float = 600.0
+@@ -265,6 +266,8 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
+ 
+     per_mode_counts = []
+     for mode, spec in MODE_SPECS.items():
++        if mode in config.excluded_modes:
++            continue
+         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         events = _mode_link_transmissions(
+@@ -645,6 +648,8 @@ def enumerate_candidates(
+     validate_update_protection_goal(config, policy)
+     candidates: list[Candidate] = []
+     for mode, spec in MODE_SPECS.items():
++        if mode in config.excluded_modes:
++            continue
+         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+             continue
+         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
+diff --git a/experiments/run_fmnist_lenet5.py b/experiments/run_fmnist_lenet5.py
+index 1ba606b..99749e3 100644
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
+         choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
+     )
+     parser.add_argument("--selection-period", type=int, default=5)
++    parser.add_argument(
++        "--exclude-modes",
++        nargs="*",
++        default=[],
++        help="Collaboration modes excluded from dynamic selection, e.g. --exclude-modes LIE",
++    )
+     parser.add_argument("--initial-epsilon", type=float, default=8.0)
+     parser.add_argument("--dp-event-epsilon", type=float, default=0.05)
+     parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
+@@ -227,6 +233,7 @@ def main() -> None:
+         num_clients=args.clients,
+         num_edges=args.edges,
+         seed=args.seed,
++        excluded_modes=tuple(args.exclude_modes),
+         initial_epsilon=args.initial_epsilon,
+         dp_event_epsilon=args.dp_event_epsilon,
+         dp_emb_epsilon=args.dp_emb_epsilon,
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index 7364693..6817cde 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--rounds", type=int)
+     parser.add_argument("--he-execution", choices=["real", "profiled"])
+     parser.add_argument("--output-root")
++    parser.add_argument(
++        "--exclude-modes",
++        nargs="*",
++        default=[],
++        help="Collaboration modes excluded from dynamic selection, e.g. --exclude-modes LIE",
++    )
+     parser.add_argument(
+         "--equal-optimizer-work-control",
+         action="store_true",
+@@ -70,6 +76,7 @@ def build_command(
+     max_new_rounds: int | None = None,
+     resume_from_run: Path | None = None,
+     equal_optimizer_work_control: bool = False,
++    excluded_modes: tuple[str, ...] = (),
+ ) -> list[str]:
+     if config.get("execution_protocol") == method2_config.PROTOCOL:
+         return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
+@@ -163,6 +170,8 @@ def build_command(
+         command.append("--enforce-cloud-dp-stability")
+     if he.get("require_real_he"):
+         command.append("--require-real-he")
++    if excluded_modes:
++        command.extend(["--exclude-modes", *excluded_modes])
+     command.extend(["--policies", *policies])
+     return command
+ 
+@@ -196,6 +205,7 @@ def main() -> None:
+             max_new_rounds=args.max_new_rounds,
+             resume_from_run=args.resume_from_run,
+             equal_optimizer_work_control=args.equal_optimizer_work_control,
++            excluded_modes=tuple(args.exclude_modes),
+         )
+         print(subprocess.list2cmdline(command), flush=True)
+         if not args.dry_run:
