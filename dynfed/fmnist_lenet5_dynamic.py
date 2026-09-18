@@ -71,6 +71,7 @@ from .selection import (
     choose_global_pareto_profile,
     evaluate_global_profile,
     enumerate_candidates,
+    paper_client_privacy_requirement,
     build_client_privacy_ledger,
     resolved_privacy_parameters,
     _local_omega_proxy as selection_local_omega_proxy,
@@ -1221,6 +1222,7 @@ def _run_lenet5_policy(
                 rng=rng,
                 policy=policy,
                 privacy_ledger=privacy_ledgers[client.client_id],
+                privacy_requirement=paper_client_privacy_requirement(),
             )
             should_update = round_idx == 0 or round_idx % selection_period == 0
             candidate = None

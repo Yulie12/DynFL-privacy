@@ -38,6 +38,7 @@ from dynfed.fmnist_lenet5_dynamic import (
 from dynfed.nodes import ClientProfile
 from dynfed.selection import (
     Candidate,
+    ExposurePrivacyRequirement,
     ProfileEvaluation,
     SelectionConfig,
     _admitted_clients_for_profile,
@@ -469,6 +470,52 @@ def test_incremental_full_buffer_latency_matches_event_executor() -> None:
 
             assert incremental_ids == tuple(detailed.selected_client_ids)
             assert abs(incremental_latency - detailed.round_duration) < 1e-12
+
+
+def test_exposure_requirement_combines_confidentiality_and_dp_orthogonally() -> None:
+    requirement = ExposurePrivacyRequirement(
+        plaintext_forbidden_links=frozenset({"E_C_upd"}),
+        dp_required_links=frozenset({"E_C_upd"}),
+    )
+    candidates = enumerate_candidates(
+        config=SelectionConfig(),
+        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=100,
+        remaining_epsilon=8.0, round_idx=0, rng=random.Random(7),
+        policy="ours", privacy_requirement=requirement,
+    )
+    exposed = [c for c in candidates if "E_C_upd" in (c.link_mechanisms or {})]
+    assert exposed
+    assert all(c.link_mechanisms["E_C_upd"] == "dp_he3" for c in exposed)
+    assert all("trusted" not in (c.link_mechanisms or {}).values() for c in candidates)
+
+
+def test_exposure_requirement_can_forbid_plaintext_without_requiring_dp() -> None:
+    requirement = ExposurePrivacyRequirement(
+        plaintext_forbidden_links=frozenset({"L_C_upd"}),
+    )
+    candidates = enumerate_candidates(
+        config=SelectionConfig(),
+        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=100,
+        remaining_epsilon=8.0, round_idx=0, rng=random.Random(11),
+        policy="ours", privacy_requirement=requirement,
+    )
+    direct = [c for c in candidates if c.mode == "LIIC"]
+    assert direct
+    assert all(c.link_mechanisms["L_C_upd"] in {"he3", "dp_he3"} for c in direct)
+    assert any(c.link_mechanisms["L_C_upd"] == "he3" for c in direct)
+
+
+def test_exposure_requirement_rejects_mode_when_requested_confidentiality_is_unavailable() -> None:
+    requirement = ExposurePrivacyRequirement(
+        plaintext_forbidden_links=frozenset({"L_E_emb"}),
+    )
+    candidates = enumerate_candidates(
+        config=SelectionConfig(),
+        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=100,
+        remaining_epsilon=8.0, round_idx=0, rng=random.Random(13),
+        policy="ours", privacy_requirement=requirement,
+    )
+    assert not [c for c in candidates if c.mode in {"LIE", "LIEIIC", "LIEIIIC"}]
 
 
 def test_proposed_policy_does_not_offer_unprotected_private_links() -> None:

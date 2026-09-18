@@ -69,6 +69,35 @@ PRIVACY_RISK_OBJECTS = frozenset(
 
 
 @dataclass(frozen=True)
+class ExposurePrivacyRequirement:
+    """Per-client requirements over the transmissions actually exposed by a mode.
+
+    Confidentiality and DP are independent requirements.  A link in
+    ``plaintext_forbidden_links`` must use HE; a link in ``dp_required_links``
+    must use DP.  If both apply, the selected mechanism must provide both.
+    Links not named here are allowed to remain plaintext and do not require DP.
+    """
+
+    plaintext_forbidden_links: frozenset[str] = frozenset()
+    dp_required_links: frozenset[str] = frozenset()
+
+
+def paper_client_privacy_requirement() -> ExposurePrivacyRequirement:
+    """Current paper profile: protect update exposures to Cloud.
+
+    This is an explicit client requirement profile, not a trust label on Edge or
+    Cloud.  Feature/gradient exposures are currently allowed in plaintext; their
+    protection can be requested by supplying a different per-client profile.
+    """
+
+    cloud_update_links = frozenset({"L_C_upd", "E_C_upd"})
+    return ExposurePrivacyRequirement(
+        plaintext_forbidden_links=cloud_update_links,
+        dp_required_links=cloud_update_links,
+    )
+
+
+@dataclass(frozen=True)
 class SelectionConfig:
     rounds: int = 100
     num_clients: int = 100
@@ -648,6 +677,7 @@ def enumerate_candidates(
     memory_capacity_factor: float = 1.0,
     allow_none: bool = False,
     privacy_ledger: ClientPrivacyLedger | None = None,
+    privacy_requirement: ExposurePrivacyRequirement | None = None,
 ) -> list[Candidate]:
     validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
@@ -671,6 +701,7 @@ def enumerate_candidates(
             trusted_edge_split_execution=config.trusted_edge_split_execution,
             update_mechanism_options=config.update_mechanism_options,
             mainline_fusion=config.mainline_fusion,
+            privacy_requirement=privacy_requirement,
         )
         for mechanisms, link_mechanisms in assignments:
             candidates.append(
@@ -3333,6 +3364,7 @@ def _mechanism_assignments(
     trusted_edge_split_execution: bool = False,
     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3"),
     mainline_fusion: bool = False,
+    privacy_requirement: ExposurePrivacyRequirement | None = None,
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     all_transmissions = _mode_link_transmissions(
         spec.name,
@@ -3344,6 +3376,58 @@ def _mechanism_assignments(
     transmissions = [event for event in all_transmissions if event[3]]
     links = list(dict.fromkeys(event[0] for event in transmissions))
     link_objects = {event[0]: event[1] for event in all_transmissions}
+
+    if privacy_requirement is not None:
+        def legal(link: str, mechanism: str) -> bool:
+            return (
+                (allow_he or not mechanism_uses_he(mechanism))
+                and (
+                    link not in privacy_requirement.plaintext_forbidden_links
+                    or mechanism_uses_he(mechanism)
+                )
+                and (
+                    link not in privacy_requirement.dp_required_links
+                    or mechanism_uses_dp(mechanism)
+                )
+            )
+
+        def dynamic_options(link: str) -> tuple[str, ...]:
+            obj = link_objects[link]
+            if obj == "upd":
+                options = tuple(dict.fromkeys(("none",) + tuple(update_mechanism_options)))
+            else:
+                options = MECHANISMS_BY_OBJECT[obj]
+            return tuple(mech for mech in options if legal(link, mech))
+
+        fixed_mechanism = None
+        if policy in {"no_protection", "fixed_splitfed_no_protection"}:
+            fixed_mechanism = lambda link: "none"
+        elif policy in {"fixed_dp", "fixed_splitfed_dp"}:
+            fixed_mechanism = lambda link: (
+                "dp" if "dp" in MECHANISMS_BY_OBJECT[link_objects[link]] else "none"
+            )
+        elif policy in {"fixed_he", "fixed_splitfed_trusted_edge"}:
+            fixed_mechanism = lambda link: _prefer_he(link_objects[link])
+        elif policy == "fixed_dp_he":
+            fixed_mechanism = lambda link: (
+                "dp_he3" if link_objects[link] == "upd" else "none"
+            )
+
+        if fixed_mechanism is not None:
+            assignment = {link: fixed_mechanism(link) for link in links}
+            if not all(legal(link, mech) for link, mech in assignment.items()):
+                return []
+            return [(_object_mechanism_summary(assignment, link_objects), assignment)]
+
+        choices = [dynamic_options(link) for link in links]
+        if any(not values for values in choices):
+            return []
+        link_assignments = [dict(zip(links, values)) for values in product(*choices)]
+        return [
+            (_object_mechanism_summary(item, link_objects), item)
+            for item in link_assignments
+        ]
+
     trusted_links = {
         link
         for link in links

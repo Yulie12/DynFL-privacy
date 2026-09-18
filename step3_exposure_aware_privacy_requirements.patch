@@ -1,0 +1,208 @@
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index 3df2cb7..ddf1b0f 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -68,6 +68,35 @@ PRIVACY_RISK_OBJECTS = frozenset(
+ )
+ 
+ 
++@dataclass(frozen=True)
++class ExposurePrivacyRequirement:
++    """Per-client requirements over the transmissions actually exposed by a mode.
++
++    Confidentiality and DP are independent requirements.  A link in
++    ``plaintext_forbidden_links`` must use HE; a link in ``dp_required_links``
++    must use DP.  If both apply, the selected mechanism must provide both.
++    Links not named here are allowed to remain plaintext and do not require DP.
++    """
++
++    plaintext_forbidden_links: frozenset[str] = frozenset()
++    dp_required_links: frozenset[str] = frozenset()
++
++
++def paper_client_privacy_requirement() -> ExposurePrivacyRequirement:
++    """Current paper profile: protect update exposures to Cloud.
++
++    This is an explicit client requirement profile, not a trust label on Edge or
++    Cloud.  Feature/gradient exposures are currently allowed in plaintext; their
++    protection can be requested by supplying a different per-client profile.
++    """
++
++    cloud_update_links = frozenset({"L_C_upd", "E_C_upd"})
++    return ExposurePrivacyRequirement(
++        plaintext_forbidden_links=cloud_update_links,
++        dp_required_links=cloud_update_links,
++    )
++
++
+ @dataclass(frozen=True)
+ class SelectionConfig:
+     rounds: int = 100
+@@ -648,6 +677,7 @@ def enumerate_candidates(
+     memory_capacity_factor: float = 1.0,
+     allow_none: bool = False,
+     privacy_ledger: ClientPrivacyLedger | None = None,
++    privacy_requirement: ExposurePrivacyRequirement | None = None,
+ ) -> list[Candidate]:
+     validate_update_protection_goal(config, policy)
+     candidates: list[Candidate] = []
+@@ -671,6 +701,7 @@ def enumerate_candidates(
+             trusted_edge_split_execution=config.trusted_edge_split_execution,
+             update_mechanism_options=config.update_mechanism_options,
+             mainline_fusion=config.mainline_fusion,
++            privacy_requirement=privacy_requirement,
+         )
+         for mechanisms, link_mechanisms in assignments:
+             candidates.append(
+@@ -3333,6 +3364,7 @@ def _mechanism_assignments(
+     trusted_edge_split_execution: bool = False,
+     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3"),
+     mainline_fusion: bool = False,
++    privacy_requirement: ExposurePrivacyRequirement | None = None,
+ ) -> list[tuple[dict[str, str], dict[str, str]]]:
+     all_transmissions = _mode_link_transmissions(
+         spec.name,
+@@ -3344,6 +3376,58 @@ def _mechanism_assignments(
+     transmissions = [event for event in all_transmissions if event[3]]
+     links = list(dict.fromkeys(event[0] for event in transmissions))
+     link_objects = {event[0]: event[1] for event in all_transmissions}
++
++    if privacy_requirement is not None:
++        def legal(link: str, mechanism: str) -> bool:
++            return (
++                (allow_he or not mechanism_uses_he(mechanism))
++                and (
++                    link not in privacy_requirement.plaintext_forbidden_links
++                    or mechanism_uses_he(mechanism)
++                )
++                and (
++                    link not in privacy_requirement.dp_required_links
++                    or mechanism_uses_dp(mechanism)
++                )
++            )
++
++        def dynamic_options(link: str) -> tuple[str, ...]:
++            obj = link_objects[link]
++            if obj == "upd":
++                options = tuple(dict.fromkeys(("none",) + tuple(update_mechanism_options)))
++            else:
++                options = MECHANISMS_BY_OBJECT[obj]
++            return tuple(mech for mech in options if legal(link, mech))
++
++        fixed_mechanism = None
++        if policy in {"no_protection", "fixed_splitfed_no_protection"}:
++            fixed_mechanism = lambda link: "none"
++        elif policy in {"fixed_dp", "fixed_splitfed_dp"}:
++            fixed_mechanism = lambda link: (
++                "dp" if "dp" in MECHANISMS_BY_OBJECT[link_objects[link]] else "none"
++            )
++        elif policy in {"fixed_he", "fixed_splitfed_trusted_edge"}:
++            fixed_mechanism = lambda link: _prefer_he(link_objects[link])
++        elif policy == "fixed_dp_he":
++            fixed_mechanism = lambda link: (
++                "dp_he3" if link_objects[link] == "upd" else "none"
++            )
++
++        if fixed_mechanism is not None:
++            assignment = {link: fixed_mechanism(link) for link in links}
++            if not all(legal(link, mech) for link, mech in assignment.items()):
++                return []
++            return [(_object_mechanism_summary(assignment, link_objects), assignment)]
++
++        choices = [dynamic_options(link) for link in links]
++        if any(not values for values in choices):
++            return []
++        link_assignments = [dict(zip(links, values)) for values in product(*choices)]
++        return [
++            (_object_mechanism_summary(item, link_objects), item)
++            for item in link_assignments
++        ]
++
+     trusted_links = {
+         link
+         for link in links
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index ad406d7..a1c2854 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -71,6 +71,7 @@ from .selection import (
+     choose_global_pareto_profile,
+     evaluate_global_profile,
+     enumerate_candidates,
++    paper_client_privacy_requirement,
+     build_client_privacy_ledger,
+     resolved_privacy_parameters,
+     _local_omega_proxy as selection_local_omega_proxy,
+@@ -1221,6 +1222,7 @@ def _run_lenet5_policy(
+                 rng=rng,
+                 policy=policy,
+                 privacy_ledger=privacy_ledgers[client.client_id],
++                privacy_requirement=paper_client_privacy_requirement(),
+             )
+             should_update = round_idx == 0 or round_idx % selection_period == 0
+             candidate = None
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index aa8bbcc..7ce28a1 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -38,6 +38,7 @@ from dynfed.fmnist_lenet5_dynamic import (
+ from dynfed.nodes import ClientProfile
+ from dynfed.selection import (
+     Candidate,
++    ExposurePrivacyRequirement,
+     ProfileEvaluation,
+     SelectionConfig,
+     _admitted_clients_for_profile,
+@@ -471,6 +472,52 @@ def test_incremental_full_buffer_latency_matches_event_executor() -> None:
+             assert abs(incremental_latency - detailed.round_duration) < 1e-12
+ 
+ 
++def test_exposure_requirement_combines_confidentiality_and_dp_orthogonally() -> None:
++    requirement = ExposurePrivacyRequirement(
++        plaintext_forbidden_links=frozenset({"E_C_upd"}),
++        dp_required_links=frozenset({"E_C_upd"}),
++    )
++    candidates = enumerate_candidates(
++        config=SelectionConfig(),
++        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=100,
++        remaining_epsilon=8.0, round_idx=0, rng=random.Random(7),
++        policy="ours", privacy_requirement=requirement,
++    )
++    exposed = [c for c in candidates if "E_C_upd" in (c.link_mechanisms or {})]
++    assert exposed
++    assert all(c.link_mechanisms["E_C_upd"] == "dp_he3" for c in exposed)
++    assert all("trusted" not in (c.link_mechanisms or {}).values() for c in candidates)
++
++
++def test_exposure_requirement_can_forbid_plaintext_without_requiring_dp() -> None:
++    requirement = ExposurePrivacyRequirement(
++        plaintext_forbidden_links=frozenset({"L_C_upd"}),
++    )
++    candidates = enumerate_candidates(
++        config=SelectionConfig(),
++        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=100,
++        remaining_epsilon=8.0, round_idx=0, rng=random.Random(11),
++        policy="ours", privacy_requirement=requirement,
++    )
++    direct = [c for c in candidates if c.mode == "LIIC"]
++    assert direct
++    assert all(c.link_mechanisms["L_C_upd"] in {"he3", "dp_he3"} for c in direct)
++    assert any(c.link_mechanisms["L_C_upd"] == "he3" for c in direct)
++
++
++def test_exposure_requirement_rejects_mode_when_requested_confidentiality_is_unavailable() -> None:
++    requirement = ExposurePrivacyRequirement(
++        plaintext_forbidden_links=frozenset({"L_E_emb"}),
++    )
++    candidates = enumerate_candidates(
++        config=SelectionConfig(),
++        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=100,
++        remaining_epsilon=8.0, round_idx=0, rng=random.Random(13),
++        policy="ours", privacy_requirement=requirement,
++    )
++    assert not [c for c in candidates if c.mode in {"LIE", "LIEIIC", "LIEIIIC"}]
++
++
+ def test_proposed_policy_does_not_offer_unprotected_private_links() -> None:
+     candidates = enumerate_candidates(
+         config=SelectionConfig(trusted_edge_split_execution=True),
