@@ -4069,29 +4069,23 @@ def _edge_normalized_cloud_weights(
     client_edges: dict[int, int],
     edge_total_samples: dict[int, float],
 ) -> list[float]:
-    """Correct round-varying edge participation before global FedAvg."""
-    if not cloud_updates:
-        return []
+    """Return the represented sample mass carried by each Cloud contribution.
 
-    update_edges: list[int] = []
-    admitted_by_edge: dict[int, float] = {}
-    for _state_diff, sample_count, _candidate, client_ids in cloud_updates:
-        edge_id = _cloud_update_edge(client_ids, client_edges)
-        count = max(float(sample_count), 0.0)
-        update_edges.append(edge_id)
-        admitted_by_edge[edge_id] = admitted_by_edge.get(edge_id, 0.0) + count
+    A direct Lupd carries its client's admitted sample mass.  An Eupd carries
+    the sum of the admitted client masses represented by that Edge aggregate.
+    Do not inflate either contribution to the full dataset mass of its Edge:
+    samples that were not admitted to this aggregation event must have zero
+    statistical weight in the event.
 
-    weights: list[float] = []
-    for edge_id, (_state_diff, sample_count, _candidate, _client_ids) in zip(
-        update_edges, cloud_updates
-    ):
-        admitted = admitted_by_edge[edge_id]
-        if admitted <= 0.0:
-            weights.append(0.0)
-            continue
-        edge_mass = max(float(edge_total_samples.get(edge_id, admitted)), 0.0)
-        weights.append(edge_mass * max(float(sample_count), 0.0) / admitted)
-    return weights
+    ``client_edges`` and ``edge_total_samples`` remain in the signature for
+    compatibility with existing diagnostics/callers; they do not alter the
+    formal aggregation weight.
+    """
+    del client_edges, edge_total_samples
+    return [
+        max(float(sample_count), 0.0)
+        for _state_diff, sample_count, _candidate, _client_ids in cloud_updates
+    ]
 
 
 def _cloud_edge_sample_ratios(

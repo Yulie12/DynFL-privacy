@@ -2915,42 +2915,23 @@ def _cloud_client_aggregation_weights(
     client_edges: dict[int, int],
     admitted_client_ids: list[int] | tuple[int, ...],
 ) -> dict[int, float]:
-    edge_total_samples: dict[int, float] = {}
-    for client_id in profile:
-        edge_id = int(client_edges.get(client_id, -1))
-        edge_total_samples[edge_id] = (
-            edge_total_samples.get(edge_id, 0.0)
-            + max(float(client_samples.get(client_id, 1.0)), 0.0)
-        )
-
+    """Normalize Cloud-reaching admitted clients by represented sample mass."""
+    del client_edges
     admitted_cloud = [
         client_id
         for client_id in admitted_client_ids
         if client_id in profile and _candidate_reaches_cloud(profile[client_id])
     ]
-    admitted_by_edge: dict[int, float] = {}
-    for client_id in admitted_cloud:
-        edge_id = int(client_edges.get(client_id, -1))
-        admitted_by_edge[edge_id] = (
-            admitted_by_edge.get(edge_id, 0.0)
-            + max(float(client_samples.get(client_id, 1.0)), 0.0)
-        )
-    active_edge_mass = sum(
-        edge_total_samples.get(edge_id, 0.0)
-        for edge_id, admitted in admitted_by_edge.items()
-        if admitted > 0.0
-    )
-    if active_edge_mass <= 0.0:
+    represented_mass = {
+        client_id: max(float(client_samples.get(client_id, 1.0)), 0.0)
+        for client_id in admitted_cloud
+    }
+    total_mass = sum(represented_mass.values())
+    if total_mass <= 0.0:
         return {}
     return {
-        client_id: (
-            edge_total_samples[int(client_edges.get(client_id, -1))]
-            / active_edge_mass
-            * max(float(client_samples.get(client_id, 1.0)), 0.0)
-            / admitted_by_edge[int(client_edges.get(client_id, -1))]
-        )
-        for client_id in admitted_cloud
-        if admitted_by_edge.get(int(client_edges.get(client_id, -1)), 0.0) > 0.0
+        client_id: mass / total_mass
+        for client_id, mass in represented_mass.items()
     }
 
 

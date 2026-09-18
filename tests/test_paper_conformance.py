@@ -1385,7 +1385,7 @@ def test_update_dp_variance_uses_admitted_aggregation_size() -> None:
     assert sizes == {0: 2, 1: 2, 2: 1, 3: 1}
 
 
-def test_selector_cloud_weights_match_actual_edge_normalized_fedavg() -> None:
+def test_selector_cloud_weights_match_actual_sample_mass_fedavg() -> None:
     cloud = _candidate("LIIC")
     edge_only = _candidate("LIIE")
     profile = {0: cloud, 1: edge_only, 2: cloud}
@@ -1517,7 +1517,7 @@ def test_weighted_state_difference_norm_matches_fedavg_update() -> None:
     assert abs(actual - expected) < 1e-12
 
 
-def test_edge_normalized_cloud_weights_remove_round_varying_edge_share() -> None:
+def test_cloud_weights_are_exact_represented_sample_mass() -> None:
     cloud_updates = [
         (None, 25, None, [0]),
         (None, 75, None, [1]),
@@ -1530,14 +1530,13 @@ def test_edge_normalized_cloud_weights_remove_round_varying_edge_share() -> None
         edge_total_samples={0: 800.0, 1: 800.0},
     )
 
-    assert np.allclose(weights, [200.0, 600.0, 800.0])
-    assert np.isclose(sum(weights[:2]), weights[2])
+    assert np.allclose(weights, [25.0, 75.0, 50.0])
 
 
-def test_edge_normalized_cloud_weights_preserve_edge_dataset_mass() -> None:
+def test_edge_aggregate_carries_sum_of_admitted_client_mass_only() -> None:
     cloud_updates = [
         (None, 100, None, [0, 1]),
-        (None, 100, None, [2]),
+        (None, 40, None, [2]),
     ]
 
     weights = _edge_normalized_cloud_weights(
@@ -1546,7 +1545,19 @@ def test_edge_normalized_cloud_weights_preserve_edge_dataset_mass() -> None:
         edge_total_samples={0: 1200.0, 1: 600.0},
     )
 
-    assert np.allclose(weights, [1200.0, 600.0])
+    assert np.allclose(weights, [100.0, 40.0])
+
+
+def test_edge_aggregate_and_direct_updates_match_flat_sample_mass_fedavg() -> None:
+    # Eupd represents clients 0+1 (25+75 samples); direct Lupd represents client 2 (50).
+    weights = _edge_normalized_cloud_weights(
+        [(None, 100, None, [0, 1]), (None, 50, None, [2])],
+        client_edges={0: 0, 1: 0, 2: 1},
+        edge_total_samples={0: 1000.0, 1: 50.0},
+    )
+
+    normalized = np.asarray(weights) / sum(weights)
+    assert np.allclose(normalized, [2.0 / 3.0, 1.0 / 3.0])
 
 
 def test_cloud_mode_synchronizes_global_while_edge_mode_keeps_returned_state() -> None:
