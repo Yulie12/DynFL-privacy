@@ -1,0 +1,513 @@
+--- a/dynfed/flow_executor.py
++++ b/dynfed/flow_executor.py
+@@ -188,14 +188,10 @@
+     edge_cloud_group_count = sum(
+         1 for mode, _edge_id, _group in edge_groups if mode in EDGE_CLOUD_MODES
+     )
+-    direct_cloud_k = _buffer_size(len(direct_cloud_clients), aggregation_fraction)
+-    edge_cloud_k = _buffer_size(edge_cloud_group_count, aggregation_fraction)
+     edge_buffers: dict[tuple[str, int, str], list[ClientFlowInput]] = {key: [] for key in edge_groups}
+     edge_triggered: set[tuple[str, int, str]] = set()
+-    direct_cloud_buffer: list[ClientFlowInput] = []
+-    direct_cloud_triggered = False
+-    edge_cloud_buffer: list[EdgeReadyInput] = []
+-    edge_cloud_triggered = False
++    direct_cloud_ready: list[ClientFlowInput] = []
++    edge_cloud_ready: list[EdgeReadyInput] = []
+     tie_admitted_client_ids: set[int] = set()
+ 
+     while event_heap:
+@@ -315,99 +311,59 @@
+                             ),
+                         )
+                         event_seq += 1
+-            elif client.mode in CLOUD_DIRECT_MODES and not direct_cloud_triggered:
+-                direct_cloud_buffer.append(client)
+-                if len(direct_cloud_buffer) >= direct_cloud_k:
+-                    direct_cloud_triggered = True
+-                    eligible = [
+-                        item
+-                        for item in direct_cloud_clients
+-                        if item.arrival_time <= event_time + 1e-12
+-                    ]
+-                    buffer = _select_client_buffer(
+-                        eligible,
+-                        aggregation_fraction,
+-                        total_n=len(direct_cloud_clients),
+-                    )
+-                    tie_admitted_client_ids.update(item.client_id for item in buffer.chosen)
+-                    waiting_time += buffer.waiting_time
+-                    cloud_payload = sum(
+-                        item.cloud_aggregation_payload for item in buffer.chosen
+-                    )
+-                    cloud_agg = (
+-                        cloud_aggregation_beta * cloud_payload
+-                        + cloud_aggregation_fixed
+-                    )
+-                    cloud_agg_total += cloud_agg
+-                    finish = event_time + cloud_agg
+-                    chosen_ids = [item.client_id for item in buffer.chosen]
+-                    flow_events.append(
+-                        _direct_cloud_event(
+-                            round_idx=round_idx,
+-                            start_time=event_time,
+-                            finish_time=finish,
+-                            aggregation_fraction=aggregation_fraction,
+-                            buffer=buffer,
+-                            cloud_agg=cloud_agg,
+-                            effective_payload=cloud_payload,
+-                            aggregation_beta=cloud_aggregation_beta,
+-                            aggregation_fixed=cloud_aggregation_fixed,
+-                        )
+-                    )
+-                    for item in buffer.chosen:
+-                        selected[item.client_id] = item
+-                    direct_return_time = max(
+-                        (item.return_path_time for item in buffer.chosen),
+-                        default=0.0,
+-                    )
+-                    return_time += direct_return_time
+-                    round_end_candidates.append(finish + direct_return_time)
+-        elif event_type == "edge_ready" and not edge_cloud_triggered:
+-            edge_cloud_buffer.append(payload)
+-            if len(edge_cloud_buffer) >= edge_cloud_k:
+-                edge_cloud_triggered = True
+-                edge_buffer = _select_edge_buffer(
+-                    edge_cloud_buffer,
+-                    aggregation_fraction,
+-                    total_n=edge_cloud_group_count,
+-                )
+-                waiting_time += edge_buffer.waiting_time
+-                cloud_payload = sum(
+-                    item.cloud_aggregation_payload for item in edge_buffer.chosen
+-                )
+-                cloud_agg = (
+-                    cloud_aggregation_beta * cloud_payload
+-                    + cloud_aggregation_fixed
+-                )
+-                cloud_agg_total += cloud_agg
+-                finish = event_time + cloud_agg
+-                chosen_client_ids: list[int] = []
+-                for item in edge_buffer.chosen:
+-                    chosen_client_ids.extend(item.client_ids)
+-                flow_events.append(
+-                    _edge_cloud_event(
+-                        round_idx=round_idx,
+-                        start_time=event_time,
+-                        finish_time=finish,
+-                        aggregation_fraction=aggregation_fraction,
+-                        edge_buffer=edge_buffer,
+-                        cloud_agg=cloud_agg,
+-                        effective_payload=cloud_payload,
+-                        aggregation_beta=cloud_aggregation_beta,
+-                        aggregation_fixed=cloud_aggregation_fixed,
+-                        chosen_client_ids=chosen_client_ids,
+-                    )
+-                )
+-                chosen_client_set = set(chosen_client_ids)
+-                for item in clients:
+-                    if item.client_id in chosen_client_set:
+-                        selected[item.client_id] = item
+-                edge_cloud_return_time = max(
+-                    (item.return_path_time for item in edge_buffer.chosen),
+-                    default=0.0,
+-                )
+-                return_time += edge_cloud_return_time
+-                round_end_candidates.append(finish + edge_cloud_return_time)
++            elif client.mode in CLOUD_DIRECT_MODES:
++                # Q70: Cloud has no second buffer. Every legal cloud-bound
++                # contribution in the current round is retained until the
++                # round-synchronous cloud aggregation below.
++                direct_cloud_ready.append(client)
++        elif event_type == "edge_ready":
++            edge_cloud_ready.append(payload)
++
++    # Q70: one round-synchronous Cloud aggregation over all legal contributions
++    # that this round's selected Modes send to Cloud. Edge-only Modes are not
++    # part of this set; Interface-III contributions first pass their Edge Buffer.
++    if direct_cloud_ready or edge_cloud_ready:
++        cloud_arrivals = [item.arrival_time for item in direct_cloud_ready] + [
++            item.arrival_time for item in edge_cloud_ready
++        ]
++        cloud_start = max(cloud_arrivals)
++        waiting_time += sum(cloud_start - arrival for arrival in cloud_arrivals)
++        cloud_payload = sum(
++            item.cloud_aggregation_payload for item in direct_cloud_ready
++        ) + sum(item.cloud_aggregation_payload for item in edge_cloud_ready)
++        cloud_agg = cloud_aggregation_beta * cloud_payload + cloud_aggregation_fixed
++        cloud_agg_total += cloud_agg
++        finish = cloud_start + cloud_agg
++
++        chosen_client_ids = [item.client_id for item in direct_cloud_ready]
++        for item in edge_cloud_ready:
++            chosen_client_ids.extend(item.client_ids)
++        chosen_client_set = set(chosen_client_ids)
++        for item in clients:
++            if item.client_id in chosen_client_set:
++                selected[item.client_id] = item
++
++        cloud_return_time = max(
++            [item.return_path_time for item in direct_cloud_ready]
++            + [item.return_path_time for item in edge_cloud_ready],
++            default=0.0,
++        )
++        return_time += cloud_return_time
++        round_end_candidates.append(finish + cloud_return_time)
++        flow_events.append(
++            _round_cloud_event(
++                round_idx=round_idx,
++                start_time=cloud_start,
++                finish_time=finish,
++                cloud_agg=cloud_agg,
++                effective_payload=cloud_payload,
++                aggregation_beta=cloud_aggregation_beta,
++                aggregation_fixed=cloud_aggregation_fixed,
++                direct_clients=direct_cloud_ready,
++                edge_inputs=edge_cloud_ready,
++                chosen_client_ids=chosen_client_ids,
++            )
++        )
+ 
+     selected_items = [selected[cid] for cid in sorted(selected)]
+     return FlowExecutionResult(
+@@ -458,19 +414,14 @@
+     edge_cloud_group_count = sum(
+         1 for mode, _edge_id, _group in edge_groups if mode in EDGE_CLOUD_MODES
+     )
+-    client_buffers = list(edge_groups.values())
+-    if direct_cloud_clients:
+-        client_buffers.append(direct_cloud_clients)
+-    all_client_buffers_fill = all(
++    # Only Edge has a threshold buffer. Cloud is round-synchronous (Q70), so
++    # direct-cloud clients never make this fast path partial by themselves.
++    edge_client_buffers = list(edge_groups.values())
++    all_edge_buffers_fill = all(
+         _buffer_size(len(group), aggregation_fraction) == len(group)
+-        for group in client_buffers
++        for group in edge_client_buffers
+     )
+-    edge_cloud_buffer_fills = (
+-        edge_cloud_group_count == 0
+-        or _buffer_size(edge_cloud_group_count, aggregation_fraction)
+-        == edge_cloud_group_count
+-    )
+-    if not all_client_buffers_fill or not edge_cloud_buffer_fills:
++    if not all_edge_buffers_fill:
+         return execute_mixed_round_flow(
+             round_idx=round_idx,
+             clients=clients,
+@@ -537,46 +488,32 @@
+             )
+         )
+ 
+-    if direct_cloud_clients:
+-        direct_group = [client for _position, client in direct_cloud_clients]
+-        start_time = max(client.arrival_time for client in direct_group)
+-        waiting_time += sum(start_time - client.arrival_time for client in direct_group)
+-        cloud_payload = sum(client.cloud_aggregation_payload for client in direct_group)
+-        cloud_agg = cloud_aggregation_beta * cloud_payload + cloud_aggregation_fixed
+-        cloud_agg_total += cloud_agg
+-        for client in direct_group:
+-            selected[client.client_id] = client
+-        direct_return_time = max(
+-            (client.return_path_time for client in direct_group),
+-            default=0.0,
++    direct_group = [client for _position, client in direct_cloud_clients]
++    if direct_group or edge_cloud_ready:
++        cloud_arrivals = [client.arrival_time for client in direct_group] + [
++            edge.arrival_time for edge in edge_cloud_ready
++        ]
++        start_time = max(cloud_arrivals)
++        waiting_time += sum(start_time - arrival for arrival in cloud_arrivals)
++        cloud_payload = sum(client.cloud_aggregation_payload for client in direct_group) + sum(
++            edge.cloud_aggregation_payload for edge in edge_cloud_ready
+         )
+-        return_time += direct_return_time
+-        round_end_candidates.append(start_time + cloud_agg + direct_return_time)
+-
+-    if edge_cloud_ready:
+-        start_time = max(edge.arrival_time for edge in edge_cloud_ready)
+-        wait_by_edge = {
+-            edge.edge_id: start_time - edge.arrival_time
+-            for edge in sorted(edge_cloud_ready, key=lambda item: item.arrival_time)
+-        }
+-        waiting_time += sum(wait_by_edge.values())
+-        cloud_payload = sum(edge.cloud_aggregation_payload for edge in edge_cloud_ready)
+         cloud_agg = cloud_aggregation_beta * cloud_payload + cloud_aggregation_fixed
+         cloud_agg_total += cloud_agg
+-        chosen_client_ids = {
+-            client_id
+-            for edge in edge_cloud_ready
+-            for client_id in edge.client_ids
+-        }
++        chosen_client_ids = {client.client_id for client in direct_group}
++        chosen_client_ids.update(
++            client_id for edge in edge_cloud_ready for client_id in edge.client_ids
++        )
+         for client in clients:
+             if client.client_id in chosen_client_ids:
+                 selected[client.client_id] = client
+-        edge_cloud_return_time = max(
+-            (edge.return_path_time for edge in edge_cloud_ready),
++        cloud_return_time = max(
++            [client.return_path_time for client in direct_group]
++            + [edge.return_path_time for edge in edge_cloud_ready],
+             default=0.0,
+         )
+-        return_time += edge_cloud_return_time
+-        round_end_candidates.append(start_time + cloud_agg + edge_cloud_return_time)
++        return_time += cloud_return_time
++        round_end_candidates.append(start_time + cloud_agg + cloud_return_time)
+ 
+     selected_items = [selected[client_id] for client_id in sorted(selected)]
+     return FlowExecutionResult(
+@@ -691,6 +628,42 @@
+     }
+ 
+ 
++def _round_cloud_event(
++    *,
++    round_idx: int,
++    start_time: float,
++    finish_time: float,
++    cloud_agg: float,
++    effective_payload: float,
++    aggregation_beta: float,
++    aggregation_fixed: float,
++    direct_clients: list[ClientFlowInput],
++    edge_inputs: list[EdgeReadyInput],
++    chosen_client_ids: list[int],
++) -> dict[str, Any]:
++    return {
++        "round": round_idx,
++        "event_type": "cloud_aggregate_round",
++        "tex_stage": "flow_cloud_aggregation",
++        "time": start_time,
++        "X_c_t": start_time,
++        "finish_time": finish_time,
++        "F_c_t": finish_time,
++        "num_direct_clients": len(direct_clients),
++        "num_edge_aggregates": len(edge_inputs),
++        "num_clients": len(chosen_client_ids),
++        "client_ids": ";".join(str(cid) for cid in chosen_client_ids),
++        "edge_ids": ";".join(str(item.edge_id) for item in edge_inputs),
++        "waiting_time": sum(start_time - item.arrival_time for item in direct_clients)
++        + sum(start_time - item.arrival_time for item in edge_inputs),
++        "aggregation_time": cloud_agg,
++        "effective_payload": effective_payload,
++        "aggregation_beta": aggregation_beta,
++        "aggregation_fixed": aggregation_fixed,
++        "round_synchronous": True,
++    }
++
++
+ def _direct_cloud_event(
+     *,
+     round_idx: int,
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -2164,18 +2164,12 @@
+     for client in client_inputs.values():
+         groups.setdefault(_full_buffer_group_key(client), []).append(client)
+ 
+-    edge_cloud_group_count = sum(
+-        1 for key in groups if key[0] in EDGE_CLOUD_MODES
+-    )
++    # Q70: only Edge has a threshold buffer. Direct-cloud contributions and
++    # Edge aggregates are all retained for one round-synchronous Cloud event.
+     if any(
+-        _buffer_size(len(group), config.aggregation_fraction) != len(group)
+-        for group in groups.values()
+-    ):
+-        return None
+-    if (
+-        edge_cloud_group_count > 0
+-        and _buffer_size(edge_cloud_group_count, config.aggregation_fraction)
+-        != edge_cloud_group_count
++        key[0] != "__direct_cloud__"
++        and _buffer_size(len(group), config.aggregation_fraction) != len(group)
++        for key, group in groups.items()
+     ):
+         return None
+ 
+@@ -2417,12 +2411,11 @@
+     cloud_aggregation_payload = cloud_payload_top[0]
+     if key[0] == "__direct_cloud__":
+         kind = "direct_cloud"
+-        cloud_aggregation_time = (
+-            config.cloud_aggregation_beta * cloud_payload_sum
+-            + config.cloud_aggregation_fixed
+-        )
+-        terminal_time = start_time + cloud_aggregation_time + return_path_time
+-        cloud_aggregation_payload = 0.0
++        # Direct contributions are Cloud sources, not an independent Cloud
++        # buffer/event. They join Interface-III edge aggregates in the single
++        # round-synchronous Cloud aggregation (Q70).
++        cloud_arrival_time = start_time
++        cloud_aggregation_payload = cloud_payload_sum
+     else:
+         edge_aggregation_time = arrival_top[3] * (
+             config.edge_aggregation_beta * edge_payload_sum
+@@ -2483,20 +2476,20 @@
+     terminal_times = [
+         summary.terminal_time
+         for summary in summaries
+-        if summary.kind != "edge_cloud"
++        if summary.kind == "edge_only"
+     ]
+-    edge_cloud = [
++    cloud_sources = [
+         summary
+         for summary in summaries
+-        if summary.kind == "edge_cloud"
++        if summary.kind in {"direct_cloud", "edge_cloud"}
+     ]
+-    if edge_cloud:
++    if cloud_sources:
+         terminal_times.append(
+-            max(summary.cloud_arrival_time for summary in edge_cloud)
++            max(summary.cloud_arrival_time for summary in cloud_sources)
+             + config.cloud_aggregation_beta
+-            * sum(summary.cloud_aggregation_payload for summary in edge_cloud)
++            * sum(summary.cloud_aggregation_payload for summary in cloud_sources)
+             + config.cloud_aggregation_fixed
+-            + max(summary.return_path_time for summary in edge_cloud)
++            + max(summary.return_path_time for summary in cloud_sources)
+         )
+     return max(terminal_times, default=0.0)
+ 
+@@ -2537,24 +2530,12 @@
+         if key[0] == "edge_only":
+             admitted.update(client_id for _latency, client_id in chosen)
+         elif key[0] == "direct_cloud":
+-            admitted.update(client_id for _latency, client_id in chosen)
++            # Cloud is round-synchronous: direct-cloud clients are not filtered
++            # by the Edge buffer fraction.
++            admitted.update(client_id for _latency, client_id in arrivals)
+         else:
+             if chosen:
+-                finish = max(latency for latency, _client_id in chosen)
+-                edge_cloud_groups[key] = (finish, [client_id for _latency, client_id in chosen])
+-
+-    if edge_cloud_groups:
+-        edge_arrivals = [
+-            (finish, group_key, client_ids)
+-            for group_key, (finish, client_ids) in edge_cloud_groups.items()
+-        ]
+-        k = _buffer_size(len(edge_arrivals), config.aggregation_fraction)
+-        ordered = sorted(edge_arrivals, key=lambda item: item[0])
+-        threshold = ordered[min(k, len(ordered)) - 1][0]
+-        for _finish, _group_key, client_ids in (
+-            item for item in ordered if item[0] <= threshold + 1e-12
+-        ):
+-            admitted.update(client_ids)
++                admitted.update(client_id for _latency, client_id in chosen)
+     return sorted(admitted)
+ 
+ 
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -259,25 +259,47 @@
+     )
+ 
+     event_types = [item["event_type"] for item in result.flow_events]
+-    assert "cloud_aggregate_direct" in event_types
++    assert "cloud_aggregate_round" in event_types
+     assert "edge_aggregate" not in event_types
++    assert "cloud_aggregate_direct" not in event_types
+     assert "cloud_aggregate_from_edges" not in event_types
+ 
+ 
++def test_cloud_round_fuses_direct_and_interface_iii_contributions_once() -> None:
++    direct = _direct_cloud_client(0)
++    edge_cloud = ClientFlowInput(
++        client_id=1, edge_id=0, mode="LIIEIIIC", candidate_time=2.0,
++        estimated_local_time=2.0, measured_local_time=2.0,
++        communication_volume=1.0, state_diff={}, sample_count=3,
++        edge_to_cloud_time=0.2, edge_aggregation_payload=1.0,
++        cloud_aggregation_payload=2.0, aggregation_group="dp",
++    )
++    result = execute_mixed_round_flow(
++        round_idx=0, clients=[direct, edge_cloud], aggregation_fraction=1.0
++    )
++    cloud_events = [
++        event for event in result.flow_events
++        if event["event_type"] == "cloud_aggregate_round"
++    ]
++    assert len(cloud_events) == 1
++    assert cloud_events[0]["num_direct_clients"] == 1
++    assert cloud_events[0]["num_edge_aggregates"] == 1
++    assert result.selected_client_ids == [0, 1]
++
++
+ def test_all_mode_topologies_use_the_tex_aggregation_endpoints() -> None:
+     expected = {
+         "LIE": {"edge_aggregate"},
+         "LIIE": {"edge_aggregate"},
+-        "LIC": {"cloud_aggregate_direct"},
+-        "LIIC": {"cloud_aggregate_direct"},
+-        "LIEIIC": {"cloud_aggregate_direct"},
+-        "LIEIIIC": {"edge_aggregate", "cloud_aggregate_from_edges"},
+-        "LIIEIIIC": {"edge_aggregate", "cloud_aggregate_from_edges"},
++        "LIC": {"cloud_aggregate_round"},
++        "LIIC": {"cloud_aggregate_round"},
++        "LIEIIC": {"cloud_aggregate_round"},
++        "LIEIIIC": {"edge_aggregate", "cloud_aggregate_round"},
++        "LIIEIIIC": {"edge_aggregate", "cloud_aggregate_round"},
+     }
+     aggregation_events = {
+         "edge_aggregate",
+-        "cloud_aggregate_direct",
+-        "cloud_aggregate_from_edges",
++        "cloud_aggregate_round",
+     }
+ 
+     for mode, expected_events in expected.items():
+@@ -377,7 +399,7 @@
+     )
+ 
+ 
+-def test_summary_flow_falls_back_for_partial_buffers() -> None:
++def test_direct_cloud_is_round_synchronous_even_when_edge_buffer_is_partial() -> None:
+     clients = [_direct_cloud_client(client_id) for client_id in range(5)]
+ 
+     detailed = execute_mixed_round_flow(
+@@ -391,8 +413,10 @@
+         aggregation_fraction=0.5,
+     )
+ 
+-    assert summary == detailed
+-    assert summary.flow_events
++    assert detailed.selected_client_ids == [0, 1, 2, 3, 4]
++    assert summary.selected_client_ids == detailed.selected_client_ids
++    assert summary.flow_events == []
++    np.testing.assert_allclose(summary.round_duration, detailed.round_duration)
+ 
+ 
+ def test_incremental_full_buffer_latency_matches_event_executor() -> None:
+@@ -1261,7 +1285,9 @@
+         aggregation_fraction=0.5,
+     )
+ 
+-    assert result.selected_client_ids == [0]
++    # Cloud has no threshold buffer (Q70), so both legal cloud-bound
++    # contributions remain in the round regardless of Edge buffer rho.
++    assert result.selected_client_ids == [0, 1]
+ 
+ 
+ def test_update_dp_defaults_to_one_global_l2_clip() -> None:
+--- a/tests/test_selection.py
++++ b/tests/test_selection.py
+@@ -74,8 +74,10 @@
+         client_edges=edges,
+     )
+ 
+-    assert first.admitted_client_ids == (0, 1)
+-    assert second.admitted_client_ids == (1, 2)
++    # Q70: aggregation_fraction controls Edge Buffer only; Cloud waits for all
++    # legal cloud-bound contributions in the current round.
++    assert first.admitted_client_ids == (0, 1, 2, 3)
++    assert second.admitted_client_ids == (0, 1, 2, 3)
+     assert first.system_latency != second.system_latency
+ 
+ 

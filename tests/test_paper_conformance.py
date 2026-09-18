@@ -259,25 +259,47 @@ def test_lieiic_uploads_directly_to_cloud_without_edge_preaggregation() -> None:
     )
 
     event_types = [item["event_type"] for item in result.flow_events]
-    assert "cloud_aggregate_direct" in event_types
+    assert "cloud_aggregate_round" in event_types
     assert "edge_aggregate" not in event_types
+    assert "cloud_aggregate_direct" not in event_types
     assert "cloud_aggregate_from_edges" not in event_types
+
+
+def test_cloud_round_fuses_direct_and_interface_iii_contributions_once() -> None:
+    direct = _direct_cloud_client(0)
+    edge_cloud = ClientFlowInput(
+        client_id=1, edge_id=0, mode="LIIEIIIC", candidate_time=2.0,
+        estimated_local_time=2.0, measured_local_time=2.0,
+        communication_volume=1.0, state_diff={}, sample_count=3,
+        edge_to_cloud_time=0.2, edge_aggregation_payload=1.0,
+        cloud_aggregation_payload=2.0, aggregation_group="dp",
+    )
+    result = execute_mixed_round_flow(
+        round_idx=0, clients=[direct, edge_cloud], aggregation_fraction=1.0
+    )
+    cloud_events = [
+        event for event in result.flow_events
+        if event["event_type"] == "cloud_aggregate_round"
+    ]
+    assert len(cloud_events) == 1
+    assert cloud_events[0]["num_direct_clients"] == 1
+    assert cloud_events[0]["num_edge_aggregates"] == 1
+    assert result.selected_client_ids == [0, 1]
 
 
 def test_all_mode_topologies_use_the_tex_aggregation_endpoints() -> None:
     expected = {
         "LIE": {"edge_aggregate"},
         "LIIE": {"edge_aggregate"},
-        "LIC": {"cloud_aggregate_direct"},
-        "LIIC": {"cloud_aggregate_direct"},
-        "LIEIIC": {"cloud_aggregate_direct"},
-        "LIEIIIC": {"edge_aggregate", "cloud_aggregate_from_edges"},
-        "LIIEIIIC": {"edge_aggregate", "cloud_aggregate_from_edges"},
+        "LIC": {"cloud_aggregate_round"},
+        "LIIC": {"cloud_aggregate_round"},
+        "LIEIIC": {"cloud_aggregate_round"},
+        "LIEIIIC": {"edge_aggregate", "cloud_aggregate_round"},
+        "LIIEIIIC": {"edge_aggregate", "cloud_aggregate_round"},
     }
     aggregation_events = {
         "edge_aggregate",
-        "cloud_aggregate_direct",
-        "cloud_aggregate_from_edges",
+        "cloud_aggregate_round",
     }
 
     for mode, expected_events in expected.items():
@@ -377,7 +399,7 @@ def test_summary_flow_matches_event_executor_when_all_buffers_fill() -> None:
     )
 
 
-def test_summary_flow_falls_back_for_partial_buffers() -> None:
+def test_direct_cloud_is_round_synchronous_even_when_edge_buffer_is_partial() -> None:
     clients = [_direct_cloud_client(client_id) for client_id in range(5)]
 
     detailed = execute_mixed_round_flow(
@@ -391,8 +413,10 @@ def test_summary_flow_falls_back_for_partial_buffers() -> None:
         aggregation_fraction=0.5,
     )
 
-    assert summary == detailed
-    assert summary.flow_events
+    assert detailed.selected_client_ids == [0, 1, 2, 3, 4]
+    assert summary.selected_client_ids == detailed.selected_client_ids
+    assert summary.flow_events == []
+    np.testing.assert_allclose(summary.round_duration, detailed.round_duration)
 
 
 def test_incremental_full_buffer_latency_matches_event_executor() -> None:
@@ -1261,7 +1285,9 @@ def test_logical_admission_is_independent_of_serial_wall_time() -> None:
         aggregation_fraction=0.5,
     )
 
-    assert result.selected_client_ids == [0]
+    # Cloud has no threshold buffer (Q70), so both legal cloud-bound
+    # contributions remain in the round regardless of Edge buffer rho.
+    assert result.selected_client_ids == [0, 1]
 
 
 def test_update_dp_defaults_to_one_global_l2_clip() -> None:

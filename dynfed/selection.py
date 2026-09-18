@@ -2164,18 +2164,12 @@ def _full_buffer_flow_stats(
     for client in client_inputs.values():
         groups.setdefault(_full_buffer_group_key(client), []).append(client)
 
-    edge_cloud_group_count = sum(
-        1 for key in groups if key[0] in EDGE_CLOUD_MODES
-    )
+    # Q70: only Edge has a threshold buffer. Direct-cloud contributions and
+    # Edge aggregates are all retained for one round-synchronous Cloud event.
     if any(
-        _buffer_size(len(group), config.aggregation_fraction) != len(group)
-        for group in groups.values()
-    ):
-        return None
-    if (
-        edge_cloud_group_count > 0
-        and _buffer_size(edge_cloud_group_count, config.aggregation_fraction)
-        != edge_cloud_group_count
+        key[0] != "__direct_cloud__"
+        and _buffer_size(len(group), config.aggregation_fraction) != len(group)
+        for key, group in groups.items()
     ):
         return None
 
@@ -2417,12 +2411,11 @@ def _build_full_buffer_group_summary(
     cloud_aggregation_payload = cloud_payload_top[0]
     if key[0] == "__direct_cloud__":
         kind = "direct_cloud"
-        cloud_aggregation_time = (
-            config.cloud_aggregation_beta * cloud_payload_sum
-            + config.cloud_aggregation_fixed
-        )
-        terminal_time = start_time + cloud_aggregation_time + return_path_time
-        cloud_aggregation_payload = 0.0
+        # Direct contributions are Cloud sources, not an independent Cloud
+        # buffer/event. They join Interface-III edge aggregates in the single
+        # round-synchronous Cloud aggregation (Q70).
+        cloud_arrival_time = start_time
+        cloud_aggregation_payload = cloud_payload_sum
     else:
         edge_aggregation_time = arrival_top[3] * (
             config.edge_aggregation_beta * edge_payload_sum
@@ -2483,20 +2476,20 @@ def _full_buffer_system_latency(
     terminal_times = [
         summary.terminal_time
         for summary in summaries
-        if summary.kind != "edge_cloud"
+        if summary.kind == "edge_only"
     ]
-    edge_cloud = [
+    cloud_sources = [
         summary
         for summary in summaries
-        if summary.kind == "edge_cloud"
+        if summary.kind in {"direct_cloud", "edge_cloud"}
     ]
-    if edge_cloud:
+    if cloud_sources:
         terminal_times.append(
-            max(summary.cloud_arrival_time for summary in edge_cloud)
+            max(summary.cloud_arrival_time for summary in cloud_sources)
             + config.cloud_aggregation_beta
-            * sum(summary.cloud_aggregation_payload for summary in edge_cloud)
+            * sum(summary.cloud_aggregation_payload for summary in cloud_sources)
             + config.cloud_aggregation_fixed
-            + max(summary.return_path_time for summary in edge_cloud)
+            + max(summary.return_path_time for summary in cloud_sources)
         )
     return max(terminal_times, default=0.0)
 
@@ -2537,24 +2530,12 @@ def _admitted_clients_for_profile(
         if key[0] == "edge_only":
             admitted.update(client_id for _latency, client_id in chosen)
         elif key[0] == "direct_cloud":
-            admitted.update(client_id for _latency, client_id in chosen)
+            # Cloud is round-synchronous: direct-cloud clients are not filtered
+            # by the Edge buffer fraction.
+            admitted.update(client_id for _latency, client_id in arrivals)
         else:
             if chosen:
-                finish = max(latency for latency, _client_id in chosen)
-                edge_cloud_groups[key] = (finish, [client_id for _latency, client_id in chosen])
-
-    if edge_cloud_groups:
-        edge_arrivals = [
-            (finish, group_key, client_ids)
-            for group_key, (finish, client_ids) in edge_cloud_groups.items()
-        ]
-        k = _buffer_size(len(edge_arrivals), config.aggregation_fraction)
-        ordered = sorted(edge_arrivals, key=lambda item: item[0])
-        threshold = ordered[min(k, len(ordered)) - 1][0]
-        for _finish, _group_key, client_ids in (
-            item for item in ordered if item[0] <= threshold + 1e-12
-        ):
-            admitted.update(client_ids)
+                admitted.update(client_id for _latency, client_id in chosen)
     return sorted(admitted)
 
 

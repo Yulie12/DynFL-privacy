@@ -74,8 +74,10 @@ def test_each_profile_derives_its_own_admitted_clients() -> None:
         client_edges=edges,
     )
 
-    assert first.admitted_client_ids == (0, 1)
-    assert second.admitted_client_ids == (1, 2)
+    # Q70: aggregation_fraction controls Edge Buffer only; Cloud waits for all
+    # legal cloud-bound contributions in the current round.
+    assert first.admitted_client_ids == (0, 1, 2, 3)
+    assert second.admitted_client_ids == (0, 1, 2, 3)
     assert first.system_latency != second.system_latency
 
 
