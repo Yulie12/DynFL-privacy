@@ -130,7 +130,8 @@ class SelectionConfig:
     edge_cloud_base_latency_sec: float = 0.01
     resource_limit: float = 1.35
     memory_limit: float = 1.35
-    time_limit: float = 8.0
+    time_limit: float = 8.0  # reporting/reference only; not a universal hard deadline
+    fast_client_deadlines: tuple[tuple[int, float], ...] = ()
     risk_limit: float = 0.5
     aggregation_fraction: float = 1.0
     output_dir: str = "out/selection"
@@ -186,6 +187,15 @@ class SelectionConfig:
             raise ValueError("dp_tier_gamma must be >= 1")
         if self.dp_tier_count < 1:
             raise ValueError("dp_tier_count must be >= 1")
+        seen_fast_clients: set[int] = set()
+        for client_id, deadline in self.fast_client_deadlines:
+            if int(client_id) < 0:
+                raise ValueError("fast-client ids must be non-negative")
+            if int(client_id) in seen_fast_clients:
+                raise ValueError("fast-client deadlines must contain unique client ids")
+            if float(deadline) <= 0.0:
+                raise ValueError("fast-client deadlines must be positive")
+            seen_fast_clients.add(int(client_id))
         if self.mainline_fusion:
             raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
 
@@ -687,6 +697,7 @@ def enumerate_candidates(
     allow_none: bool = False,
     privacy_ledger: ClientPrivacyLedger | None = None,
     privacy_requirement: ExposurePrivacyRequirement | None = None,
+    fast_response_deadline: float | None = None,
 ) -> list[Candidate]:
     validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
@@ -755,8 +766,14 @@ def enumerate_candidates(
                         memory_capacity_factor=memory_capacity_factor,
                         privacy_ledger=privacy_ledger,
                         update_noise_multiplier=update_sigma,
+                        fast_response_deadline=fast_response_deadline,
                     )
                 )
+    # Q72/Q73: fast-response QoS is a hard feasibility gate only for clients
+    # that explicitly carry a per-client deadline. Ordinary clients keep time
+    # in the latency objective and are not rejected by a universal time limit.
+    if fast_response_deadline is not None:
+        candidates = [candidate for candidate in candidates if candidate.feasible_time]
     return _apply_policy_candidate_filters(config, policy, candidates)
 
 
@@ -3595,6 +3612,7 @@ def _estimate_candidate(
     memory_capacity_factor: float = 1.0,
     privacy_ledger: ClientPrivacyLedger | None = None,
     update_noise_multiplier: float | None = None,
+    fast_response_deadline: float | None = None,
 ) -> Candidate:
     L = config.L_block_cycles
     E = spec.E_edge_loops
@@ -3800,7 +3818,11 @@ def _estimate_candidate(
         default=0.0,
     )
     feasible_risk = risk <= config.risk_limit
-    feasible_time = time <= config.time_limit
+    feasible_time = (
+        True
+        if fast_response_deadline is None
+        else time <= float(fast_response_deadline) + 1e-12
+    )
 
     # Edge/cloud CPU feasibility (scaled by sample ratio)
     cpu_scale = samples / 150.0

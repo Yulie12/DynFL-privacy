@@ -1223,6 +1223,7 @@ def _run_lenet5_policy(
                 policy=policy,
                 privacy_ledger=privacy_ledgers[client.client_id],
                 privacy_requirement=paper_client_privacy_requirement(),
+                fast_response_deadline=dict(effective_selection.fast_client_deadlines).get(client.client_id),
             )
             should_update = round_idx == 0 or round_idx % selection_period == 0
             candidate = None

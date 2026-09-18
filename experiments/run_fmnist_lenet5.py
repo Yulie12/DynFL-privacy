@@ -156,6 +156,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resource-limit", type=float, default=1.35)
     parser.add_argument("--memory-limit", type=float, default=1.35)
     parser.add_argument("--time-limit", type=float, default=8.0)
+    parser.add_argument(
+        "--fast-client-deadlines",
+        nargs="*",
+        default=[],
+        metavar="CLIENT_ID:SECONDS",
+        help="Per-client hard fast-response QoS deadlines, e.g. 0:2.5 3:4.0.",
+    )
     parser.add_argument("--risk-limit", type=float, default=0.5)
     parser.add_argument("--aggregation-fraction", type=float, default=1.0)
     parser.add_argument("--pareto-archive-size", type=int, default=16)
@@ -231,6 +238,16 @@ def main() -> None:
     for status_path in (output_root / "live_status.json", output_root.parent / "live_status.json"):
         status_path.write_text(json.dumps(status_payload, indent=2), encoding="utf-8")
 
+    fast_client_deadlines: list[tuple[int, float]] = []
+    for item in args.fast_client_deadlines:
+        try:
+            client_text, deadline_text = item.split(":", 1)
+            fast_client_deadlines.append((int(client_text), float(deadline_text)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid --fast-client-deadlines entry {item!r}; expected CLIENT_ID:SECONDS"
+            ) from exc
+
     selection = SelectionConfig(
         rounds=args.rounds,
         num_clients=args.clients,
@@ -254,6 +271,7 @@ def main() -> None:
         resource_limit=args.resource_limit,
         memory_limit=args.memory_limit,
         time_limit=args.time_limit,
+        fast_client_deadlines=tuple(fast_client_deadlines),
         risk_limit=args.risk_limit,
         aggregation_fraction=args.aggregation_fraction,
         privacy_local_epochs=args.local_epochs,

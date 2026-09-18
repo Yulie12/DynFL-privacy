@@ -1785,3 +1785,69 @@ def test_formal_runner_rejects_top_level_async_staleness_controls() -> None:
     config["max_version_gap"] = 3
     with pytest.raises(ValueError, match="Async/staleness controls"):
         build_command(config, seed=42, policies=["ours"], rounds=1)
+
+
+def test_fast_response_deadline_is_hard_only_for_marked_client() -> None:
+    config = SelectionConfig(time_limit=1e-12)
+    ordinary = enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(7),
+        policy="performance_only",
+    )
+    assert ordinary
+    assert all(candidate.feasible_time for candidate in ordinary)
+
+    fast = enumerate_candidates(
+        config=config,
+        client_id=1,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(7),
+        policy="performance_only",
+        fast_response_deadline=1e-12,
+    )
+    assert fast == []
+
+
+def test_fast_response_deadline_keeps_only_candidates_within_tau_max() -> None:
+    config = SelectionConfig()
+    baseline = enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(11),
+        policy="performance_only",
+    )
+    assert baseline
+    times = sorted({candidate.time for candidate in baseline})
+    assert len(times) > 1
+    deadline = times[len(times) // 2]
+
+    constrained = enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(11),
+        policy="performance_only",
+        fast_response_deadline=deadline,
+    )
+    assert constrained
+    assert all(candidate.time <= deadline + 1e-12 for candidate in constrained)
+    assert len(constrained) < len(baseline)

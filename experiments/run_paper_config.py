@@ -163,6 +163,13 @@ def build_command(
         command.extend(["--dp-update-mode", "off"])
     if exclude_modes:
         command.extend(["--exclude-modes", *exclude_modes])
+    fast_deadlines = system.get("fast_client_deadlines", {})
+    if fast_deadlines:
+        if not isinstance(fast_deadlines, dict):
+            raise ValueError("system.fast_client_deadlines must be an object mapping client id to seconds")
+        command.extend(
+            ["--fast-client-deadlines", *[f"{client_id}:{deadline}" for client_id, deadline in fast_deadlines.items()]]
+        )
     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
     if equal_optimizer_work_control:
         command.append("--equal-optimizer-work-control")
