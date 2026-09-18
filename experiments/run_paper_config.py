@@ -148,9 +148,6 @@ def build_command(
         "seed": seed,
         "output_root": config["output_root"],
     }
-    feature_budget = privacy.get("feature_epsilon_budget", privacy["initial_epsilon"])
-    values["dp_emb_epsilon"] = feature_budget
-    values["dp_feature_epsilon_budget"] = feature_budget
     for name, value in values.items():
         _append_value(command, name, value)
     if disable_update_dp:

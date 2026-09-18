@@ -255,7 +255,12 @@ class PrivacyProjection:
 
 
 class ClientPrivacyLedger:
-    """Separate record-level feature and client-level update accountants."""
+    """Client-level update-DP ledger with inert feature-accounting compatibility.
+
+    The paper mainline charges only update events.  The feature accountant is
+    retained temporarily so older checkpoints/result readers remain loadable;
+    formal selection passes zero feature events.
+    """
 
     def __init__(
         self,

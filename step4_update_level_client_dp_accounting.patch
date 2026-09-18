@@ -1,0 +1,91 @@
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -3753,13 +3753,10 @@
+     )
+     pre_aggregation_time = first_aggregation_arrival_time
+ 
+-    feature_dp_events = sum(
+-        _record_dp_event_count(config, mode, count)
+-        for link_id, obj, count, privacy_eligible in link_events
+-        if privacy_eligible
+-        and obj != "upd"
+-        and mechanism_uses_dp(actual_link_mechanisms[link_id])
+-    )
++    # Formal accounting is update-level client DP only (Q12/Q21/Q22).
++    # Keep the feature fields in Candidate/PrivacyProjection as compatibility
++    # shims for old result readers, but formal candidates never charge them.
++    feature_dp_events = 0
+     update_dp_events = sum(
+         count
+         for link_id, obj, count, privacy_eligible in link_events
+@@ -3771,10 +3768,7 @@
+     update_epsilon_after = 0.0
+     if privacy_ledger is not None:
+         projection = privacy_ledger.project(feature_dp_events, update_dp_events)
+-        epsilon_used = max(
+-            projection.feature_epsilon_increment,
+-            projection.update_epsilon_increment,
+-        )
++        epsilon_used = projection.update_epsilon_increment
+         feature_epsilon_after = projection.feature_epsilon_after
+         update_epsilon_after = projection.update_epsilon_after
+         feasible_privacy = privacy_ledger.can_apply(projection)
+@@ -3783,7 +3777,9 @@
+         epsilon_used = sum(
+             count * _dp_event_epsilon(config, obj)
+             for link_id, obj, count, privacy_eligible in link_events
+-            if privacy_eligible and mechanism_uses_dp(actual_link_mechanisms[link_id])
++            if privacy_eligible
++            and obj == "upd"
++            and mechanism_uses_dp(actual_link_mechanisms[link_id])
+         )
+         feasible_privacy = epsilon_used <= remaining_epsilon + 1e-12
+ 
+--- a/dynfed/privacy.py
++++ b/dynfed/privacy.py
+@@ -255,7 +255,12 @@
+ 
+ 
+ class ClientPrivacyLedger:
+-    """Separate record-level feature and client-level update accountants."""
++    """Client-level update-DP ledger with inert feature-accounting compatibility.
++
++    The paper mainline charges only update events.  The feature accountant is
++    retained temporarily so older checkpoints/result readers remain loadable;
++    formal selection passes zero feature events.
++    """
+ 
+     def __init__(
+         self,
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -148,9 +148,6 @@
+         "seed": seed,
+         "output_root": config["output_root"],
+     }
+-    feature_budget = privacy.get("feature_epsilon_budget", privacy["initial_epsilon"])
+-    values["dp_emb_epsilon"] = feature_budget
+-    values["dp_feature_epsilon_budget"] = feature_budget
+     for name, value in values.items():
+         _append_value(command, name, value)
+     if disable_update_dp:
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -93,6 +93,8 @@
+     assert command[command.index("--rounds") + 1] == "100"
+     assert command[command.index("--max-new-rounds") + 1] == "2"
+     assert "--trusted-edge-split-execution" not in command
++    assert "--dp-emb-epsilon" not in command
++    assert "--dp-feature-epsilon-budget" not in command
+ 
+ 
+ def _flow_client(client_id: int) -> ClientFlowInput:
+@@ -593,7 +595,7 @@
+     torch.testing.assert_close(actual, expected)
+ 
+ 
+-def test_feature_dp_horizon_is_disabled_for_trusted_split_execution() -> None:
++def test_formal_feature_dp_horizon_is_disabled() -> None:
+     resolved = resolved_privacy_parameters(
+         SelectionConfig(rounds=200, L_block_cycles=5, privacy_local_epochs=3)
+     )

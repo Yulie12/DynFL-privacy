@@ -93,6 +93,8 @@ def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
     assert command[command.index("--rounds") + 1] == "100"
     assert command[command.index("--max-new-rounds") + 1] == "2"
     assert "--trusted-edge-split-execution" not in command
+    assert "--dp-emb-epsilon" not in command
+    assert "--dp-feature-epsilon-budget" not in command
 
 
 def _flow_client(client_id: int) -> ClientFlowInput:
@@ -593,7 +595,7 @@ def test_unprotected_output_gradient_uses_ordinary_batch_average() -> None:
     torch.testing.assert_close(actual, expected)
 
 
-def test_feature_dp_horizon_is_disabled_for_trusted_split_execution() -> None:
+def test_formal_feature_dp_horizon_is_disabled() -> None:
     resolved = resolved_privacy_parameters(
         SelectionConfig(rounds=200, L_block_cycles=5, privacy_local_epochs=3)
     )

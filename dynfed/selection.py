@@ -3753,13 +3753,10 @@ def _estimate_candidate(
     )
     pre_aggregation_time = first_aggregation_arrival_time
 
-    feature_dp_events = sum(
-        _record_dp_event_count(config, mode, count)
-        for link_id, obj, count, privacy_eligible in link_events
-        if privacy_eligible
-        and obj != "upd"
-        and mechanism_uses_dp(actual_link_mechanisms[link_id])
-    )
+    # Formal accounting is update-level client DP only (Q12/Q21/Q22).
+    # Keep the feature fields in Candidate/PrivacyProjection as compatibility
+    # shims for old result readers, but formal candidates never charge them.
+    feature_dp_events = 0
     update_dp_events = sum(
         count
         for link_id, obj, count, privacy_eligible in link_events
@@ -3771,10 +3768,7 @@ def _estimate_candidate(
     update_epsilon_after = 0.0
     if privacy_ledger is not None:
         projection = privacy_ledger.project(feature_dp_events, update_dp_events)
-        epsilon_used = max(
-            projection.feature_epsilon_increment,
-            projection.update_epsilon_increment,
-        )
+        epsilon_used = projection.update_epsilon_increment
         feature_epsilon_after = projection.feature_epsilon_after
         update_epsilon_after = projection.update_epsilon_after
         feasible_privacy = privacy_ledger.can_apply(projection)
@@ -3783,7 +3777,9 @@ def _estimate_candidate(
         epsilon_used = sum(
             count * _dp_event_epsilon(config, obj)
             for link_id, obj, count, privacy_eligible in link_events
-            if privacy_eligible and mechanism_uses_dp(actual_link_mechanisms[link_id])
+            if privacy_eligible
+            and obj == "upd"
+            and mechanism_uses_dp(actual_link_mechanisms[link_id])
         )
         feasible_privacy = epsilon_used <= remaining_epsilon + 1e-12
 
