@@ -1,0 +1,349 @@
+--- a/dynfed/privacy.py
++++ b/dynfed/privacy.py
+@@ -278,9 +278,21 @@
+         _validate_dp_parameters(self.feature_noise_multiplier, delta)
+         _validate_dp_parameters(self.update_noise_multiplier, delta)
+ 
+-    def project(self, feature_events: int, update_events: int) -> PrivacyProjection:
++    def project(
++        self,
++        feature_events: int,
++        update_events: int,
++        *,
++        update_noise_multiplier: float | None = None,
++    ) -> PrivacyProjection:
+         feature_before = self.feature.current_epsilon()
+         update_before = self.update.current_epsilon()
++        update_sigma = (
++            self.update_noise_multiplier
++            if update_noise_multiplier is None
++            else float(update_noise_multiplier)
++        )
++        _validate_dp_parameters(update_sigma, self.update.delta)
+         return PrivacyProjection(
+             feature_epsilon_before=feature_before,
+             feature_epsilon_after=self.feature.epsilon_after(
+@@ -289,25 +301,58 @@
+             ),
+             update_epsilon_before=update_before,
+             update_epsilon_after=self.update.epsilon_after(
+-                self.update_noise_multiplier,
++                update_sigma,
+                 update_events,
+             ),
+             feature_events=feature_events,
+             update_events=update_events,
+         )
+ 
++    def minimum_feasible_update_noise(self, update_events: int) -> float:
++        """Smallest Gaussian sigma that keeps the next update releases in budget."""
++        if update_events <= 0:
++            return self.update_noise_multiplier
++        if self.update.remaining_budget <= 1e-12:
++            raise ValueError("No update-DP budget remains for another release")
++        low = 1e-6
++        high = max(1.0, self.update_noise_multiplier)
++        while not self.update.can_add_events(high, update_events):
++            high *= 2.0
++            if high > 1e9:
++                raise ValueError("No finite update noise found within accountant resolution")
++        for _ in range(100):
++            midpoint = (low + high) / 2.0
++            if self.update.can_add_events(midpoint, update_events):
++                high = midpoint
++            else:
++                low = midpoint
++        return high
++
+     def can_apply(self, projection: PrivacyProjection) -> bool:
+         return (
+             projection.feature_epsilon_after <= self.feature.budget + 1e-12
+             and projection.update_epsilon_after <= self.update.budget + 1e-12
+         )
+ 
+-    def add(self, feature_events: int, update_events: int) -> PrivacyProjection:
+-        projection = self.project(feature_events, update_events)
++    def add(
++        self,
++        feature_events: int,
++        update_events: int,
++        *,
++        update_noise_multiplier: float | None = None,
++    ) -> PrivacyProjection:
++        update_sigma = (
++            self.update_noise_multiplier
++            if update_noise_multiplier is None
++            else float(update_noise_multiplier)
++        )
++        projection = self.project(
++            feature_events, update_events, update_noise_multiplier=update_sigma
++        )
+         if not self.can_apply(projection):
+             raise ValueError("DP event would exceed the configured privacy target")
+         self.feature.add_events(self.feature_noise_multiplier, feature_events)
+-        self.update.add_events(self.update_noise_multiplier, update_events)
++        self.update.add_events(update_sigma, update_events)
+         return projection
+ 
+     @property
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -115,6 +115,8 @@
+     dp_update_epsilon_budget: float | None = None
+     dp_feature_noise_multiplier: float | None = None
+     dp_update_noise_multiplier: float | None = None
++    dp_tier_gamma: float = 1.5
++    dp_tier_count: int = 3
+     client_heterogeneity: float = 2.0
+     edge_heterogeneity: float = 1.5
+     network_jitter: float = 0.25
+@@ -180,6 +182,10 @@
+     mainline_fusion: bool = False
+ 
+     def __post_init__(self) -> None:
++        if self.dp_tier_gamma < 1.0:
++            raise ValueError("dp_tier_gamma must be >= 1")
++        if self.dp_tier_count < 1:
++            raise ValueError("dp_tier_count must be >= 1")
+         if self.mainline_fusion:
+             raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
+ 
+@@ -216,6 +222,7 @@
+     cloud_aggregation_payload: float = 0.0
+     link_metrics: tuple[dict[str, Any], ...] = ()
+     global_release_required: bool = False
++    update_noise_multiplier: float | None = None
+ 
+     @property
+     def feasible(self) -> bool:
+@@ -595,6 +602,7 @@
+                 projection = ledger.add(
+                     selected.feature_dp_events,
+                     selected.update_dp_events,
++                    update_noise_multiplier=selected.update_noise_multiplier,
+                 )
+                 remaining_after = ledger.remaining_budget
+                 remaining_epsilon[client_id] = remaining_after
+@@ -613,6 +621,7 @@
+                     "remaining_epsilon": remaining_after,
+                     "feature_dp_events": selected.feature_dp_events,
+                     "update_dp_events": selected.update_dp_events,
++                    "update_noise_multiplier": selected.update_noise_multiplier if selected.update_noise_multiplier is not None else "",
+                     "feature_epsilon": projection.feature_epsilon_after,
+                     "update_epsilon": projection.update_epsilon_after,
+                     "communication_volume": selected.communication_volume,
+@@ -704,26 +713,50 @@
+             privacy_requirement=privacy_requirement,
+         )
+         for mechanisms, link_mechanisms in assignments:
+-            candidates.append(
+-                _estimate_candidate(
+-                    config=config,
+-                    mode=mode,
+-                    spec=spec,
+-                    mechanisms=mechanisms,
+-                    link_mechanisms=link_mechanisms,
+-                    client_id=client_id,
+-                    edge_factor=edge_factor,
+-                    compute_factor=compute_factor,
+-                    samples=samples,
+-                    remaining_epsilon=remaining_epsilon,
+-                    round_idx=round_idx,
+-                    rng=rng,
+-                    current_edge_load=current_edge_load,
+-                    current_cloud_load=current_cloud_load,
+-                    memory_capacity_factor=memory_capacity_factor,
+-                    privacy_ledger=privacy_ledger,
++            update_events = sum(
++                count
++                for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
++                    mode, config.L_block_cycles, spec.E_edge_loops
++                )
++                if privacy_eligible
++                and obj == "upd"
++                and mechanism_uses_dp(link_mechanisms[link_id])
++            )
++            if update_events > 0 and privacy_ledger is not None:
++                try:
++                    sigma_min = privacy_ledger.minimum_feasible_update_noise(update_events)
++                except ValueError:
++                    continue
++                noise_tiers = tuple(
++                    sigma_min * (float(config.dp_tier_gamma) ** tier)
++                    for tier in range(int(config.dp_tier_count))
++                )
++            else:
++                noise_tiers = (
++                    float(resolved_privacy_parameters(config)["update_noise_multiplier"]),
++                )
++            for update_sigma in noise_tiers:
++                candidates.append(
++                    _estimate_candidate(
++                        config=config,
++                        mode=mode,
++                        spec=spec,
++                        mechanisms=mechanisms,
++                        link_mechanisms=link_mechanisms,
++                        client_id=client_id,
++                        edge_factor=edge_factor,
++                        compute_factor=compute_factor,
++                        samples=samples,
++                        remaining_epsilon=remaining_epsilon,
++                        round_idx=round_idx,
++                        rng=rng,
++                        current_edge_load=current_edge_load,
++                        current_cloud_load=current_cloud_load,
++                        memory_capacity_factor=memory_capacity_factor,
++                        privacy_ledger=privacy_ledger,
++                        update_noise_multiplier=update_sigma,
++                    )
+                 )
+-            )
+     return _apply_policy_candidate_filters(config, policy, candidates)
+ 
+ 
+@@ -3019,6 +3052,7 @@
+     edge_update_dp_events: int,
+     feature_clip_excess_sq: float,
+     update_clip_excess_sq: float,
++    update_noise_multiplier: float,
+     config: SelectionConfig,
+ ) -> _OmegaComponents:
+     privacy_parameters = resolved_privacy_parameters(config)
+@@ -3052,7 +3086,7 @@
+     update_clip_bias = max(float(update_clip_excess_sq), 0.0) / (
+         eta ** 2 * local_cycles ** 2
+     )
+-    update_sigma_sq = float(privacy_parameters["update_noise_multiplier"]) ** 2
++    update_sigma_sq = float(update_noise_multiplier) ** 2
+     update_variance = (
+         update_sigma_sq
+         * (2.0 * config.omega_update_clip_norm) ** 2
+@@ -3097,6 +3131,11 @@
+         edge_update_events,
+         _candidate_feature_clip_excess_sq(candidate, config),
+         config.omega_update_clip_excess_sq,
++        float(
++            candidate.update_noise_multiplier
++            if candidate.update_noise_multiplier is not None
++            else resolved_privacy_parameters(config)["update_noise_multiplier"]
++        ),
+         config,
+     )
+     if config.mainline_fusion and candidate.global_release_required:
+@@ -3593,6 +3632,7 @@
+     current_cloud_load: float = 0.0,
+     memory_capacity_factor: float = 1.0,
+     privacy_ledger: ClientPrivacyLedger | None = None,
++    update_noise_multiplier: float | None = None,
+ ) -> Candidate:
+     L = config.L_block_cycles
+     E = spec.E_edge_loops
+@@ -3767,7 +3807,11 @@
+     feature_epsilon_after = 0.0
+     update_epsilon_after = 0.0
+     if privacy_ledger is not None:
+-        projection = privacy_ledger.project(feature_dp_events, update_dp_events)
++        projection = privacy_ledger.project(
++            feature_dp_events,
++            update_dp_events,
++            update_noise_multiplier=update_noise_multiplier,
++        )
+         epsilon_used = projection.update_epsilon_increment
+         feature_epsilon_after = projection.feature_epsilon_after
+         update_epsilon_after = projection.update_epsilon_after
+@@ -3867,6 +3911,9 @@
+         cloud_aggregation_payload=cloud_aggregation_payload,
+         link_metrics=tuple(link_metrics),
+         global_release_required=bool(config.mainline_fusion),
++        update_noise_multiplier=(
++            float(update_noise_multiplier) if update_dp_events > 0 and update_noise_multiplier is not None else None
++        ),
+     )
+ 
+ 
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -1620,6 +1620,7 @@
+                 projection = ledger.add(
+                     candidate.feature_dp_events,
+                     candidate.update_dp_events,
++                    update_noise_multiplier=candidate.update_noise_multiplier,
+                 )
+                 row["feature_dp_events"] = projection.feature_events
+                 row["update_dp_events"] = projection.update_events
+@@ -1964,7 +1965,9 @@
+                             1.0,
+                             clip_norm=train_config.dp_clip_norm,
+                             noise_multiplier=float(
+-                                privacy_parameters["update_noise_multiplier"]
++                                candidate.update_noise_multiplier
++                                if candidate.update_noise_multiplier is not None
++                                else privacy_parameters["update_noise_multiplier"]
+                             ),
+                         )
+                         local_dp_packet_client_fractions.append(1.0)
+@@ -2050,12 +2053,18 @@
+                     cloud_signal_updates.append(edge_update)
+                     cloud_index = len(cloud_updates)
+                     if local_packet_dp:
++                        group_sigma = max(
++                            (
++                                float(item_candidate.update_noise_multiplier)
++                                for _cid, _state, _count, item_candidate in updates
++                                if item_candidate.update_noise_multiplier is not None
++                            ),
++                            default=float(privacy_parameters["update_noise_multiplier"]),
++                        )
+                         sensitivity, noise_std = _dp_update_release_parameters(
+                             max_client_fraction,
+                             clip_norm=train_config.dp_clip_norm,
+-                            noise_multiplier=float(
+-                                privacy_parameters["update_noise_multiplier"]
+-                            ),
++                            noise_multiplier=group_sigma,
+                         )
+                         local_dp_packet_client_fractions.append(max_client_fraction)
+                         local_dp_packet_sensitivities.append(sensitivity)
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -57,6 +57,7 @@
+     _mode_link_events,
+     _link_bandwidth,
+     enumerate_candidates,
++    build_client_privacy_ledger,
+     resolved_privacy_parameters,
+ )
+ from dynfed.split_learning import (
+@@ -1690,3 +1691,31 @@
+     assert OBJECT_SIZES["emb"] == 1.6
+     assert OBJECT_SIZES["upd"] == 4.0
+     assert PRIVACY_ALPHA["he3"] == 8.04
++
++
++def test_dp_tiers_start_at_client_specific_minimum_feasible_noise() -> None:
++    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
++    ledger = build_client_privacy_ledger(config)
++    requirement = ExposurePrivacyRequirement(dp_required_links=frozenset({"L_C_upd"}))
++    candidates = enumerate_candidates(
++        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
++        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
++        rng=random.Random(101), policy="ours", privacy_ledger=ledger,
++        privacy_requirement=requirement,
++    )
++    dp = [c for c in candidates if c.mode == "LIIC" and c.update_dp_events > 0]
++    sigmas = sorted({round(float(c.update_noise_multiplier), 10) for c in dp})
++    assert len(sigmas) == 3
++    assert sigmas[1] == pytest.approx(sigmas[0] * 1.5, rel=1e-8)
++    assert sigmas[2] == pytest.approx(sigmas[0] * 1.5**2, rel=1e-8)
++    assert all(c.feasible_privacy for c in dp)
++
++
++def test_remaining_budget_raises_next_round_sigma_minimum() -> None:
++    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
++    ledger = build_client_privacy_ledger(config)
++    first = ledger.minimum_feasible_update_noise(1)
++    ledger.add(0, 1, update_noise_multiplier=first * 1.5)
++    second = ledger.minimum_feasible_update_noise(1)
++    assert second > first
++

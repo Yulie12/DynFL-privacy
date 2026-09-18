@@ -115,6 +115,8 @@ class SelectionConfig:
     dp_update_epsilon_budget: float | None = None
     dp_feature_noise_multiplier: float | None = None
     dp_update_noise_multiplier: float | None = None
+    dp_tier_gamma: float = 1.5
+    dp_tier_count: int = 3
     client_heterogeneity: float = 2.0
     edge_heterogeneity: float = 1.5
     network_jitter: float = 0.25
@@ -180,6 +182,10 @@ class SelectionConfig:
     mainline_fusion: bool = False
 
     def __post_init__(self) -> None:
+        if self.dp_tier_gamma < 1.0:
+            raise ValueError("dp_tier_gamma must be >= 1")
+        if self.dp_tier_count < 1:
+            raise ValueError("dp_tier_count must be >= 1")
         if self.mainline_fusion:
             raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
 
@@ -216,6 +222,7 @@ class Candidate:
     cloud_aggregation_payload: float = 0.0
     link_metrics: tuple[dict[str, Any], ...] = ()
     global_release_required: bool = False
+    update_noise_multiplier: float | None = None
 
     @property
     def feasible(self) -> bool:
@@ -595,6 +602,7 @@ def run_selection_experiment(
                 projection = ledger.add(
                     selected.feature_dp_events,
                     selected.update_dp_events,
+                    update_noise_multiplier=selected.update_noise_multiplier,
                 )
                 remaining_after = ledger.remaining_budget
                 remaining_epsilon[client_id] = remaining_after
@@ -613,6 +621,7 @@ def run_selection_experiment(
                     "remaining_epsilon": remaining_after,
                     "feature_dp_events": selected.feature_dp_events,
                     "update_dp_events": selected.update_dp_events,
+                    "update_noise_multiplier": selected.update_noise_multiplier if selected.update_noise_multiplier is not None else "",
                     "feature_epsilon": projection.feature_epsilon_after,
                     "update_epsilon": projection.update_epsilon_after,
                     "communication_volume": selected.communication_volume,
@@ -704,26 +713,50 @@ def enumerate_candidates(
             privacy_requirement=privacy_requirement,
         )
         for mechanisms, link_mechanisms in assignments:
-            candidates.append(
-                _estimate_candidate(
-                    config=config,
-                    mode=mode,
-                    spec=spec,
-                    mechanisms=mechanisms,
-                    link_mechanisms=link_mechanisms,
-                    client_id=client_id,
-                    edge_factor=edge_factor,
-                    compute_factor=compute_factor,
-                    samples=samples,
-                    remaining_epsilon=remaining_epsilon,
-                    round_idx=round_idx,
-                    rng=rng,
-                    current_edge_load=current_edge_load,
-                    current_cloud_load=current_cloud_load,
-                    memory_capacity_factor=memory_capacity_factor,
-                    privacy_ledger=privacy_ledger,
+            update_events = sum(
+                count
+                for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
+                    mode, config.L_block_cycles, spec.E_edge_loops
                 )
+                if privacy_eligible
+                and obj == "upd"
+                and mechanism_uses_dp(link_mechanisms[link_id])
             )
+            if update_events > 0 and privacy_ledger is not None:
+                try:
+                    sigma_min = privacy_ledger.minimum_feasible_update_noise(update_events)
+                except ValueError:
+                    continue
+                noise_tiers = tuple(
+                    sigma_min * (float(config.dp_tier_gamma) ** tier)
+                    for tier in range(int(config.dp_tier_count))
+                )
+            else:
+                noise_tiers = (
+                    float(resolved_privacy_parameters(config)["update_noise_multiplier"]),
+                )
+            for update_sigma in noise_tiers:
+                candidates.append(
+                    _estimate_candidate(
+                        config=config,
+                        mode=mode,
+                        spec=spec,
+                        mechanisms=mechanisms,
+                        link_mechanisms=link_mechanisms,
+                        client_id=client_id,
+                        edge_factor=edge_factor,
+                        compute_factor=compute_factor,
+                        samples=samples,
+                        remaining_epsilon=remaining_epsilon,
+                        round_idx=round_idx,
+                        rng=rng,
+                        current_edge_load=current_edge_load,
+                        current_cloud_load=current_cloud_load,
+                        memory_capacity_factor=memory_capacity_factor,
+                        privacy_ledger=privacy_ledger,
+                        update_noise_multiplier=update_sigma,
+                    )
+                )
     return _apply_policy_candidate_filters(config, policy, candidates)
 
 
@@ -3019,6 +3052,7 @@ def _cached_local_omega_components(
     edge_update_dp_events: int,
     feature_clip_excess_sq: float,
     update_clip_excess_sq: float,
+    update_noise_multiplier: float,
     config: SelectionConfig,
 ) -> _OmegaComponents:
     privacy_parameters = resolved_privacy_parameters(config)
@@ -3052,7 +3086,7 @@ def _cached_local_omega_components(
     update_clip_bias = max(float(update_clip_excess_sq), 0.0) / (
         eta ** 2 * local_cycles ** 2
     )
-    update_sigma_sq = float(privacy_parameters["update_noise_multiplier"]) ** 2
+    update_sigma_sq = float(update_noise_multiplier) ** 2
     update_variance = (
         update_sigma_sq
         * (2.0 * config.omega_update_clip_norm) ** 2
@@ -3097,6 +3131,11 @@ def _local_omega_components(
         edge_update_events,
         _candidate_feature_clip_excess_sq(candidate, config),
         config.omega_update_clip_excess_sq,
+        float(
+            candidate.update_noise_multiplier
+            if candidate.update_noise_multiplier is not None
+            else resolved_privacy_parameters(config)["update_noise_multiplier"]
+        ),
         config,
     )
     if config.mainline_fusion and candidate.global_release_required:
@@ -3593,6 +3632,7 @@ def _estimate_candidate(
     current_cloud_load: float = 0.0,
     memory_capacity_factor: float = 1.0,
     privacy_ledger: ClientPrivacyLedger | None = None,
+    update_noise_multiplier: float | None = None,
 ) -> Candidate:
     L = config.L_block_cycles
     E = spec.E_edge_loops
@@ -3767,7 +3807,11 @@ def _estimate_candidate(
     feature_epsilon_after = 0.0
     update_epsilon_after = 0.0
     if privacy_ledger is not None:
-        projection = privacy_ledger.project(feature_dp_events, update_dp_events)
+        projection = privacy_ledger.project(
+            feature_dp_events,
+            update_dp_events,
+            update_noise_multiplier=update_noise_multiplier,
+        )
         epsilon_used = projection.update_epsilon_increment
         feature_epsilon_after = projection.feature_epsilon_after
         update_epsilon_after = projection.update_epsilon_after
@@ -3867,6 +3911,9 @@ def _estimate_candidate(
         cloud_aggregation_payload=cloud_aggregation_payload,
         link_metrics=tuple(link_metrics),
         global_release_required=bool(config.mainline_fusion),
+        update_noise_multiplier=(
+            float(update_noise_multiplier) if update_dp_events > 0 and update_noise_multiplier is not None else None
+        ),
     )
 
 

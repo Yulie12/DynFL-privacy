@@ -278,9 +278,21 @@ class ClientPrivacyLedger:
         _validate_dp_parameters(self.feature_noise_multiplier, delta)
         _validate_dp_parameters(self.update_noise_multiplier, delta)
 
-    def project(self, feature_events: int, update_events: int) -> PrivacyProjection:
+    def project(
+        self,
+        feature_events: int,
+        update_events: int,
+        *,
+        update_noise_multiplier: float | None = None,
+    ) -> PrivacyProjection:
         feature_before = self.feature.current_epsilon()
         update_before = self.update.current_epsilon()
+        update_sigma = (
+            self.update_noise_multiplier
+            if update_noise_multiplier is None
+            else float(update_noise_multiplier)
+        )
+        _validate_dp_parameters(update_sigma, self.update.delta)
         return PrivacyProjection(
             feature_epsilon_before=feature_before,
             feature_epsilon_after=self.feature.epsilon_after(
@@ -289,12 +301,32 @@ class ClientPrivacyLedger:
             ),
             update_epsilon_before=update_before,
             update_epsilon_after=self.update.epsilon_after(
-                self.update_noise_multiplier,
+                update_sigma,
                 update_events,
             ),
             feature_events=feature_events,
             update_events=update_events,
         )
+
+    def minimum_feasible_update_noise(self, update_events: int) -> float:
+        """Smallest Gaussian sigma that keeps the next update releases in budget."""
+        if update_events <= 0:
+            return self.update_noise_multiplier
+        if self.update.remaining_budget <= 1e-12:
+            raise ValueError("No update-DP budget remains for another release")
+        low = 1e-6
+        high = max(1.0, self.update_noise_multiplier)
+        while not self.update.can_add_events(high, update_events):
+            high *= 2.0
+            if high > 1e9:
+                raise ValueError("No finite update noise found within accountant resolution")
+        for _ in range(100):
+            midpoint = (low + high) / 2.0
+            if self.update.can_add_events(midpoint, update_events):
+                high = midpoint
+            else:
+                low = midpoint
+        return high
 
     def can_apply(self, projection: PrivacyProjection) -> bool:
         return (
@@ -302,12 +334,25 @@ class ClientPrivacyLedger:
             and projection.update_epsilon_after <= self.update.budget + 1e-12
         )
 
-    def add(self, feature_events: int, update_events: int) -> PrivacyProjection:
-        projection = self.project(feature_events, update_events)
+    def add(
+        self,
+        feature_events: int,
+        update_events: int,
+        *,
+        update_noise_multiplier: float | None = None,
+    ) -> PrivacyProjection:
+        update_sigma = (
+            self.update_noise_multiplier
+            if update_noise_multiplier is None
+            else float(update_noise_multiplier)
+        )
+        projection = self.project(
+            feature_events, update_events, update_noise_multiplier=update_sigma
+        )
         if not self.can_apply(projection):
             raise ValueError("DP event would exceed the configured privacy target")
         self.feature.add_events(self.feature_noise_multiplier, feature_events)
-        self.update.add_events(self.update_noise_multiplier, update_events)
+        self.update.add_events(update_sigma, update_events)
         return projection
 
     @property

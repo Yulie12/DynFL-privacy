@@ -1620,6 +1620,7 @@ def _run_lenet5_policy(
                 projection = ledger.add(
                     candidate.feature_dp_events,
                     candidate.update_dp_events,
+                    update_noise_multiplier=candidate.update_noise_multiplier,
                 )
                 row["feature_dp_events"] = projection.feature_events
                 row["update_dp_events"] = projection.update_events
@@ -1964,7 +1965,9 @@ def _run_lenet5_policy(
                             1.0,
                             clip_norm=train_config.dp_clip_norm,
                             noise_multiplier=float(
-                                privacy_parameters["update_noise_multiplier"]
+                                candidate.update_noise_multiplier
+                                if candidate.update_noise_multiplier is not None
+                                else privacy_parameters["update_noise_multiplier"]
                             ),
                         )
                         local_dp_packet_client_fractions.append(1.0)
@@ -2050,12 +2053,18 @@ def _run_lenet5_policy(
                     cloud_signal_updates.append(edge_update)
                     cloud_index = len(cloud_updates)
                     if local_packet_dp:
+                        group_sigma = max(
+                            (
+                                float(item_candidate.update_noise_multiplier)
+                                for _cid, _state, _count, item_candidate in updates
+                                if item_candidate.update_noise_multiplier is not None
+                            ),
+                            default=float(privacy_parameters["update_noise_multiplier"]),
+                        )
                         sensitivity, noise_std = _dp_update_release_parameters(
                             max_client_fraction,
                             clip_norm=train_config.dp_clip_norm,
-                            noise_multiplier=float(
-                                privacy_parameters["update_noise_multiplier"]
-                            ),
+                            noise_multiplier=group_sigma,
                         )
                         local_dp_packet_client_fractions.append(max_client_fraction)
                         local_dp_packet_sensitivities.append(sensitivity)
