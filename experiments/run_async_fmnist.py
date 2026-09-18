@@ -22,7 +22,15 @@ from dynfed.utils import timestamped_dir
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Async version-controlled FedAvg for FMNIST + LeNet5."
+        description=(
+            "LEGACY diagnostic only: asynchronous version-controlled FedAvg for "
+            "FMNIST + LeNet5. Not part of the formal DynFL paper execution."
+        )
+    )
+    parser.add_argument(
+        "--legacy-async-experiment",
+        action="store_true",
+        help="Explicitly opt in to the legacy async/staleness simulator.",
     )
     parser.add_argument("--clients", type=int, default=100)
     parser.add_argument("--edges", type=int, default=10)
@@ -68,6 +76,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not args.legacy_async_experiment:
+        raise SystemExit(
+            "run_async_fmnist.py is a legacy diagnostic and is excluded from the "
+            "formal DynFL paper mainline. Re-run with --legacy-async-experiment "
+            "only when intentionally reproducing the historical async simulator."
+        )
     output_root = timestamped_dir(args.output_root, "async_lenet5")
 
     # Visualization-compatible initialization: 6 ends × 3 edges

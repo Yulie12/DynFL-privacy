@@ -1756,3 +1756,32 @@ def test_remaining_budget_raises_next_round_sigma_minimum() -> None:
     second = ledger.minimum_feasible_update_noise(1)
     assert second > first
 
+
+
+def test_formal_paper_runner_isolated_from_async_staleness_mainline() -> None:
+    root = Path(__file__).resolve().parents[1]
+    runner = (root / "experiments" / "run_paper_config.py").read_text(encoding="utf-8")
+    async_runner = (root / "experiments" / "run_async_fmnist.py").read_text(encoding="utf-8")
+
+    assert "dynfed.async_training" not in runner
+    assert "--legacy-async-experiment" in async_runner
+    assert "legacy diagnostic" in async_runner.lower()
+
+    for name in ("paper_v30_cifar10_resnet18.json", "paper_v30_fmnist_lenet5.json"):
+        config = json.loads((root / "configs" / name).read_text(encoding="utf-8"))
+        serialized = json.dumps(config).lower()
+        assert "staleness" not in serialized
+        assert "max_version_gap" not in serialized
+        assert "b_cloud" not in serialized
+        command = build_command(config, seed=42, policies=["ours"], rounds=1)
+        assert "run_async_fmnist.py" not in " ".join(command)
+
+
+def test_formal_runner_rejects_top_level_async_staleness_controls() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = json.loads(
+        (root / "configs" / "paper_v30_fmnist_lenet5.json").read_text(encoding="utf-8")
+    )
+    config["max_version_gap"] = 3
+    with pytest.raises(ValueError, match="Async/staleness controls"):
+        build_command(config, seed=42, policies=["ours"], rounds=1)

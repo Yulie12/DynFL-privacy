@@ -1,6 +1,11 @@
-"""Asynchronous version-controlled training loop.
+"""Legacy asynchronous version-controlled training loop.
 
-Replaces round-based sync training with an event-driven simulation where:
+This module is retained only for historical/diagnostic experiments.  It is not
+part of the current formal DynFL paper execution, which is round-synchronous:
+Edge buffers close within one round, Cloud aggregates once per round, and stale
+or cross-round updates are never reused.
+
+The legacy simulator uses an event-driven execution where:
 - Each end tracks which edge/cloud parameter version it trained on
 - Submissions are tagged with their base version
 - Edge/cloud aggregate when their buffer reaches threshold B

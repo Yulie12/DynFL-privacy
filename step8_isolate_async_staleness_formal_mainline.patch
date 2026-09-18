@@ -1,0 +1,109 @@
+diff --git a/dynfed/async_training.py b/dynfed/async_training.py
+index 3eaaae7..ce9d7c2 100644
+--- a/dynfed/async_training.py
++++ b/dynfed/async_training.py
+@@ -1,6 +1,11 @@
+-"""Asynchronous version-controlled training loop.
++"""Legacy asynchronous version-controlled training loop.
+ 
+-Replaces round-based sync training with an event-driven simulation where:
++This module is retained only for historical/diagnostic experiments.  It is not
++part of the current formal DynFL paper execution, which is round-synchronous:
++Edge buffers close within one round, Cloud aggregates once per round, and stale
++or cross-round updates are never reused.
++
++The legacy simulator uses an event-driven execution where:
+ - Each end tracks which edge/cloud parameter version it trained on
+ - Submissions are tagged with their base version
+ - Edge/cloud aggregate when their buffer reaches threshold B
+diff --git a/experiments/run_async_fmnist.py b/experiments/run_async_fmnist.py
+index f12e039..cf86f55 100644
+--- a/experiments/run_async_fmnist.py
++++ b/experiments/run_async_fmnist.py
+@@ -22,7 +22,15 @@ from dynfed.utils import timestamped_dir
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+-        description="Async version-controlled FedAvg for FMNIST + LeNet5."
++        description=(
++            "LEGACY diagnostic only: asynchronous version-controlled FedAvg for "
++            "FMNIST + LeNet5. Not part of the formal DynFL paper execution."
++        )
++    )
++    parser.add_argument(
++        "--legacy-async-experiment",
++        action="store_true",
++        help="Explicitly opt in to the legacy async/staleness simulator.",
+     )
+     parser.add_argument("--clients", type=int, default=100)
+     parser.add_argument("--edges", type=int, default=10)
+@@ -68,6 +76,12 @@ def parse_args() -> argparse.Namespace:
+ 
+ def main() -> None:
+     args = parse_args()
++    if not args.legacy_async_experiment:
++        raise SystemExit(
++            "run_async_fmnist.py is a legacy diagnostic and is excluded from the "
++            "formal DynFL paper mainline. Re-run with --legacy-async-experiment "
++            "only when intentionally reproducing the historical async simulator."
++        )
+     output_root = timestamped_dir(args.output_root, "async_lenet5")
+ 
+     # Visualization-compatible initialization: 6 ends × 3 edges
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index c3536b8..fc24103 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -85,6 +85,15 @@ def build_command(
+ ) -> list[str]:
+     if config.get("execution_protocol") is not None:
+         raise ValueError("Legacy fixed Method2 execution protocols are not part of the current DynFL mainline")
++    forbidden_async_keys = {
++        "async", "async_training", "staleness", "max_version_gap", "B_edge", "B_cloud"
++    }
++    present_async_keys = sorted(forbidden_async_keys.intersection(config))
++    if present_async_keys:
++        raise ValueError(
++            "Async/staleness controls are not part of the formal DynFL paper mainline: "
++            + ", ".join(present_async_keys)
++        )
+     training = config["training"]
+     system = config["system"]
+     privacy = config["privacy"]
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 5dbc392..6dab8f7 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -1756,3 +1756,32 @@ def test_remaining_budget_raises_next_round_sigma_minimum() -> None:
+     second = ledger.minimum_feasible_update_noise(1)
+     assert second > first
+ 
++
++
++def test_formal_paper_runner_isolated_from_async_staleness_mainline() -> None:
++    root = Path(__file__).resolve().parents[1]
++    runner = (root / "experiments" / "run_paper_config.py").read_text(encoding="utf-8")
++    async_runner = (root / "experiments" / "run_async_fmnist.py").read_text(encoding="utf-8")
++
++    assert "dynfed.async_training" not in runner
++    assert "--legacy-async-experiment" in async_runner
++    assert "legacy diagnostic" in async_runner.lower()
++
++    for name in ("paper_v30_cifar10_resnet18.json", "paper_v30_fmnist_lenet5.json"):
++        config = json.loads((root / "configs" / name).read_text(encoding="utf-8"))
++        serialized = json.dumps(config).lower()
++        assert "staleness" not in serialized
++        assert "max_version_gap" not in serialized
++        assert "b_cloud" not in serialized
++        command = build_command(config, seed=42, policies=["ours"], rounds=1)
++        assert "run_async_fmnist.py" not in " ".join(command)
++
++
++def test_formal_runner_rejects_top_level_async_staleness_controls() -> None:
++    root = Path(__file__).resolve().parents[1]
++    config = json.loads(
++        (root / "configs" / "paper_v30_fmnist_lenet5.json").read_text(encoding="utf-8")
++    )
++    config["max_version_gap"] = 3
++    with pytest.raises(ValueError, match="Async/staleness controls"):
++        build_command(config, seed=42, policies=["ours"], rounds=1)

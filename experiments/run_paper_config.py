@@ -85,6 +85,15 @@ def build_command(
 ) -> list[str]:
     if config.get("execution_protocol") is not None:
         raise ValueError("Legacy fixed Method2 execution protocols are not part of the current DynFL mainline")
+    forbidden_async_keys = {
+        "async", "async_training", "staleness", "max_version_gap", "B_edge", "B_cloud"
+    }
+    present_async_keys = sorted(forbidden_async_keys.intersection(config))
+    if present_async_keys:
+        raise ValueError(
+            "Async/staleness controls are not part of the formal DynFL paper mainline: "
+            + ", ".join(present_async_keys)
+        )
     training = config["training"]
     system = config["system"]
     privacy = config["privacy"]
