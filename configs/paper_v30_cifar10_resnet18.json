@@ -40,7 +40,7 @@
     "require_feasible": true,
     "require_edge_cloud_coverage": true,
     "min_edge_cloud_fusion_ratio": 0.5,
-    "trusted_edge_split_execution": true,
+    "trusted_edge_split_execution": false,
     "mainline_fusion": false
   },
   "network": {

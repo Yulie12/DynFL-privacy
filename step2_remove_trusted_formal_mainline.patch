@@ -1,0 +1,117 @@
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' orig/DynFL-privacy-ytt/configs/paper_v30_cifar10_resnet18.json clean/configs/paper_v30_cifar10_resnet18.json
+--- orig/DynFL-privacy-ytt/configs/paper_v30_cifar10_resnet18.json	2026-09-18 14:38:26.000000000 +0000
++++ clean/configs/paper_v30_cifar10_resnet18.json	2026-09-18 14:55:33.121274119 +0000
+@@ -40,7 +40,7 @@
+     "require_feasible": true,
+     "require_edge_cloud_coverage": true,
+     "min_edge_cloud_fusion_ratio": 0.5,
+-    "trusted_edge_split_execution": true,
++    "trusted_edge_split_execution": false,
+     "mainline_fusion": false
+   },
+   "network": {
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' orig/DynFL-privacy-ytt/configs/paper_v30_fmnist_lenet5.json clean/configs/paper_v30_fmnist_lenet5.json
+--- orig/DynFL-privacy-ytt/configs/paper_v30_fmnist_lenet5.json	2026-09-18 14:38:26.000000000 +0000
++++ clean/configs/paper_v30_fmnist_lenet5.json	2026-09-18 14:55:33.121514546 +0000
+@@ -42,7 +42,7 @@
+     "require_feasible": true,
+     "require_edge_cloud_coverage": true,
+     "min_edge_cloud_fusion_ratio": 0.5,
+-    "trusted_edge_split_execution": true,
++    "trusted_edge_split_execution": false,
+     "mainline_fusion": false
+   },
+   "network": {
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' orig/DynFL-privacy-ytt/experiments/run_fmnist_lenet5.py clean/experiments/run_fmnist_lenet5.py
+--- orig/DynFL-privacy-ytt/experiments/run_fmnist_lenet5.py	2026-09-18 14:38:26.000000000 +0000
++++ clean/experiments/run_fmnist_lenet5.py	2026-09-18 14:55:33.122043790 +0000
+@@ -133,8 +133,8 @@
+         "--trusted-edge-split-execution",
+         action="store_true",
+         help=(
+-            "Treat end-to-edge split activations and returned gradients as internal "
+-            "to a trusted execution domain. Direct end-to-cloud split is disabled."
++            "LEGACY/REMOVED: trusted/untrusted execution-domain labels are not part "
++            "of the current DynFL privacy model."
+         ),
+     )
+     parser.add_argument("--he-backend", default="none", choices=["none", "seal", "tenseal"])
+@@ -207,6 +207,10 @@
+ 
+ def main() -> None:
+     args = parse_args()
++    if args.trusted_edge_split_execution:
++        raise ValueError(
++            "--trusted-edge-split-execution has been removed; use exposure-aware privacy requirements instead"
++        )
+     policies = _resolved_policies(args)
+     if args.max_new_rounds is not None and args.max_new_rounds < 1:
+         raise ValueError("--max-new-rounds must be positive")
+@@ -253,7 +257,7 @@
+         risk_limit=args.risk_limit,
+         aggregation_fraction=args.aggregation_fraction,
+         privacy_local_epochs=args.local_epochs,
+-        trusted_edge_split_execution=(args.trusted_edge_split_execution or args.mainline_fusion),
++        trusted_edge_split_execution=False,
+         pareto_archive_size=args.pareto_archive_size,
+         pareto_beam_size=args.pareto_beam_size,
+         pareto_max_iters=args.pareto_max_iters,
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' orig/DynFL-privacy-ytt/experiments/run_paper_config.py clean/experiments/run_paper_config.py
+--- orig/DynFL-privacy-ytt/experiments/run_paper_config.py	2026-09-18 14:38:26.000000000 +0000
++++ clean/experiments/run_paper_config.py	2026-09-18 14:55:33.121738186 +0000
+@@ -148,10 +148,9 @@
+         "seed": seed,
+         "output_root": config["output_root"],
+     }
+-    if not system.get("trusted_edge_split_execution"):
+-        feature_budget = privacy["feature_epsilon_budget"]
+-        values["dp_emb_epsilon"] = feature_budget
+-        values["dp_feature_epsilon_budget"] = feature_budget
++    feature_budget = privacy.get("feature_epsilon_budget", privacy["initial_epsilon"])
++    values["dp_emb_epsilon"] = feature_budget
++    values["dp_feature_epsilon_budget"] = feature_budget
+     for name, value in values.items():
+         _append_value(command, name, value)
+     if disable_update_dp:
+@@ -169,7 +168,6 @@
+     for name in (
+         "require_feasible",
+         "require_edge_cloud_coverage",
+-        "trusted_edge_split_execution",
+     ):
+         if system.get(name):
+             command.append(_flag(name))
+@@ -239,9 +237,10 @@
+         )
+     if int(config["system"]["clients"]) < int(config["system"]["edges"]):
+         raise ValueError("The number of clients must be at least the number of edges")
+-    if not bool(config["system"].get("trusted_edge_split_execution")):
++    if bool(config["system"].get("trusted_edge_split_execution")):
+         raise ValueError(
+-            "Formal configurations must enable trusted edge split execution"
++            "trusted_edge_split_execution is legacy and is not valid in the current formal DynFL design; "
++            "privacy must be derived from real exposures instead of trusted/untrusted node labels"
+         )
+     if int(he.get("workers", 1)) < 1:
+         raise ValueError("The number of HE workers must be positive")
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' orig/DynFL-privacy-ytt/tests/test_paper_conformance.py clean/tests/test_paper_conformance.py
+--- orig/DynFL-privacy-ytt/tests/test_paper_conformance.py	2026-09-18 14:38:26.000000000 +0000
++++ clean/tests/test_paper_conformance.py	2026-09-18 14:55:33.126257557 +0000
+@@ -77,7 +77,7 @@
+     config_path = (
+         Path(__file__).resolve().parents[1]
+         / "configs"
+-        / "paper_v25_cifar10_resnet18.json"
++        / "paper_v30_cifar10_resnet18.json"
+     )
+     config = json.loads(config_path.read_text(encoding="utf-8"))
+ 
+@@ -91,7 +91,7 @@
+ 
+     assert command[command.index("--rounds") + 1] == "100"
+     assert command[command.index("--max-new-rounds") + 1] == "2"
+-    assert "--trusted-edge-split-execution" in command
++    assert "--trusted-edge-split-execution" not in command
+ 
+ 
+ def _flow_client(client_id: int) -> ClientFlowInput:

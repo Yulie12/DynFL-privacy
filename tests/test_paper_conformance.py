@@ -77,7 +77,7 @@ def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
     config_path = (
         Path(__file__).resolve().parents[1]
         / "configs"
-        / "paper_v25_cifar10_resnet18.json"
+        / "paper_v30_cifar10_resnet18.json"
     )
     config = json.loads(config_path.read_text(encoding="utf-8"))
 
@@ -91,7 +91,7 @@ def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
 
     assert command[command.index("--rounds") + 1] == "100"
     assert command[command.index("--max-new-rounds") + 1] == "2"
-    assert "--trusted-edge-split-execution" in command
+    assert "--trusted-edge-split-execution" not in command
 
 
 def _flow_client(client_id: int) -> ClientFlowInput:

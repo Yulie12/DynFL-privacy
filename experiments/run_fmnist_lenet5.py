@@ -133,8 +133,8 @@ def parse_args() -> argparse.Namespace:
         "--trusted-edge-split-execution",
         action="store_true",
         help=(
-            "Treat end-to-edge split activations and returned gradients as internal "
-            "to a trusted execution domain. Direct end-to-cloud split is disabled."
+            "LEGACY/REMOVED: trusted/untrusted execution-domain labels are not part "
+            "of the current DynFL privacy model."
         ),
     )
     parser.add_argument("--he-backend", default="none", choices=["none", "seal", "tenseal"])
@@ -207,6 +207,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.trusted_edge_split_execution:
+        raise ValueError(
+            "--trusted-edge-split-execution has been removed; use exposure-aware privacy requirements instead"
+        )
     policies = _resolved_policies(args)
     if args.max_new_rounds is not None and args.max_new_rounds < 1:
         raise ValueError("--max-new-rounds must be positive")
@@ -253,7 +257,7 @@ def main() -> None:
         risk_limit=args.risk_limit,
         aggregation_fraction=args.aggregation_fraction,
         privacy_local_epochs=args.local_epochs,
-        trusted_edge_split_execution=(args.trusted_edge_split_execution or args.mainline_fusion),
+        trusted_edge_split_execution=False,
         pareto_archive_size=args.pareto_archive_size,
         pareto_beam_size=args.pareto_beam_size,
         pareto_max_iters=args.pareto_max_iters,

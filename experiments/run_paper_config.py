@@ -148,10 +148,9 @@ def build_command(
         "seed": seed,
         "output_root": config["output_root"],
     }
-    if not system.get("trusted_edge_split_execution"):
-        feature_budget = privacy["feature_epsilon_budget"]
-        values["dp_emb_epsilon"] = feature_budget
-        values["dp_feature_epsilon_budget"] = feature_budget
+    feature_budget = privacy.get("feature_epsilon_budget", privacy["initial_epsilon"])
+    values["dp_emb_epsilon"] = feature_budget
+    values["dp_feature_epsilon_budget"] = feature_budget
     for name, value in values.items():
         _append_value(command, name, value)
     if disable_update_dp:
@@ -169,7 +168,6 @@ def build_command(
     for name in (
         "require_feasible",
         "require_edge_cloud_coverage",
-        "trusted_edge_split_execution",
     ):
         if system.get(name):
             command.append(_flag(name))
@@ -239,9 +237,10 @@ def validate_config(config: dict) -> None:
         )
     if int(config["system"]["clients"]) < int(config["system"]["edges"]):
         raise ValueError("The number of clients must be at least the number of edges")
-    if not bool(config["system"].get("trusted_edge_split_execution")):
+    if bool(config["system"].get("trusted_edge_split_execution")):
         raise ValueError(
-            "Formal configurations must enable trusted edge split execution"
+            "trusted_edge_split_execution is legacy and is not valid in the current formal DynFL design; "
+            "privacy must be derived from real exposures instead of trusted/untrusted node labels"
         )
     if int(he.get("workers", 1)) < 1:
         raise ValueError("The number of HE workers must be positive")
