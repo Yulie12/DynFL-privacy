@@ -1,7 +1,7 @@
 {
-  "name": "paper_v30_cifar10_resnet18",
-  "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
-  "output_root": "out/paper_v30_cifar10_resnet18_head_method2",
+  "name": "paper_v31_cifar10_resnet18",
+  "execution_revision": "paper_flow_v31_mode_specific_privacy",
+  "output_root": "out/paper_v31_cifar10_resnet18_head",
   "seeds": [
     42
   ],
@@ -41,7 +41,7 @@
     "require_edge_cloud_coverage": true,
     "min_edge_cloud_fusion_ratio": 0.5,
     "trusted_edge_split_execution": true,
-    "mainline_fusion": true
+    "mainline_fusion": false
   },
   "network": {
     "end_edge_rate_mb_s": 5,
@@ -55,8 +55,9 @@
     "jitter": 0.25
   },
   "privacy": {
-    "protection_scope": "global_release_dp_plus_he_confidentiality",
+    "protection_scope": "cross_domain_update_and_secure_aggregate",
     "candidate_mechanisms": [
+      "dp",
       "he3"
     ],
     "accounting_mode": "rdp_auto",
@@ -67,8 +68,8 @@
     "update_mode": "upd_only",
     "enforce_cloud_dp_stability": false,
     "cloud_dp_stability_threshold": 1,
-    "release_calibration": "global_release",
-    "update_protection_goal": "released_model_dp"
+    "release_calibration": "tex_packet",
+    "update_protection_goal": "packet_protection"
   },
   "he": {
     "backend": "seal",

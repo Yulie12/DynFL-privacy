@@ -1,0 +1,174 @@
+--- a/configs/paper_v30_cifar10_resnet18.json
++++ b/configs/paper_v30_cifar10_resnet18.json
+@@ -1,7 +1,7 @@
+ {
+-  "name": "paper_v30_cifar10_resnet18",
+-  "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
+-  "output_root": "out/paper_v30_cifar10_resnet18_head_method2",
++  "name": "paper_v31_cifar10_resnet18",
++  "execution_revision": "paper_flow_v31_mode_specific_privacy",
++  "output_root": "out/paper_v31_cifar10_resnet18_head",
+   "seeds": [
+     42
+   ],
+@@ -41,7 +41,7 @@
+     "require_edge_cloud_coverage": true,
+     "min_edge_cloud_fusion_ratio": 0.5,
+     "trusted_edge_split_execution": true,
+-    "mainline_fusion": true
++    "mainline_fusion": false
+   },
+   "network": {
+     "end_edge_rate_mb_s": 5,
+@@ -55,8 +55,9 @@
+     "jitter": 0.25
+   },
+   "privacy": {
+-    "protection_scope": "global_release_dp_plus_he_confidentiality",
++    "protection_scope": "cross_domain_update_and_secure_aggregate",
+     "candidate_mechanisms": [
++      "dp",
+       "he3"
+     ],
+     "accounting_mode": "rdp_auto",
+@@ -67,8 +68,8 @@
+     "update_mode": "upd_only",
+     "enforce_cloud_dp_stability": false,
+     "cloud_dp_stability_threshold": 1,
+-    "release_calibration": "global_release",
+-    "update_protection_goal": "released_model_dp"
++    "release_calibration": "tex_packet",
++    "update_protection_goal": "packet_protection"
+   },
+   "he": {
+     "backend": "seal",
+--- a/configs/paper_v30_fmnist_lenet5.json
++++ b/configs/paper_v30_fmnist_lenet5.json
+@@ -1,7 +1,7 @@
+ {
+-  "name": "paper_v30_fmnist_lenet5",
+-  "execution_revision": "paper_flow_v30_mainline_fusion_method2_epochs",
+-  "output_root": "out/paper_v30_fmnist_lenet5",
++  "name": "paper_v31_fmnist_lenet5",
++  "execution_revision": "paper_flow_v31_mode_specific_privacy",
++  "output_root": "out/paper_v31_fmnist_lenet5",
+   "seeds": [
+     42,
+     43,
+@@ -43,7 +43,7 @@
+     "require_edge_cloud_coverage": true,
+     "min_edge_cloud_fusion_ratio": 0.5,
+     "trusted_edge_split_execution": true,
+-    "mainline_fusion": true
++    "mainline_fusion": false
+   },
+   "network": {
+     "end_edge_rate_mb_s": 5,
+@@ -57,8 +57,9 @@
+     "jitter": 0.25
+   },
+   "privacy": {
+-    "protection_scope": "global_release_dp_plus_he_confidentiality",
++    "protection_scope": "cross_domain_update_and_secure_aggregate",
+     "candidate_mechanisms": [
++      "dp",
+       "he3"
+     ],
+     "accounting_mode": "rdp_auto",
+@@ -69,8 +70,8 @@
+     "update_mode": "upd_only",
+     "enforce_cloud_dp_stability": false,
+     "cloud_dp_stability_threshold": 1,
+-    "release_calibration": "global_release",
+-    "update_protection_goal": "released_model_dp"
++    "release_calibration": "tex_packet",
++    "update_protection_goal": "packet_protection"
+   },
+   "he": {
+     "backend": "seal",
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -150,6 +150,10 @@
+     update_payload_mb: float = 4.0
+     mainline_fusion: bool = False
+ 
++    def __post_init__(self) -> None:
++        if self.mainline_fusion:
++            raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
++
+ 
+ @dataclass(frozen=True)
+ class Candidate:
+--- a/dynfed/version.py
++++ b/dynfed/version.py
+@@ -1,2 +1,2 @@
+-CURRENT_EXECUTION_REVISION = "paper_flow_v30_mainline_fusion_method2_epochs"
++CURRENT_EXECUTION_REVISION = "paper_flow_v31_mode_specific_privacy"
+ CURRENT_UPDATE_PARAMETER_SCOPE = "trainable_parameters_v1"
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -126,8 +126,7 @@
+         "--mainline-fusion",
+         action="store_true",
+         help=(
+-            "Fuse dynamic collaboration selection with the fixed Method 2 global release "
+-            "contract: full roster, client clipping, distributed DP noise, and real HE."
++            "LEGACY/REMOVED: the Method2 global-release overlay is no longer a valid DynFL mainline option."
+         ),
+     )
+     parser.add_argument(
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -18,7 +18,6 @@
+     CKKS_SCALE_BITS,
+ )
+ from dynfed.version import CURRENT_EXECUTION_REVISION
+-from experiments import method2_config
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+@@ -84,9 +83,8 @@
+     disable_update_dp: bool = False,
+     exclude_modes: list[str] | None = None,
+ ) -> list[str]:
+-    if config.get("execution_protocol") == method2_config.PROTOCOL:
+-        return method2_config.build(config, ROOT, seed=seed, policies=policies, rounds=rounds,
+-                                    max_new_rounds=max_new_rounds, resume_from_run=resume_from_run)
++    if config.get("execution_protocol") is not None:
++        raise ValueError("Legacy fixed Method2 execution protocols are not part of the current DynFL mainline")
+     training = config["training"]
+     system = config["system"]
+     privacy = config["privacy"]
+@@ -172,7 +170,6 @@
+         "require_feasible",
+         "require_edge_cloud_coverage",
+         "trusted_edge_split_execution",
+-        "mainline_fusion",
+     ):
+         if system.get(name):
+             command.append(_flag(name))
+@@ -190,13 +187,10 @@
+     config = json.loads(config_path.read_text(encoding="utf-8"))
+     if args.he_execution is not None:
+         config["he"]["execution"] = args.he_execution
+-        if config.get("execution_protocol") != method2_config.PROTOCOL:
+-            config["he"]["require_real_he"] = args.he_execution == "real"
++        config["he"]["require_real_he"] = args.he_execution == "real"
+     if args.output_root is not None:
+         config["output_root"] = args.output_root
+     validate_config(config)
+-    if config.get("execution_protocol") == method2_config.PROTOCOL and args.max_new_rounds is not None:
+-        print("Fixed-protocol smoke run: original privacy horizon retained; no resumable checkpoint is written.", flush=True)
+     seeds = args.seeds or [int(seed) for seed in config["seeds"]]
+     policies = args.policies or list(config["policies"])
+     if args.resume_from_run is not None and len(seeds) != 1:
+@@ -223,8 +217,7 @@
+ 
+ def validate_config(config: dict) -> None:
+     if config.get("execution_protocol") is not None:
+-        method2_config.validate(config)
+-        return
++        raise ValueError("Legacy fixed Method2 execution protocols are archived and cannot be used for formal DynFL runs")
+     if config.get("execution_revision") != CURRENT_EXECUTION_REVISION:
+         raise RuntimeError(
+             f"Paper experiments require {CURRENT_EXECUTION_REVISION}"

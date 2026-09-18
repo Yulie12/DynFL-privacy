@@ -150,6 +150,10 @@ class SelectionConfig:
     update_payload_mb: float = 4.0
     mainline_fusion: bool = False
 
+    def __post_init__(self) -> None:
+        if self.mainline_fusion:
+            raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
+
 
 @dataclass(frozen=True)
 class Candidate:

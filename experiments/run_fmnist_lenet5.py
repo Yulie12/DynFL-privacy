@@ -126,8 +126,7 @@ def parse_args() -> argparse.Namespace:
         "--mainline-fusion",
         action="store_true",
         help=(
-            "Fuse dynamic collaboration selection with the fixed Method 2 global release "
-            "contract: full roster, client clipping, distributed DP noise, and real HE."
+            "LEGACY/REMOVED: the Method2 global-release overlay is no longer a valid DynFL mainline option."
         ),
     )
     parser.add_argument(
