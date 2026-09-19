@@ -114,7 +114,7 @@ def parse_args() -> argparse.Namespace:
         ],
     )
     parser.add_argument("--dataset", default="cifar10")
-    parser.add_argument("--model", default="resnet18_pretrained")
+    parser.add_argument("--model", default="resnet18_pretrained_head")
     parser.add_argument("--rounds", type=int, default=200)
     parser.add_argument("--clients", type=int, default=100)
     parser.add_argument("--edges", type=int, default=10)
@@ -185,12 +185,14 @@ def main() -> None:
         paper_figure.parent.mkdir(parents=True, exist_ok=True)
         paper_figure.write_bytes(figure_path.read_bytes())
 
-    if "ours" in policies:
+    reconfiguration_policy = "full_dynfl" if "full_dynfl" in policies else ("ours" if "ours" in policies else None)
+    if reconfiguration_policy is not None:
         reconfiguration_rows, reconfiguration_summary = aggregate_reconfiguration(
             sources,
             seeds,
             rounds=args.rounds,
             clients=args.clients,
+            policy=reconfiguration_policy,
         )
         write_csv(output_dir / "reconfiguration_statistics.csv", reconfiguration_rows)
         write_csv(output_dir / "reconfiguration_summary.csv", reconfiguration_summary)
@@ -590,6 +592,7 @@ def aggregate_reconfiguration(
     *,
     rounds: int,
     clients: int,
+    policy: str = "full_dynfl",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     mode_fraction_by_seed: dict[int, dict[int, dict[str, float]]] = {}
     mechanism_fraction_by_seed: dict[int, dict[int, dict[str, float]]] = {}
@@ -597,7 +600,7 @@ def aggregate_reconfiguration(
     per_seed_summary: list[dict[str, float]] = []
 
     for seed in seeds:
-        source = sources[(seed, "ours")]
+        source = sources[(seed, policy)]
         decisions = read_csv(source.policy_dir / "client_decisions.csv")
         metrics = read_csv(source.policy_dir / "round_metrics.csv")
         by_round: dict[int, list[dict[str, str]]] = {index: [] for index in range(rounds)}

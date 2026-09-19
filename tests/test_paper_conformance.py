@@ -2109,3 +2109,42 @@ def test_final_controlled_aggregator_excludes_legacy_privacy_scale_ablation_runs
     assert 'root / "privacy"' not in main_body
     assert 'root / "scale"' not in main_body
     assert 'root / "ablation"' not in main_body
+
+
+def test_final_suite_builds_frozen_q98_matrix_without_inventing_fast_deadlines() -> None:
+    from experiments.run_final_paper_suite import build_final_cases
+    from experiments.run_paper_config import DEFAULT_CONFIG
+
+    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    cases = build_final_cases(
+        base,
+        studies=["main", "dynamic_resources", "privacy", "sp"],
+        fast_config=None,
+    )
+    keys = [(case["study"], case["setting"]) for case in cases]
+    assert ("main", "four_methods") in keys
+    assert ("dynamic_resources", "communication") in keys
+    assert ("dynamic_resources", "compute") in keys
+    assert ("privacy", "dynamic_vs_fixed") in keys
+    assert [(case["study"], case["setting"]) for case in cases if case["study"] == "sp"] == [
+        ("sp", "1"), ("sp", "5"), ("sp", "10")
+    ]
+    privacy_case = next(case for case in cases if case["study"] == "privacy")
+    assert privacy_case["policies"] == ["dynamic_mode_fixed_privacy", "full_dynfl"]
+
+
+def test_final_suite_requires_explicit_fast_response_contract() -> None:
+    from experiments.run_final_paper_suite import build_final_cases
+    from experiments.run_paper_config import DEFAULT_CONFIG
+
+    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    with pytest.raises(ValueError, match="fast_response requires --fast-config"):
+        build_final_cases(base, studies=["fast_response"], fast_config=None)
+
+
+def test_multiseed_aggregator_defaults_match_formal_cifar_model() -> None:
+    from experiments import aggregate_multiseed_results
+
+    source = Path(aggregate_multiseed_results.__file__).read_text(encoding="utf-8")
+    assert 'parser.add_argument("--model", default="resnet18_pretrained_head")' in source
+    assert 'reconfiguration_policy = "full_dynfl"' in source
