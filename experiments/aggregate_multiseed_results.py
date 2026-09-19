@@ -24,6 +24,10 @@ if str(ROOT) not in sys.path:
 from dynfed.version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
 
 POLICY_LABELS = {
+    "fixed_mode_fixed_privacy": "Fixed Mode + Fixed Privacy",
+    "dynamic_mode_fixed_privacy": "Dynamic Mode + Fixed Privacy",
+    "fixed_mode_dynamic_privacy": "Fixed Mode + Dynamic Privacy",
+    "full_dynfl": "Full DynFL",
     "ours": "Ours",
     "individual_optimal": "Individual Optimal",
     "no_protection": "No Protection",
@@ -78,6 +82,8 @@ SUMMARY_METRICS = (
     "total_training_wall_time_sec",
     "end_to_end_wall_time_sec",
     "wall_time_sec",
+    "feasible_participation_ratio",
+    "deadline_satisfaction_ratio",
 )
 
 
@@ -101,14 +107,10 @@ def parse_args() -> argparse.Namespace:
         "--policies",
         nargs="+",
         default=[
-            "ours",
-            "individual_optimal",
-            "no_protection",
-            "random",
-            "fixed_fedavg",
-            "fixed_splitfed",
-            "fixed_hfl",
-            "nsga2",
+            "fixed_mode_fixed_privacy",
+            "dynamic_mode_fixed_privacy",
+            "fixed_mode_dynamic_privacy",
+            "full_dynfl",
         ],
     )
     parser.add_argument("--dataset", default="cifar10")

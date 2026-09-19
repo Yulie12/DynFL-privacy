@@ -7,6 +7,7 @@ import json
 import math
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +234,7 @@ def run_instance(
     client_samples = {client.client_id: float(client.samples) for client in clients}
     client_edges = {client.client_id: int(client.edge_id) for client in clients}
     diagnostics: dict[str, Any] = {}
+    approximate_started = time.perf_counter()
     _, approximate_choice = choose_global_pareto_profile(
         config=config,
         selected=selected,
@@ -240,8 +242,10 @@ def run_instance(
         client_edges=client_edges,
         diagnostics=diagnostics,
     )
+    approximate_solve_time_sec = time.perf_counter() - approximate_started
     approximate_front = list(diagnostics["archive"])
 
+    exact_started = time.perf_counter()
     exact_evaluations = _exact_evaluations(
         config=config,
         pools=pools,
@@ -250,6 +254,7 @@ def run_instance(
     )
     exact_front = _pareto_archive(exact_evaluations, len(exact_evaluations))
     exact_choice = _choose_tchebycheff(exact_front, config.pareto_norm_eps)
+    exact_solve_time_sec = time.perf_counter() - exact_started
     exact_profile_keys = {_evaluation_key(item) for item in exact_front}
     approximate_profile_keys = {_evaluation_key(item) for item in approximate_front}
     exact_objective_keys = {_objective_key(item) for item in exact_front}
@@ -275,7 +280,12 @@ def run_instance(
         "pareto_objective_recall": len(exact_objective_keys & approximate_objective_keys)
         / max(len(exact_objective_keys), 1),
         "hypervolume_gap": max(0.0, exact_hv - approximate_hv) / max(exact_hv, 1e-12),
+        # Q92/Q97 compact optimizer-quality metric: gap in the same normalized
+        # scalarized Tchebycheff objective used for the final profile choice.
+        "scalarized_objective_gap": max(0.0, approximate_distance - exact_distance),
         "tchebycheff_regret": max(0.0, approximate_distance - exact_distance),
+        "bounded_pareto_solve_time_sec": approximate_solve_time_sec,
+        "exact_solver_solve_time_sec": exact_solve_time_sec,
         "decision_profile_match": int(
             _evaluation_key(approximate_choice) == _evaluation_key(exact_choice)
         ),
@@ -319,7 +329,10 @@ def main() -> None:
         "mean_pareto_profile_recall": _mean(rows, "pareto_profile_recall"),
         "mean_pareto_objective_recall": _mean(rows, "pareto_objective_recall"),
         "mean_hypervolume_gap": _mean(rows, "hypervolume_gap"),
+        "mean_scalarized_objective_gap": _mean(rows, "scalarized_objective_gap"),
         "mean_tchebycheff_regret": _mean(rows, "tchebycheff_regret"),
+        "mean_bounded_pareto_solve_time_sec": _mean(rows, "bounded_pareto_solve_time_sec"),
+        "mean_exact_solver_solve_time_sec": _mean(rows, "exact_solver_solve_time_sec"),
         "decision_profile_match_rate": _mean(rows, "decision_profile_match"),
         "decision_objective_match_rate": _mean(rows, "decision_objective_match"),
         "mean_evaluation_reduction_ratio": _mean(rows, "evaluation_reduction_ratio"),

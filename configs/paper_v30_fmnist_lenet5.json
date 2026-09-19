@@ -3,8 +3,8 @@
   "execution_revision": "paper_flow_v31_mode_specific_privacy",
   "output_root": "out/paper_v31_fmnist_lenet5",
   "seeds": [
+    40,
     42,
-    43,
     44
   ],
   "policies": [

@@ -3,7 +3,9 @@
   "execution_revision": "paper_flow_v31_mode_specific_privacy",
   "output_root": "out/paper_v31_cifar10_resnet18_head",
   "seeds": [
-    42
+    40,
+    42,
+    44
   ],
   "policies": [
     "fixed_mode_fixed_privacy",

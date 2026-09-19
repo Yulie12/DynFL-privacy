@@ -2042,3 +2042,33 @@ def test_deadline_satisfaction_ratio_is_none_without_fast_response_clients() -> 
         {"fast_response_client": False, "deadline_satisfied": None},
     ]
     assert _deadline_satisfaction_ratio(rows) is None
+
+
+def test_formal_configs_use_three_frozen_random_seeds() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for name in ("paper_v30_cifar10_resnet18.json", "paper_v30_fmnist_lenet5.json"):
+        config = json.loads((root / "configs" / name).read_text(encoding="utf-8"))
+        assert config["seeds"] == [40, 42, 44]
+
+
+def test_exact_solver_validation_reports_gap_and_both_solve_times() -> None:
+    from experiments.validate_pareto_search import run_instance
+
+    row = run_instance(
+        num_clients=2, seed=40, candidates_per_client=4, archive_size=8, max_iters=5
+    )
+    assert row["scalarized_objective_gap"] >= 0.0
+    assert row["bounded_pareto_solve_time_sec"] >= 0.0
+    assert row["exact_solver_solve_time_sec"] >= 0.0
+
+
+def test_multiseed_aggregator_defaults_to_final_four_and_mean_std_metrics() -> None:
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "experiments" / "aggregate_multiseed_results.py").read_text(encoding="utf-8")
+    for policy in (
+        "fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy", "full_dynfl",
+    ):
+        assert policy in text
+    assert 'row[f"{metric}_mean"]' in text
+    assert 'row[f"{metric}_std"]' in text

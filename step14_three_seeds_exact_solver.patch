@@ -1,0 +1,173 @@
+diff --git a/configs/paper_v30_cifar10_resnet18.json b/configs/paper_v30_cifar10_resnet18.json
+index 149c924..e3dbd28 100644
+--- a/configs/paper_v30_cifar10_resnet18.json
++++ b/configs/paper_v30_cifar10_resnet18.json
+@@ -3,7 +3,9 @@
+   "execution_revision": "paper_flow_v31_mode_specific_privacy",
+   "output_root": "out/paper_v31_cifar10_resnet18_head",
+   "seeds": [
+-    42
++    40,
++    42,
++    44
+   ],
+   "policies": [
+     "fixed_mode_fixed_privacy",
+diff --git a/configs/paper_v30_fmnist_lenet5.json b/configs/paper_v30_fmnist_lenet5.json
+index e4a939b..162fb9f 100644
+--- a/configs/paper_v30_fmnist_lenet5.json
++++ b/configs/paper_v30_fmnist_lenet5.json
+@@ -3,8 +3,8 @@
+   "execution_revision": "paper_flow_v31_mode_specific_privacy",
+   "output_root": "out/paper_v31_fmnist_lenet5",
+   "seeds": [
++    40,
+     42,
+-    43,
+     44
+   ],
+   "policies": [
+diff --git a/experiments/validate_pareto_search.py b/experiments/validate_pareto_search.py
+index fa442d0..329c6bc 100644
+--- a/experiments/validate_pareto_search.py
++++ b/experiments/validate_pareto_search.py
+@@ -7,6 +7,7 @@ import json
+ import math
+ import random
+ import sys
++import time
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -233,6 +234,7 @@ def run_instance(
+     client_samples = {client.client_id: float(client.samples) for client in clients}
+     client_edges = {client.client_id: int(client.edge_id) for client in clients}
+     diagnostics: dict[str, Any] = {}
++    approximate_started = time.perf_counter()
+     _, approximate_choice = choose_global_pareto_profile(
+         config=config,
+         selected=selected,
+@@ -240,8 +242,10 @@ def run_instance(
+         client_edges=client_edges,
+         diagnostics=diagnostics,
+     )
++    approximate_solve_time_sec = time.perf_counter() - approximate_started
+     approximate_front = list(diagnostics["archive"])
+ 
++    exact_started = time.perf_counter()
+     exact_evaluations = _exact_evaluations(
+         config=config,
+         pools=pools,
+@@ -250,6 +254,7 @@ def run_instance(
+     )
+     exact_front = _pareto_archive(exact_evaluations, len(exact_evaluations))
+     exact_choice = _choose_tchebycheff(exact_front, config.pareto_norm_eps)
++    exact_solve_time_sec = time.perf_counter() - exact_started
+     exact_profile_keys = {_evaluation_key(item) for item in exact_front}
+     approximate_profile_keys = {_evaluation_key(item) for item in approximate_front}
+     exact_objective_keys = {_objective_key(item) for item in exact_front}
+@@ -275,7 +280,12 @@ def run_instance(
+         "pareto_objective_recall": len(exact_objective_keys & approximate_objective_keys)
+         / max(len(exact_objective_keys), 1),
+         "hypervolume_gap": max(0.0, exact_hv - approximate_hv) / max(exact_hv, 1e-12),
++        # Q92/Q97 compact optimizer-quality metric: gap in the same normalized
++        # scalarized Tchebycheff objective used for the final profile choice.
++        "scalarized_objective_gap": max(0.0, approximate_distance - exact_distance),
+         "tchebycheff_regret": max(0.0, approximate_distance - exact_distance),
++        "bounded_pareto_solve_time_sec": approximate_solve_time_sec,
++        "exact_solver_solve_time_sec": exact_solve_time_sec,
+         "decision_profile_match": int(
+             _evaluation_key(approximate_choice) == _evaluation_key(exact_choice)
+         ),
+@@ -319,7 +329,10 @@ def main() -> None:
+         "mean_pareto_profile_recall": _mean(rows, "pareto_profile_recall"),
+         "mean_pareto_objective_recall": _mean(rows, "pareto_objective_recall"),
+         "mean_hypervolume_gap": _mean(rows, "hypervolume_gap"),
++        "mean_scalarized_objective_gap": _mean(rows, "scalarized_objective_gap"),
+         "mean_tchebycheff_regret": _mean(rows, "tchebycheff_regret"),
++        "mean_bounded_pareto_solve_time_sec": _mean(rows, "bounded_pareto_solve_time_sec"),
++        "mean_exact_solver_solve_time_sec": _mean(rows, "exact_solver_solve_time_sec"),
+         "decision_profile_match_rate": _mean(rows, "decision_profile_match"),
+         "decision_objective_match_rate": _mean(rows, "decision_objective_match"),
+         "mean_evaluation_reduction_ratio": _mean(rows, "evaluation_reduction_ratio"),
+diff --git a/experiments/aggregate_multiseed_results.py b/experiments/aggregate_multiseed_results.py
+index d82c0b8..5cbd55d 100644
+--- a/experiments/aggregate_multiseed_results.py
++++ b/experiments/aggregate_multiseed_results.py
+@@ -24,6 +24,10 @@ if str(ROOT) not in sys.path:
+ from dynfed.version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
+ 
+ POLICY_LABELS = {
++    "fixed_mode_fixed_privacy": "Fixed Mode + Fixed Privacy",
++    "dynamic_mode_fixed_privacy": "Dynamic Mode + Fixed Privacy",
++    "fixed_mode_dynamic_privacy": "Fixed Mode + Dynamic Privacy",
++    "full_dynfl": "Full DynFL",
+     "ours": "Ours",
+     "individual_optimal": "Individual Optimal",
+     "no_protection": "No Protection",
+@@ -78,6 +82,8 @@ SUMMARY_METRICS = (
+     "total_training_wall_time_sec",
+     "end_to_end_wall_time_sec",
+     "wall_time_sec",
++    "feasible_participation_ratio",
++    "deadline_satisfaction_ratio",
+ )
+ 
+ 
+@@ -101,14 +107,10 @@ def parse_args() -> argparse.Namespace:
+         "--policies",
+         nargs="+",
+         default=[
+-            "ours",
+-            "individual_optimal",
+-            "no_protection",
+-            "random",
+-            "fixed_fedavg",
+-            "fixed_splitfed",
+-            "fixed_hfl",
+-            "nsga2",
++            "fixed_mode_fixed_privacy",
++            "dynamic_mode_fixed_privacy",
++            "fixed_mode_dynamic_privacy",
++            "full_dynfl",
+         ],
+     )
+     parser.add_argument("--dataset", default="cifar10")
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 486fd9d..b3bfded 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -2042,3 +2042,33 @@ def test_deadline_satisfaction_ratio_is_none_without_fast_response_clients() ->
+         {"fast_response_client": False, "deadline_satisfied": None},
+     ]
+     assert _deadline_satisfaction_ratio(rows) is None
++
++
++def test_formal_configs_use_three_frozen_random_seeds() -> None:
++    root = Path(__file__).resolve().parents[1]
++    for name in ("paper_v30_cifar10_resnet18.json", "paper_v30_fmnist_lenet5.json"):
++        config = json.loads((root / "configs" / name).read_text(encoding="utf-8"))
++        assert config["seeds"] == [40, 42, 44]
++
++
++def test_exact_solver_validation_reports_gap_and_both_solve_times() -> None:
++    from experiments.validate_pareto_search import run_instance
++
++    row = run_instance(
++        num_clients=2, seed=40, candidates_per_client=4, archive_size=8, max_iters=5
++    )
++    assert row["scalarized_objective_gap"] >= 0.0
++    assert row["bounded_pareto_solve_time_sec"] >= 0.0
++    assert row["exact_solver_solve_time_sec"] >= 0.0
++
++
++def test_multiseed_aggregator_defaults_to_final_four_and_mean_std_metrics() -> None:
++    root = Path(__file__).resolve().parents[1]
++    text = (root / "experiments" / "aggregate_multiseed_results.py").read_text(encoding="utf-8")
++    for policy in (
++        "fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy",
++        "fixed_mode_dynamic_privacy", "full_dynfl",
++    ):
++        assert policy in text
++    assert 'row[f"{metric}_mean"]' in text
++    assert 'row[f"{metric}_std"]' in text
