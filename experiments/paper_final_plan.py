@@ -14,6 +14,9 @@ FINAL_POLICIES = (
 FORMAL_SEEDS = (40, 42, 44)
 STRATEGY_PERIOD_VALUES = (1, 5, 10)
 RESOURCE_SCENARIOS = ("communication", "compute")
+AUXILIARY_DATASET = "fmnist"
+AUXILIARY_MODEL = "lenet5"  # lightweight CNN auxiliary validation (Q84/Q85)
+
 DATA_DISTRIBUTIONS = (
     ("iid", "iid", None),
     ("dirichlet_0p5", "dirichlet", 0.5),
@@ -39,6 +42,8 @@ def validate_final_plan() -> None:
     assert len(FORMAL_SEEDS) == 3
     assert STRATEGY_PERIOD_VALUES == (1, 5, 10)
     assert RESOURCE_SCENARIOS == ("communication", "compute")
+    assert AUXILIARY_DATASET == "fmnist"
+    assert AUXILIARY_MODEL == "lenet5"
     assert DATA_DISTRIBUTIONS == (
         ("iid", "iid", None),
         ("dirichlet_0p5", "dirichlet", 0.5),

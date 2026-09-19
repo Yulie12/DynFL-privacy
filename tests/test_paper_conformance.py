@@ -2234,3 +2234,35 @@ def test_dynamic_resource_aggregation_writes_stage_mode_selection_output() -> No
     assert '"normal_before", "constrained", "normal_after"' in source
     for mode in ("LIE", "LIC", "LIIE", "LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"):
         assert mode in source
+
+
+def test_final_plan_freezes_fmnist_lightweight_cnn_as_auxiliary_validation() -> None:
+    from experiments.paper_final_plan import AUXILIARY_DATASET, AUXILIARY_MODEL
+
+    assert AUXILIARY_DATASET == "fmnist"
+    assert AUXILIARY_MODEL == "lenet5"
+
+
+def test_final_suite_builds_fmnist_auxiliary_case_without_expanding_main_figures() -> None:
+    from experiments.run_final_paper_suite import DEFAULT_AUX_CONFIG, build_final_cases
+    from experiments.run_paper_config import DEFAULT_CONFIG
+
+    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    aux = json.loads(DEFAULT_AUX_CONFIG.read_text(encoding="utf-8"))
+    cases = build_final_cases(base, studies=["auxiliary"], fast_config=None, aux_config=aux)
+    assert len(cases) == 1
+    case = cases[0]
+    assert (case["study"], case["setting"]) == ("auxiliary", "fmnist_lightweight_cnn")
+    assert case["config"]["training"]["dataset"] == "fmnist"
+    assert case["config"]["training"]["model"] == "lenet5"
+    assert case["config"]["output_root"] == "out/paper_v31_final/aux_fmnist"
+    assert case["policies"] == list(aux["policies"])
+
+
+def test_final_suite_rejects_non_fmnist_auxiliary_config() -> None:
+    from experiments.run_final_paper_suite import build_final_cases
+    from experiments.run_paper_config import DEFAULT_CONFIG
+
+    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    with pytest.raises(ValueError, match="dataset=fmnist and model=lenet5"):
+        build_final_cases(base, studies=["auxiliary"], fast_config=None, aux_config=base)

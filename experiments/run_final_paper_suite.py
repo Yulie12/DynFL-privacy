@@ -22,8 +22,9 @@ from experiments.paper_final_plan import DATA_DISTRIBUTIONS, FORMAL_SEEDS, RESOU
 from experiments.run_paper_config import DEFAULT_CONFIG, build_command, validate_config
 
 DEFAULT_FAST_CONFIG = ROOT / "configs" / "paper_v31_cifar10_resnet18_fast_response.json"
+DEFAULT_AUX_CONFIG = ROOT / "configs" / "paper_v30_fmnist_lenet5.json"
 
-FINAL_STUDIES = ("main", "dynamic_resources", "privacy", "fast_response", "optimizer", "sp")
+FINAL_STUDIES = ("main", "dynamic_resources", "privacy", "fast_response", "optimizer", "sp", "auxiliary")
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,6 +36,10 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_FAST_CONFIG,
         help=("Formal fast-response config. Defaults to the frozen Fig.4 contract: "
               "clients 0-19 (20%% of 100 clients), each with a 20 s hard deadline."),
+    )
+    parser.add_argument(
+        "--aux-config", type=Path, default=DEFAULT_AUX_CONFIG,
+        help="Q84/Q85 auxiliary Fashion-MNIST + lightweight-CNN formal config.",
     )
     parser.add_argument("--studies", nargs="+", choices=FINAL_STUDIES, default=list(FINAL_STUDIES))
     parser.add_argument("--seeds", type=int, nargs="+")
@@ -61,6 +66,7 @@ def build_final_cases(
     *,
     studies: list[str],
     fast_config: dict[str, Any] | None,
+    aux_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     if "main" in studies:
@@ -112,6 +118,18 @@ def build_final_cases(
             cases.append({
                 "study": "sp", "setting": str(period), "config": config, "policies": ["full_dynfl"],
             })
+    if "auxiliary" in studies:
+        if aux_config is None:
+            raise ValueError("auxiliary requires --aux-config with Fashion-MNIST lightweight-CNN settings")
+        training = aux_config.get("training", {})
+        if training.get("dataset") != "fmnist" or training.get("model") != "lenet5":
+            raise ValueError("--aux-config must use dataset=fmnist and model=lenet5")
+        aux = copy.deepcopy(aux_config)
+        aux["output_root"] = "out/paper_v31_final/aux_fmnist"
+        cases.append({
+            "study": "auxiliary", "setting": "fmnist_lightweight_cnn",
+            "config": aux, "policies": list(aux["policies"]),
+        })
     return cases
 
 
@@ -129,7 +147,8 @@ def main() -> None:
     seeds = list(dict.fromkeys(args.seeds or FORMAL_SEEDS))
     base = _load(args.config)
     fast = _load(args.fast_config) if "fast_response" in studies else None
-    cases = build_final_cases(base, studies=studies, fast_config=fast)
+    aux = _load(args.aux_config) if "auxiliary" in studies else None
+    cases = build_final_cases(base, studies=studies, fast_config=fast, aux_config=aux)
     rounds = int(args.rounds or base["training"]["rounds"])
     manifest: list[dict[str, Any]] = []
 

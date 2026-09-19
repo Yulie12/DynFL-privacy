@@ -1,0 +1,123 @@
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' step20_base/DynFL-privacy-ytt/experiments/paper_final_plan.py step20_mod/experiments/paper_final_plan.py
+--- step20_base/DynFL-privacy-ytt/experiments/paper_final_plan.py	2026-09-19 11:28:56.000000000 +0000
++++ step20_mod/experiments/paper_final_plan.py	2026-09-19 11:35:36.310387478 +0000
+@@ -14,6 +14,9 @@
+ FORMAL_SEEDS = (40, 42, 44)
+ STRATEGY_PERIOD_VALUES = (1, 5, 10)
+ RESOURCE_SCENARIOS = ("communication", "compute")
++AUXILIARY_DATASET = "fmnist"
++AUXILIARY_MODEL = "lenet5"  # lightweight CNN auxiliary validation (Q84/Q85)
++
+ DATA_DISTRIBUTIONS = (
+     ("iid", "iid", None),
+     ("dirichlet_0p5", "dirichlet", 0.5),
+@@ -39,6 +42,8 @@
+     assert len(FORMAL_SEEDS) == 3
+     assert STRATEGY_PERIOD_VALUES == (1, 5, 10)
+     assert RESOURCE_SCENARIOS == ("communication", "compute")
++    assert AUXILIARY_DATASET == "fmnist"
++    assert AUXILIARY_MODEL == "lenet5"
+     assert DATA_DISTRIBUTIONS == (
+         ("iid", "iid", None),
+         ("dirichlet_0p5", "dirichlet", 0.5),
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' step20_base/DynFL-privacy-ytt/experiments/run_final_paper_suite.py step20_mod/experiments/run_final_paper_suite.py
+--- step20_base/DynFL-privacy-ytt/experiments/run_final_paper_suite.py	2026-09-19 11:28:56.000000000 +0000
++++ step20_mod/experiments/run_final_paper_suite.py	2026-09-19 11:35:36.308168771 +0000
+@@ -22,8 +22,9 @@
+ from experiments.run_paper_config import DEFAULT_CONFIG, build_command, validate_config
+ 
+ DEFAULT_FAST_CONFIG = ROOT / "configs" / "paper_v31_cifar10_resnet18_fast_response.json"
++DEFAULT_AUX_CONFIG = ROOT / "configs" / "paper_v30_fmnist_lenet5.json"
+ 
+-FINAL_STUDIES = ("main", "dynamic_resources", "privacy", "fast_response", "optimizer", "sp")
++FINAL_STUDIES = ("main", "dynamic_resources", "privacy", "fast_response", "optimizer", "sp", "auxiliary")
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+@@ -36,6 +37,10 @@
+         help=("Formal fast-response config. Defaults to the frozen Fig.4 contract: "
+               "clients 0-19 (20%% of 100 clients), each with a 20 s hard deadline."),
+     )
++    parser.add_argument(
++        "--aux-config", type=Path, default=DEFAULT_AUX_CONFIG,
++        help="Q84/Q85 auxiliary Fashion-MNIST + lightweight-CNN formal config.",
++    )
+     parser.add_argument("--studies", nargs="+", choices=FINAL_STUDIES, default=list(FINAL_STUDIES))
+     parser.add_argument("--seeds", type=int, nargs="+")
+     parser.add_argument("--rounds", type=int)
+@@ -61,6 +66,7 @@
+     *,
+     studies: list[str],
+     fast_config: dict[str, Any] | None,
++    aux_config: dict[str, Any] | None = None,
+ ) -> list[dict[str, Any]]:
+     cases: list[dict[str, Any]] = []
+     if "main" in studies:
+@@ -112,6 +118,18 @@
+             cases.append({
+                 "study": "sp", "setting": str(period), "config": config, "policies": ["full_dynfl"],
+             })
++    if "auxiliary" in studies:
++        if aux_config is None:
++            raise ValueError("auxiliary requires --aux-config with Fashion-MNIST lightweight-CNN settings")
++        training = aux_config.get("training", {})
++        if training.get("dataset") != "fmnist" or training.get("model") != "lenet5":
++            raise ValueError("--aux-config must use dataset=fmnist and model=lenet5")
++        aux = copy.deepcopy(aux_config)
++        aux["output_root"] = "out/paper_v31_final/aux_fmnist"
++        cases.append({
++            "study": "auxiliary", "setting": "fmnist_lightweight_cnn",
++            "config": aux, "policies": list(aux["policies"]),
++        })
+     return cases
+ 
+ 
+@@ -129,7 +147,8 @@
+     seeds = list(dict.fromkeys(args.seeds or FORMAL_SEEDS))
+     base = _load(args.config)
+     fast = _load(args.fast_config) if "fast_response" in studies else None
+-    cases = build_final_cases(base, studies=studies, fast_config=fast)
++    aux = _load(args.aux_config) if "auxiliary" in studies else None
++    cases = build_final_cases(base, studies=studies, fast_config=fast, aux_config=aux)
+     rounds = int(args.rounds or base["training"]["rounds"])
+     manifest: list[dict[str, Any]] = []
+ 
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' step20_base/DynFL-privacy-ytt/tests/test_paper_conformance.py step20_mod/tests/test_paper_conformance.py
+--- step20_base/DynFL-privacy-ytt/tests/test_paper_conformance.py	2026-09-19 11:28:56.000000000 +0000
++++ step20_mod/tests/test_paper_conformance.py	2026-09-19 11:35:36.310548842 +0000
+@@ -2234,3 +2234,35 @@
+     assert '"normal_before", "constrained", "normal_after"' in source
+     for mode in ("LIE", "LIC", "LIIE", "LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"):
+         assert mode in source
++
++
++def test_final_plan_freezes_fmnist_lightweight_cnn_as_auxiliary_validation() -> None:
++    from experiments.paper_final_plan import AUXILIARY_DATASET, AUXILIARY_MODEL
++
++    assert AUXILIARY_DATASET == "fmnist"
++    assert AUXILIARY_MODEL == "lenet5"
++
++
++def test_final_suite_builds_fmnist_auxiliary_case_without_expanding_main_figures() -> None:
++    from experiments.run_final_paper_suite import DEFAULT_AUX_CONFIG, build_final_cases
++    from experiments.run_paper_config import DEFAULT_CONFIG
++
++    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
++    aux = json.loads(DEFAULT_AUX_CONFIG.read_text(encoding="utf-8"))
++    cases = build_final_cases(base, studies=["auxiliary"], fast_config=None, aux_config=aux)
++    assert len(cases) == 1
++    case = cases[0]
++    assert (case["study"], case["setting"]) == ("auxiliary", "fmnist_lightweight_cnn")
++    assert case["config"]["training"]["dataset"] == "fmnist"
++    assert case["config"]["training"]["model"] == "lenet5"
++    assert case["config"]["output_root"] == "out/paper_v31_final/aux_fmnist"
++    assert case["policies"] == list(aux["policies"])
++
++
++def test_final_suite_rejects_non_fmnist_auxiliary_config() -> None:
++    from experiments.run_final_paper_suite import build_final_cases
++    from experiments.run_paper_config import DEFAULT_CONFIG
++
++    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
++    with pytest.raises(ValueError, match="dataset=fmnist and model=lenet5"):
++        build_final_cases(base, studies=["auxiliary"], fast_config=None, aux_config=base)
