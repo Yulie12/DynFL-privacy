@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--skip-completed", action="store_true",
+        help=("Skip an invocation only when its output root already contains a completed run "
+              "with the exact seed, round horizon, and policy set. This makes suite restarts "
+              "safe at case/seed boundaries without treating partial runs as complete."),
+    )
     return parser.parse_args()
 
 
@@ -133,6 +139,38 @@ def build_final_cases(
     return cases
 
 
+
+def find_completed_run(output_root: str | Path, *, seed: int, rounds: int, policies: list[str]) -> Path | None:
+    """Return a completed exact-match run, never a smoke/partial/mismatched run."""
+    root = ROOT / Path(output_root)
+    if not root.exists():
+        return None
+    expected_policies = list(policies)
+    for run_dir in sorted((path for path in root.iterdir() if path.is_dir()), reverse=True):
+        config_path = run_dir / "config.json"
+        status_path = run_dir / "live_status.json"
+        summary_path = run_dir / "summary_table.csv"
+        if not (config_path.is_file() and status_path.is_file() and summary_path.is_file()):
+            continue
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        selection = config.get("selection", {})
+        if int(selection.get("seed", -1)) != int(seed):
+            continue
+        if int(selection.get("rounds", -1)) != int(rounds):
+            continue
+        if list(config.get("policies", [])) != expected_policies:
+            continue
+        if status.get("status") != "completed":
+            continue
+        if int(status.get("round", -1)) != int(rounds):
+            continue
+        return run_dir
+    return None
+
 def _optimizer_command(seeds: list[int]) -> list[str]:
     return [
         sys.executable, str(ROOT / "experiments" / "validate_pareto_search.py"),
@@ -163,7 +201,16 @@ def main() -> None:
                 "rounds": rounds, "policies": list(case["policies"]),
                 "output_root": case["config"]["output_root"],
             })
-            if not args.dry_run:
+            completed_run = None
+            if args.skip_completed:
+                completed_run = find_completed_run(
+                    case["config"]["output_root"], seed=seed, rounds=rounds, policies=list(case["policies"]),
+                )
+            if completed_run is not None:
+                print(f"[skip completed] {completed_run}", flush=True)
+                manifest[-1]["status"] = "skipped_completed"
+                manifest[-1]["existing_run"] = str(completed_run)
+            elif not args.dry_run:
                 subprocess.run(command, cwd=ROOT, check=True)
 
     if "optimizer" in studies:

@@ -2521,3 +2521,42 @@ def test_step27_preflight_checks_cuda_real_he_and_never_trains() -> None:
     assert "run_fmnist_lenet5.py" not in source
     assert "Dataset loaders may download CIFAR-10/Fashion-MNIST on first use." in source
     assert "pretrained ResNet-18" in source
+
+
+def test_step30_suite_restart_skips_only_exact_completed_runs(tmp_path: Path, monkeypatch) -> None:
+    import experiments.run_final_paper_suite as suite
+
+    monkeypatch.setattr(suite, "ROOT", tmp_path)
+    output_root = "out/paper_v31_final/fig1_main/iid"
+    root = tmp_path / output_root
+
+    def write_run(name: str, *, seed: int, rounds: int, policies: list[str], status: str, status_round: int) -> Path:
+        run = root / name
+        run.mkdir(parents=True)
+        (run / "config.json").write_text(json.dumps({
+            "selection": {"seed": seed, "rounds": rounds}, "policies": policies,
+        }), encoding="utf-8")
+        (run / "live_status.json").write_text(json.dumps({
+            "status": status, "round": status_round,
+        }), encoding="utf-8")
+        (run / "summary_table.csv").write_text("policy,rounds\n", encoding="utf-8")
+        return run
+
+    policies = ["full_dynfl"]
+    write_run("2026-01-01_smoke", seed=40, rounds=1, policies=policies, status="completed", status_round=1)
+    write_run("2026-01-02_partial", seed=40, rounds=100, policies=policies, status="paused", status_round=30)
+    exact = write_run("2026-01-03_complete", seed=40, rounds=100, policies=policies, status="completed", status_round=100)
+
+    assert suite.find_completed_run(output_root, seed=40, rounds=100, policies=policies) == exact
+    assert suite.find_completed_run(output_root, seed=42, rounds=100, policies=policies) is None
+    assert suite.find_completed_run(output_root, seed=40, rounds=1, policies=policies).name == "2026-01-01_smoke"
+
+
+def test_step30_skip_completed_is_opt_in_and_does_not_fake_partial_completion() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "run_final_paper_suite.py").read_text(encoding="utf-8")
+    assert '"--skip-completed"' in source
+    assert 'status.get("status") != "completed"' in source
+    assert 'int(status.get("round", -1)) != int(rounds)' in source
+    assert 'summary_table.csv' in source
+    assert '"skipped_completed"' in source

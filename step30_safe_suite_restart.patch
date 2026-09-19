@@ -1,0 +1,117 @@
+--- a/experiments/run_final_paper_suite.py
++++ b/experiments/run_final_paper_suite.py
+@@ -45,6 +45,12 @@
+     parser.add_argument("--seeds", type=int, nargs="+")
+     parser.add_argument("--rounds", type=int)
+     parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument(
++        "--skip-completed", action="store_true",
++        help=("Skip an invocation only when its output root already contains a completed run "
++              "with the exact seed, round horizon, and policy set. This makes suite restarts "
++              "safe at case/seed boundaries without treating partial runs as complete."),
++    )
+     return parser.parse_args()
+ 
+ 
+@@ -133,6 +139,38 @@
+     return cases
+ 
+ 
++
++def find_completed_run(output_root: str | Path, *, seed: int, rounds: int, policies: list[str]) -> Path | None:
++    """Return a completed exact-match run, never a smoke/partial/mismatched run."""
++    root = ROOT / Path(output_root)
++    if not root.exists():
++        return None
++    expected_policies = list(policies)
++    for run_dir in sorted((path for path in root.iterdir() if path.is_dir()), reverse=True):
++        config_path = run_dir / "config.json"
++        status_path = run_dir / "live_status.json"
++        summary_path = run_dir / "summary_table.csv"
++        if not (config_path.is_file() and status_path.is_file() and summary_path.is_file()):
++            continue
++        try:
++            config = json.loads(config_path.read_text(encoding="utf-8"))
++            status = json.loads(status_path.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError):
++            continue
++        selection = config.get("selection", {})
++        if int(selection.get("seed", -1)) != int(seed):
++            continue
++        if int(selection.get("rounds", -1)) != int(rounds):
++            continue
++        if list(config.get("policies", [])) != expected_policies:
++            continue
++        if status.get("status") != "completed":
++            continue
++        if int(status.get("round", -1)) != int(rounds):
++            continue
++        return run_dir
++    return None
++
+ def _optimizer_command(seeds: list[int]) -> list[str]:
+     return [
+         sys.executable, str(ROOT / "experiments" / "validate_pareto_search.py"),
+@@ -163,7 +201,16 @@
+                 "rounds": rounds, "policies": list(case["policies"]),
+                 "output_root": case["config"]["output_root"],
+             })
+-            if not args.dry_run:
++            completed_run = None
++            if args.skip_completed:
++                completed_run = find_completed_run(
++                    case["config"]["output_root"], seed=seed, rounds=rounds, policies=list(case["policies"]),
++                )
++            if completed_run is not None:
++                print(f"[skip completed] {completed_run}", flush=True)
++                manifest[-1]["status"] = "skipped_completed"
++                manifest[-1]["existing_run"] = str(completed_run)
++            elif not args.dry_run:
+                 subprocess.run(command, cwd=ROOT, check=True)
+ 
+     if "optimizer" in studies:
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -2521,3 +2521,42 @@
+     assert "run_fmnist_lenet5.py" not in source
+     assert "Dataset loaders may download CIFAR-10/Fashion-MNIST on first use." in source
+     assert "pretrained ResNet-18" in source
++
++
++def test_step30_suite_restart_skips_only_exact_completed_runs(tmp_path: Path, monkeypatch) -> None:
++    import experiments.run_final_paper_suite as suite
++
++    monkeypatch.setattr(suite, "ROOT", tmp_path)
++    output_root = "out/paper_v31_final/fig1_main/iid"
++    root = tmp_path / output_root
++
++    def write_run(name: str, *, seed: int, rounds: int, policies: list[str], status: str, status_round: int) -> Path:
++        run = root / name
++        run.mkdir(parents=True)
++        (run / "config.json").write_text(json.dumps({
++            "selection": {"seed": seed, "rounds": rounds}, "policies": policies,
++        }), encoding="utf-8")
++        (run / "live_status.json").write_text(json.dumps({
++            "status": status, "round": status_round,
++        }), encoding="utf-8")
++        (run / "summary_table.csv").write_text("policy,rounds\n", encoding="utf-8")
++        return run
++
++    policies = ["full_dynfl"]
++    write_run("2026-01-01_smoke", seed=40, rounds=1, policies=policies, status="completed", status_round=1)
++    write_run("2026-01-02_partial", seed=40, rounds=100, policies=policies, status="paused", status_round=30)
++    exact = write_run("2026-01-03_complete", seed=40, rounds=100, policies=policies, status="completed", status_round=100)
++
++    assert suite.find_completed_run(output_root, seed=40, rounds=100, policies=policies) == exact
++    assert suite.find_completed_run(output_root, seed=42, rounds=100, policies=policies) is None
++    assert suite.find_completed_run(output_root, seed=40, rounds=1, policies=policies).name == "2026-01-01_smoke"
++
++
++def test_step30_skip_completed_is_opt_in_and_does_not_fake_partial_completion() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "run_final_paper_suite.py").read_text(encoding="utf-8")
++    assert '"--skip-completed"' in source
++    assert 'status.get("status") != "completed"' in source
++    assert 'int(status.get("round", -1)) != int(rounds)' in source
++    assert 'summary_table.csv' in source
++    assert '"skipped_completed"' in source
