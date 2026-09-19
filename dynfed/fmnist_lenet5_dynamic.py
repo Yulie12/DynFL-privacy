@@ -1432,6 +1432,19 @@ def _run_lenet5_policy(
                     and not ledger.can_apply(projection)):
                 raise ValueError("Selected DP release exceeds the recorded event budget")
             rem = ledger.remaining_budget
+            has_feasible_candidate = any(
+                item.mode != "SKIP" and item.feasible for item in candidates
+            )
+            fast_response_deadline = dict(effective_selection.fast_client_deadlines).get(client_id)
+            deadline_satisfied = (
+                None
+                if fast_response_deadline is None
+                else bool(
+                    candidate.mode != "SKIP"
+                    and candidate.feasible
+                    and candidate.time <= float(fast_response_deadline) + 1e-12
+                )
+            )
             row = {
                     "policy": policy,
                     "round": round_idx,
@@ -1473,6 +1486,10 @@ def _run_lenet5_policy(
                     "feasible_privacy": candidate.feasible_privacy,
                     "feasible_risk": candidate.feasible_risk,
                     "feasible_time": candidate.feasible_time,
+                    "has_feasible_candidate": has_feasible_candidate,
+                    "fast_response_client": fast_response_deadline is not None,
+                    "fast_response_deadline": fast_response_deadline,
+                    "deadline_satisfied": deadline_satisfied,
                     "omega_feature_clip_excess_sq": getattr(
                         candidate,
                         "omega_feature_clip_excess_sq",
@@ -5799,6 +5816,11 @@ def _summarize_lenet5_policy(
             "combined_epsilon": None,
         },
         "feasible_rate": _list_mean(float(row["feasible_resource"]) for row in decision_rows),
+        "feasible_participation_ratio": _list_mean(
+            float(row.get("has_feasible_candidate", row.get("feasible", False)))
+            for row in decision_rows
+        ),
+        "deadline_satisfaction_ratio": _deadline_satisfaction_ratio(decision_rows),
         "all_constraint_feasible_rate": _list_mean(float(row["feasible"]) for row in decision_rows),
         "resource_feasible_rate": _list_mean(float(row["feasible_resource"]) for row in decision_rows),
         "memory_feasible_rate": _list_mean(float(row["feasible_memory"]) for row in decision_rows),
@@ -5811,6 +5833,13 @@ def _summarize_lenet5_policy(
         "object_mechanism_distribution": _object_mechanism_distribution(row["mechanisms"] for row in decision_rows),
         "output_dir": str(output_dir),
     }
+
+
+def _deadline_satisfaction_ratio(decision_rows: list[dict[str, Any]]) -> float | None:
+    fast_rows = [row for row in decision_rows if bool(row.get("fast_response_client", False))]
+    if not fast_rows:
+        return None
+    return _list_mean(float(bool(row.get("deadline_satisfied", False))) for row in fast_rows)
 
 
 def _list_mean(values: Any) -> float:

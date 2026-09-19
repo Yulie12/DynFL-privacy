@@ -34,6 +34,7 @@ from dynfed.fmnist_lenet5_dynamic import (
     _edge_normalized_cloud_weights,
     _weighted_state_difference_norm,
     _partition_clients_lenet5,
+    _deadline_satisfaction_ratio,
 )
 from dynfed.nodes import ClientProfile
 from dynfed.selection import (
@@ -2024,3 +2025,20 @@ def test_paper_runner_forwards_staged_resource_scenario() -> None:
     assert command[command.index("--constrained-end-fraction") + 1] == "0.75"
     assert command[command.index("--communication-constrained-multiplier") + 1] == "0.4"
     assert command[command.index("--compute-constrained-multiplier") + 1] == "2.2"
+
+
+def test_deadline_satisfaction_ratio_counts_skip_as_miss_and_ignores_ordinary_clients() -> None:
+    rows = [
+        {"fast_response_client": True, "deadline_satisfied": True},
+        {"fast_response_client": True, "deadline_satisfied": False},
+        {"fast_response_client": False, "deadline_satisfied": None},
+    ]
+    assert _deadline_satisfaction_ratio(rows) == pytest.approx(0.5)
+
+
+def test_deadline_satisfaction_ratio_is_none_without_fast_response_clients() -> None:
+    rows = [
+        {"fast_response_client": False, "deadline_satisfied": None},
+        {"fast_response_client": False, "deadline_satisfied": None},
+    ]
+    assert _deadline_satisfaction_ratio(rows) is None
