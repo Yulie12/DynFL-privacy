@@ -1,0 +1,116 @@
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=.pytest_cache' a/experiments/aggregate_multiseed_results.py b/experiments/aggregate_multiseed_results.py
+--- a/experiments/aggregate_multiseed_results.py	2026-09-19 11:22:44.000000000 +0000
++++ b/experiments/aggregate_multiseed_results.py	2026-09-19 11:26:44.232815571 +0000
+@@ -196,6 +196,15 @@
+         )
+         write_csv(output_dir / "reconfiguration_statistics.csv", reconfiguration_rows)
+         write_csv(output_dir / "reconfiguration_summary.csv", reconfiguration_summary)
++        if any(
++            source.config["selection"].get("resource_scenario", "none") in {"communication", "compute"}
++            for source in sources.values()
++            if source.policy == reconfiguration_policy
++        ):
++            stage_rows = aggregate_stage_mode_selection(
++                sources, seeds, rounds=args.rounds, policy=reconfiguration_policy
++            )
++            write_csv(output_dir / "stage_mode_selection.csv", stage_rows)
+         reconfiguration_figure = figure_dir / "reconfiguration_trace.png"
+         plot_reconfiguration(reconfiguration_rows, reconfiguration_figure)
+         if args.paper_reconfiguration_figure:
+@@ -697,6 +706,69 @@
+     return rows, summary
+ 
+ 
++
++def resource_stage(round_index: int, rounds: int, start_fraction: float, end_fraction: float) -> str:
++    """Map a zero-based round to the frozen Normal -> Constrained -> Normal stage."""
++    progress = float(round_index) / max(1, int(rounds))
++    if progress < float(start_fraction):
++        return "normal_before"
++    if progress < float(end_fraction):
++        return "constrained"
++    return "normal_after"
++
++
++def aggregate_stage_mode_selection(
++    sources: dict[tuple[int, str], SourceRun],
++    seeds: list[int],
++    *,
++    rounds: int,
++    policy: str = "full_dynfl",
++) -> list[dict[str, Any]]:
++    """Q95: summarize Mode Selection Ratio in each resource stage across seeds."""
++    stage_order = ("normal_before", "constrained", "normal_after")
++    per_seed: dict[int, dict[str, dict[str, float]]] = {}
++    scenario: str | None = None
++    for seed in seeds:
++        source = sources[(seed, policy)]
++        selection = source.config["selection"]
++        seed_scenario = str(selection.get("resource_scenario", "none"))
++        if seed_scenario not in {"communication", "compute"}:
++            raise ValueError("stage-wise Mode Selection Ratio requires a formal dynamic resource scenario")
++        if scenario is None:
++            scenario = seed_scenario
++        elif seed_scenario != scenario:
++            raise ValueError("cannot aggregate mixed resource scenarios")
++        start = float(selection.get("constrained_start_fraction", 1.0 / 3.0))
++        end = float(selection.get("constrained_end_fraction", 2.0 / 3.0))
++        counts = {stage: {mode: 0 for mode in MODE_ORDER} for stage in stage_order}
++        totals = {stage: 0 for stage in stage_order}
++        for decision in read_csv(source.policy_dir / "client_decisions.csv"):
++            round_index = int(decision["round"])
++            if not 0 <= round_index < rounds:
++                continue
++            stage = resource_stage(round_index, rounds, start, end)
++            mode = decision["mode"]
++            totals[stage] += 1
++            if mode in counts[stage]:
++                counts[stage][mode] += 1
++        per_seed[seed] = {
++            stage: {
++                mode: counts[stage][mode] / max(1, totals[stage])
++                for mode in MODE_ORDER
++            }
++            for stage in stage_order
++        }
++
++    result: list[dict[str, Any]] = []
++    for stage in stage_order:
++        row: dict[str, Any] = {"scenario": scenario, "stage": stage, "n_seeds": len(seeds)}
++        for mode in MODE_ORDER:
++            values = [per_seed[seed][stage][mode] for seed in seeds]
++            row[f"mode_{mode}_mean"] = statistics.fmean(values)
++            row[f"mode_{mode}_std"] = sample_std(values)
++        result.append(row)
++    return result
++
+ def _add_mean_ci(row: dict[str, Any], name: str, values: list[float]) -> None:
+     mean = statistics.fmean(values)
+     half_width = confidence_half_width(values)
+diff -ruN '--exclude=.git' '--exclude=__pycache__' '--exclude=.pytest_cache' a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+--- a/tests/test_paper_conformance.py	2026-09-19 11:22:44.000000000 +0000
++++ b/tests/test_paper_conformance.py	2026-09-19 11:26:44.233002613 +0000
+@@ -2214,3 +2214,23 @@
+     # The runner always forwards an alpha value, but IID ignores it.  The two
+     # non-IID formal cases must preserve the frozen Q83 alpha values exactly.
+     assert observed == [("iid", "0.5"), ("dirichlet", "0.5"), ("dirichlet", "0.1")]
++
++
++def test_stage_mode_selection_uses_frozen_normal_constrained_normal_boundaries() -> None:
++    from experiments.aggregate_multiseed_results import resource_stage
++
++    assert [resource_stage(index, 9, 1.0 / 3.0, 2.0 / 3.0) for index in range(9)] == [
++        "normal_before", "normal_before", "normal_before",
++        "constrained", "constrained", "constrained",
++        "normal_after", "normal_after", "normal_after",
++    ]
++
++
++def test_dynamic_resource_aggregation_writes_stage_mode_selection_output() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "aggregate_multiseed_results.py").read_text(encoding="utf-8")
++    assert 'write_csv(output_dir / "stage_mode_selection.csv", stage_rows)' in source
++    assert 'source.config["selection"].get("resource_scenario", "none")' in source
++    assert '"normal_before", "constrained", "normal_after"' in source
++    for mode in ("LIE", "LIC", "LIIE", "LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"):
++        assert mode in source

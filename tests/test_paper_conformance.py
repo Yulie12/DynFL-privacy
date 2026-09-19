@@ -2214,3 +2214,23 @@ def test_final_main_heterogeneity_cases_forward_frozen_partition_cli() -> None:
     # The runner always forwards an alpha value, but IID ignores it.  The two
     # non-IID formal cases must preserve the frozen Q83 alpha values exactly.
     assert observed == [("iid", "0.5"), ("dirichlet", "0.5"), ("dirichlet", "0.1")]
+
+
+def test_stage_mode_selection_uses_frozen_normal_constrained_normal_boundaries() -> None:
+    from experiments.aggregate_multiseed_results import resource_stage
+
+    assert [resource_stage(index, 9, 1.0 / 3.0, 2.0 / 3.0) for index in range(9)] == [
+        "normal_before", "normal_before", "normal_before",
+        "constrained", "constrained", "constrained",
+        "normal_after", "normal_after", "normal_after",
+    ]
+
+
+def test_dynamic_resource_aggregation_writes_stage_mode_selection_output() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "aggregate_multiseed_results.py").read_text(encoding="utf-8")
+    assert 'write_csv(output_dir / "stage_mode_selection.csv", stage_rows)' in source
+    assert 'source.config["selection"].get("resource_scenario", "none")' in source
+    assert '"normal_before", "constrained", "normal_after"' in source
+    for mode in ("LIE", "LIC", "LIIE", "LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"):
+        assert mode in source

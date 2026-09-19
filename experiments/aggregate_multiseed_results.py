@@ -196,6 +196,15 @@ def main() -> None:
         )
         write_csv(output_dir / "reconfiguration_statistics.csv", reconfiguration_rows)
         write_csv(output_dir / "reconfiguration_summary.csv", reconfiguration_summary)
+        if any(
+            source.config["selection"].get("resource_scenario", "none") in {"communication", "compute"}
+            for source in sources.values()
+            if source.policy == reconfiguration_policy
+        ):
+            stage_rows = aggregate_stage_mode_selection(
+                sources, seeds, rounds=args.rounds, policy=reconfiguration_policy
+            )
+            write_csv(output_dir / "stage_mode_selection.csv", stage_rows)
         reconfiguration_figure = figure_dir / "reconfiguration_trace.png"
         plot_reconfiguration(reconfiguration_rows, reconfiguration_figure)
         if args.paper_reconfiguration_figure:
@@ -696,6 +705,69 @@ def aggregate_reconfiguration(
         )
     return rows, summary
 
+
+
+def resource_stage(round_index: int, rounds: int, start_fraction: float, end_fraction: float) -> str:
+    """Map a zero-based round to the frozen Normal -> Constrained -> Normal stage."""
+    progress = float(round_index) / max(1, int(rounds))
+    if progress < float(start_fraction):
+        return "normal_before"
+    if progress < float(end_fraction):
+        return "constrained"
+    return "normal_after"
+
+
+def aggregate_stage_mode_selection(
+    sources: dict[tuple[int, str], SourceRun],
+    seeds: list[int],
+    *,
+    rounds: int,
+    policy: str = "full_dynfl",
+) -> list[dict[str, Any]]:
+    """Q95: summarize Mode Selection Ratio in each resource stage across seeds."""
+    stage_order = ("normal_before", "constrained", "normal_after")
+    per_seed: dict[int, dict[str, dict[str, float]]] = {}
+    scenario: str | None = None
+    for seed in seeds:
+        source = sources[(seed, policy)]
+        selection = source.config["selection"]
+        seed_scenario = str(selection.get("resource_scenario", "none"))
+        if seed_scenario not in {"communication", "compute"}:
+            raise ValueError("stage-wise Mode Selection Ratio requires a formal dynamic resource scenario")
+        if scenario is None:
+            scenario = seed_scenario
+        elif seed_scenario != scenario:
+            raise ValueError("cannot aggregate mixed resource scenarios")
+        start = float(selection.get("constrained_start_fraction", 1.0 / 3.0))
+        end = float(selection.get("constrained_end_fraction", 2.0 / 3.0))
+        counts = {stage: {mode: 0 for mode in MODE_ORDER} for stage in stage_order}
+        totals = {stage: 0 for stage in stage_order}
+        for decision in read_csv(source.policy_dir / "client_decisions.csv"):
+            round_index = int(decision["round"])
+            if not 0 <= round_index < rounds:
+                continue
+            stage = resource_stage(round_index, rounds, start, end)
+            mode = decision["mode"]
+            totals[stage] += 1
+            if mode in counts[stage]:
+                counts[stage][mode] += 1
+        per_seed[seed] = {
+            stage: {
+                mode: counts[stage][mode] / max(1, totals[stage])
+                for mode in MODE_ORDER
+            }
+            for stage in stage_order
+        }
+
+    result: list[dict[str, Any]] = []
+    for stage in stage_order:
+        row: dict[str, Any] = {"scenario": scenario, "stage": stage, "n_seeds": len(seeds)}
+        for mode in MODE_ORDER:
+            values = [per_seed[seed][stage][mode] for seed in seeds]
+            row[f"mode_{mode}_mean"] = statistics.fmean(values)
+            row[f"mode_{mode}_std"] = sample_std(values)
+        result.append(row)
+    return result
 
 def _add_mean_ci(row: dict[str, Any], name: str, values: list[float]) -> None:
     mean = statistics.fmean(values)
