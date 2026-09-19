@@ -2489,3 +2489,35 @@ def test_step26_postprocess_is_aggregation_only_and_requires_complete_evidence()
     assert "run_final_paper_suite.py" not in source
     assert '"--require-complete"' in source
     assert "subprocess.run(command, cwd=ROOT, check=True)" in source
+
+
+def test_step27_preflight_reports_exact_frozen_suite_workload(monkeypatch, tmp_path: Path) -> None:
+    import experiments.preflight_final_paper_suite as preflight
+    from experiments.run_final_paper_suite import _load
+
+    root = Path(__file__).resolve().parents[1]
+    base = _load(root / "configs" / "paper_v30_cifar10_resnet18.json")
+    fast = _load(root / "configs" / "paper_v31_cifar10_resnet18_fast_response.json")
+    aux = _load(root / "configs" / "paper_v30_fmnist_lenet5.json")
+    monkeypatch.setattr(preflight, "_module_check", lambda name: {"ready": True, "version": "test"})
+    monkeypatch.setattr(preflight, "check_he_backend", lambda backend: type("Status", (), {"available": True, "detail": "test"})())
+    report = preflight.build_report(base, fast, aux, studies=list(preflight.FINAL_STUDIES), seeds=[40, 42, 44], output_root=tmp_path)
+    workload = report["workload"]
+    assert workload["formal_cases"] == 11
+    assert workload["training_invocations"] == 33
+    assert workload["policy_runs"] == 81
+    assert workload["configured_rounds_per_policy"] == 100
+    assert workload["policy_rounds"] == 8100
+    assert workload["optimizer_validation_invocations"] == 1
+
+
+def test_step27_preflight_checks_cuda_real_he_and_never_trains() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "preflight_final_paper_suite.py").read_text(encoding="utf-8")
+    assert "torch.cuda.is_available()" in source
+    assert "check_he_backend" in source
+    assert '"require_real_he"' in source
+    assert "subprocess.run" not in source
+    assert "run_fmnist_lenet5.py" not in source
+    assert "Dataset loaders may download CIFAR-10/Fashion-MNIST on first use." in source
+    assert "pretrained ResNet-18" in source
