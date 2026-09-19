@@ -516,3 +516,34 @@ def test_cloud_update_dp_is_removed_when_only_update_link_can_use_he() -> None:
 
     assert all_dp not in stable
     assert he_update in stable
+
+
+def test_infeasible_edge_cloud_coverage_uses_skip_fallback_instead_of_crashing() -> None:
+    edge = _candidate("LIIE", time=1.0)
+    cloud = _candidate("LIIC", time=2.0)
+    selected = [
+        (0, edge, [edge], 8.0),
+        (1, edge, [edge], 8.0),
+        (2, cloud, [cloud], 8.0),
+        (3, cloud, [cloud], 8.0),
+    ]
+    diagnostics: dict[str, object] = {}
+    config = SelectionConfig(
+        num_clients=4,
+        num_edges=2,
+        require_edge_cloud_coverage=True,
+        min_edge_cloud_fusion_ratio=0.5,
+    )
+
+    rewritten, evaluation = choose_global_pareto_profile(
+        config=config,
+        selected=selected,
+        client_samples={client_id: 1.0 for client_id in range(4)},
+        client_edges={0: 0, 1: 0, 2: 1, 3: 1},
+        diagnostics=diagnostics,
+    )
+
+    assert all(candidate.mode == "SKIP" for _client_id, candidate, _pool, _remaining in rewritten)
+    assert all(candidate.mode == "SKIP" for candidate in evaluation.profile.values())
+    assert diagnostics["coverage_infeasible_fallback"] is True
+    assert diagnostics["archive"] == ()

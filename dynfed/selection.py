@@ -1117,6 +1117,46 @@ def choose_global_pareto_profile(
             pool = _stable_cloud_candidate_pool(config, pool)
         pools[client_id] = pool
 
+    if config.require_edge_cloud_coverage and not _edge_cloud_coverage_possible_from_pools(
+        config, pools, client_samples, client_edges
+    ):
+        fallback_profile = {client_id: skipped_candidate() for client_id in pools}
+        fallback = _evaluate_profile(
+            config,
+            fallback_profile,
+            client_samples,
+            client_edges,
+            previous_choices,
+        )
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update(
+                {
+                    "archive": (),
+                    "chosen": fallback,
+                    "coverage_infeasible_fallback": True,
+                    "candidate_pool_sizes": {
+                        client_id: len(pool) for client_id, pool in pools.items()
+                    },
+                    "candidate_pool_sizes_before_stability": {
+                        client_id: len(pool)
+                        for client_id, pool in pools_before_stability.items()
+                    },
+                    "update_mechanism_counts_before_stability": (
+                        _candidate_update_mechanism_population(pools_before_stability)
+                    ),
+                    "update_mechanism_counts_after_stability": (
+                        _candidate_update_mechanism_population(pools)
+                    ),
+                    "search_method": search_method,
+                }
+            )
+        rewritten = [
+            (client_id, fallback_profile[client_id], by_client[client_id][1], by_client[client_id][2])
+            for client_id, _current, _candidates, _remaining in selected
+        ]
+        return rewritten, fallback
+
     seeds = (
         _initial_profiles(config, pools, previous_choices)
         if objective == "pareto"
@@ -1663,6 +1703,34 @@ def _nsga2_crowding(front: list[ProfileEvaluation]) -> dict[tuple, float]:
                 value(ordered[index + 1]) - value(ordered[index - 1])
             ) / span
     return distances
+
+
+def _edge_cloud_coverage_possible_from_pools(
+    config: SelectionConfig,
+    pools: dict[int, list[Candidate]],
+    client_samples: dict[int, float],
+    client_edges: dict[int, int],
+) -> bool:
+    """Return whether each represented edge can meet the hard cloud-coverage constraint."""
+    if not config.require_edge_cloud_coverage:
+        return True
+    target_ratio = min(max(float(config.min_edge_cloud_fusion_ratio), 0.0), 1.0)
+    edge_clients: dict[int, list[int]] = {}
+    for client_id in pools:
+        edge_clients.setdefault(int(client_edges[client_id]), []).append(client_id)
+    for clients in edge_clients.values():
+        total = sum(float(client_samples[client_id]) for client_id in clients)
+        cloud_capable = [
+            client_id
+            for client_id in clients
+            if any(_candidate_reaches_cloud(candidate) for candidate in pools[client_id])
+        ]
+        if not cloud_capable:
+            return False
+        maximum_covered = sum(float(client_samples[client_id]) for client_id in cloud_capable)
+        if maximum_covered + 1e-12 < target_ratio * total:
+            return False
+    return True
 
 
 def _profile_satisfies_edge_cloud_coverage(
