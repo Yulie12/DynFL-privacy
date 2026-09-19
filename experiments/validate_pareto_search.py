@@ -6,10 +6,16 @@ import itertools
 import json
 import math
 import random
+import statistics
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -305,6 +311,69 @@ def _mean(rows: list[dict[str, Any]], field: str) -> float:
     return sum(float(row[field]) for row in rows) / max(len(rows), 1)
 
 
+def _sample_std(rows: list[dict[str, Any]], field: str) -> float:
+    values = [float(row[field]) for row in rows]
+    return statistics.stdev(values) if len(values) > 1 else 0.0
+
+
+def summarize_optimizer_validation(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compact Q97 summary by small-scale client count (mean +/- std over seeds)."""
+    summary_rows: list[dict[str, Any]] = []
+    for num_clients in sorted({int(row["num_clients"]) for row in rows}):
+        group = [row for row in rows if int(row["num_clients"]) == num_clients]
+        item: dict[str, Any] = {
+            "num_clients": num_clients,
+            "n_seeds": len(group),
+        }
+        for metric in (
+            "scalarized_objective_gap",
+            "bounded_pareto_solve_time_sec",
+            "exact_solver_solve_time_sec",
+        ):
+            item[f"{metric}_mean"] = _mean(group, metric)
+            item[f"{metric}_std"] = _sample_std(group, metric)
+        summary_rows.append(item)
+    return summary_rows
+
+
+def plot_optimizer_validation(rows: list[dict[str, Any]], output: Path) -> None:
+    """Render the compact Q97 half of Fig.5; no Pareto-frontier plot."""
+    xs = [int(row["num_clients"]) for row in rows]
+    fig, axes = plt.subplots(2, 1, figsize=(3.45, 4.2), sharex=True)
+    axes[0].errorbar(
+        xs,
+        [float(row["scalarized_objective_gap_mean"]) for row in rows],
+        yerr=[float(row["scalarized_objective_gap_std"]) for row in rows],
+        marker="o",
+        linewidth=1.2,
+        capsize=2,
+    )
+    axes[0].set_ylabel("Objective gap")
+    for metric, label in (
+        ("bounded_pareto_solve_time_sec", "Bounded Pareto"),
+        ("exact_solver_solve_time_sec", "Exact Solver"),
+    ):
+        axes[1].errorbar(
+            xs,
+            [float(row[f"{metric}_mean"]) for row in rows],
+            yerr=[float(row[f"{metric}_std"]) for row in rows],
+            marker="o",
+            linewidth=1.2,
+            capsize=2,
+            label=label,
+        )
+    axes[1].set_xlabel("Number of clients")
+    axes[1].set_ylabel("Solve time (s)")
+    axes[1].legend(frameon=False, fontsize=7)
+    for axis in axes:
+        axis.grid(True, alpha=0.25, linewidth=0.55)
+        axis.tick_params(labelsize=7.4, pad=2)
+    fig.tight_layout(pad=0.55)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=300)
+    plt.close(fig)
+
+
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
@@ -324,6 +393,14 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+    optimizer_rows = summarize_optimizer_validation(rows)
+    with (output_dir / "optimizer_summary.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(optimizer_rows[0]))
+        writer.writeheader()
+        writer.writerows(optimizer_rows)
+    plot_optimizer_validation(optimizer_rows, output_dir / "fig5_optimizer_validation.png")
+
     summary = {
         "instances": len(rows),
         "mean_pareto_profile_recall": _mean(rows, "pareto_profile_recall"),

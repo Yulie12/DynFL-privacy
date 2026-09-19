@@ -2310,3 +2310,40 @@ def test_controlled_aggregator_uses_current_formal_cifar_model_name() -> None:
     source = (root / "experiments" / "aggregate_controlled_results.py").read_text(encoding="utf-8")
     assert 'model="resnet18_pretrained_head"' in source
     assert 'model="resnet18_pretrained",' not in source
+
+
+def test_q97_optimizer_summary_is_compact_mean_std_by_client_count() -> None:
+    from experiments.validate_pareto_search import summarize_optimizer_validation
+
+    rows = []
+    for num_clients in (2, 3):
+        for seed, gap, bounded, exact in (
+            (40, 0.01, 0.1, 0.3),
+            (42, 0.02, 0.2, 0.4),
+            (44, 0.03, 0.3, 0.5),
+        ):
+            rows.append({
+                "num_clients": num_clients,
+                "seed": seed,
+                "scalarized_objective_gap": gap,
+                "bounded_pareto_solve_time_sec": bounded,
+                "exact_solver_solve_time_sec": exact,
+            })
+    summary = summarize_optimizer_validation(rows)
+    assert [row["num_clients"] for row in summary] == [2, 3]
+    assert all(row["n_seeds"] == 3 for row in summary)
+    assert summary[0]["scalarized_objective_gap_mean"] == pytest.approx(0.02)
+    assert summary[0]["scalarized_objective_gap_std"] == pytest.approx(0.01)
+    assert summary[0]["bounded_pareto_solve_time_sec_mean"] == pytest.approx(0.2)
+    assert summary[0]["exact_solver_solve_time_sec_mean"] == pytest.approx(0.4)
+
+
+def test_q97_optimizer_output_contract_has_no_pareto_frontier_plot() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "validate_pareto_search.py").read_text(encoding="utf-8")
+    assert 'optimizer_summary.csv' in source
+    assert 'fig5_optimizer_validation.png' in source
+    assert '"scalarized_objective_gap"' in source
+    assert '"bounded_pareto_solve_time_sec"' in source
+    assert '"exact_solver_solve_time_sec"' in source
+    assert "pareto_frontier" not in source
