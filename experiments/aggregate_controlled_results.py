@@ -54,7 +54,7 @@ def collect_case(
         seeds=seeds,
         policies=policies,
         dataset="cifar10",
-        model="resnet18_pretrained",
+        model="resnet18_pretrained_head",
         rounds=rounds,
         clients=clients,
         edges=edges,

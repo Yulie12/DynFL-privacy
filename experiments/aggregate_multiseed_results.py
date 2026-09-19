@@ -493,6 +493,51 @@ def aggregate_rounds(
     return rows, plotted
 
 
+def aggregate_privacy_trajectory(
+    sources: dict[tuple[int, str], SourceRun],
+    seeds: list[int],
+    policies: list[str],
+    *,
+    rounds: int,
+) -> list[dict[str, Any]]:
+    """Aggregate the realized update-level client-DP trajectory by round.
+
+    The formal paper metric is the maximum cumulative update epsilon reported
+    in each round.  This is realized privacy consumption, not a sweep over the
+    configured lifetime epsilon target.
+    """
+    rows: list[dict[str, Any]] = []
+    for policy in policies:
+        per_seed: list[list[dict[str, str]]] = []
+        for seed in seeds:
+            metrics = read_csv(sources[(seed, policy)].policy_dir / "round_metrics.csv")
+            if len(metrics) != rounds:
+                raise RuntimeError(
+                    f"Expected {rounds} rows for seed={seed}, policy={policy}, got {len(metrics)}"
+                )
+            required = {"test_accuracy", "accounted_system_time_sec", "max_update_epsilon"}
+            if any(not required.issubset(item) for item in metrics):
+                raise RuntimeError(
+                    "The selected run lacks the formal Q96 privacy trajectory fields for "
+                    f"seed={seed}, policy={policy}"
+                )
+            per_seed.append(metrics)
+
+        for index in range(rounds):
+            row: dict[str, Any] = {
+                "policy": policy,
+                "label": POLICY_LABELS.get(policy, policy),
+                "round": index + 1,
+                "n_seeds": len(seeds),
+            }
+            for metric in ("max_update_epsilon", "test_accuracy", "accounted_system_time_sec"):
+                values = [float(metrics[index][metric]) for metrics in per_seed]
+                _add_mean_ci(row, metric, values)
+                row[f"{metric}_std"] = sample_std(values)
+            rows.append(row)
+    return rows
+
+
 def aggregate_time(
     sources: dict[tuple[int, str], SourceRun],
     seeds: list[int],

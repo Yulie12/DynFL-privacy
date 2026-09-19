@@ -2266,3 +2266,47 @@ def test_final_suite_rejects_non_fmnist_auxiliary_config() -> None:
     base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
     with pytest.raises(ValueError, match="dataset=fmnist and model=lenet5"):
         build_final_cases(base, studies=["auxiliary"], fast_config=None, aux_config=base)
+
+
+def test_q96_privacy_aggregation_uses_realized_update_epsilon_without_budget_sweep() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "aggregate_final_privacy.py").read_text(encoding="utf-8")
+    assert 'FORMAL_PRIVACY_POLICIES = ("dynamic_mode_fixed_privacy", "full_dynfl")' in source
+    assert '"max_update_epsilon_mean"' in source
+    assert '"test_accuracy_mean"' in source
+    assert '"accounted_system_time_sec_mean"' in source
+    assert "privacy_budget" not in source.split("def plot_privacy_trajectory", 1)[1]
+    assert "for privacy" not in source
+
+
+def test_q96_privacy_trajectory_aggregates_roundwise_realized_consumption(tmp_path: Path) -> None:
+    from experiments.aggregate_multiseed_results import SourceRun, aggregate_privacy_trajectory
+
+    sources = {}
+    for seed, epsilons in ((40, (0.2, 0.4)), (42, (0.3, 0.5)), (44, (0.4, 0.6))):
+        policy = "full_dynfl"
+        policy_dir = tmp_path / str(seed) / policy
+        policy_dir.mkdir(parents=True)
+        (policy_dir / "round_metrics.csv").write_text(
+            "test_accuracy,accounted_system_time_sec,max_update_epsilon\n"
+            + "\n".join(
+                f"{accuracy},{latency},{epsilon}"
+                for accuracy, latency, epsilon in ((0.5, 10.0, epsilons[0]), (0.6, 20.0, epsilons[1]))
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        sources[(seed, policy)] = SourceRun(seed, policy, policy_dir.parent, policy_dir, {}, {})
+    rows = aggregate_privacy_trajectory(sources, [40, 42, 44], ["full_dynfl"], rounds=2)
+    assert len(rows) == 2
+    assert rows[0]["max_update_epsilon_mean"] == pytest.approx(0.3)
+    assert rows[1]["max_update_epsilon_mean"] == pytest.approx(0.5)
+    assert rows[1]["test_accuracy_mean"] == pytest.approx(0.6)
+    assert rows[1]["accounted_system_time_sec_mean"] == pytest.approx(20.0)
+
+
+def test_controlled_aggregator_uses_current_formal_cifar_model_name() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "aggregate_controlled_results.py").read_text(encoding="utf-8")
+    assert 'model="resnet18_pretrained_head"' in source
+    assert 'model="resnet18_pretrained",' not in source

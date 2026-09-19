@@ -1,0 +1,215 @@
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' step21_src/DynFL-privacy-ytt/experiments/aggregate_controlled_results.py step21_mod/experiments/aggregate_controlled_results.py
+--- step21_src/DynFL-privacy-ytt/experiments/aggregate_controlled_results.py	2026-09-19 11:54:38.000000000 +0000
++++ step21_mod/experiments/aggregate_controlled_results.py	2026-09-19 12:13:08.572289206 +0000
+@@ -54,7 +54,7 @@
+         seeds=seeds,
+         policies=policies,
+         dataset="cifar10",
+-        model="resnet18_pretrained",
++        model="resnet18_pretrained_head",
+         rounds=rounds,
+         clients=clients,
+         edges=edges,
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' step21_src/DynFL-privacy-ytt/experiments/aggregate_final_privacy.py step21_mod/experiments/aggregate_final_privacy.py
+--- step21_src/DynFL-privacy-ytt/experiments/aggregate_final_privacy.py	1970-01-01 00:00:00.000000000 +0000
++++ step21_mod/experiments/aggregate_final_privacy.py	2026-09-19 12:13:08.732518482 +0000
+@@ -0,0 +1,93 @@
++from __future__ import annotations
++
++import argparse
++from pathlib import Path
++
++import matplotlib
++
++matplotlib.use("Agg")
++import matplotlib.pyplot as plt
++
++from aggregate_multiseed_results import (
++    POLICY_LABELS,
++    ROOT,
++    aggregate_privacy_trajectory,
++    discover_sources,
++    validate_sources,
++    write_csv,
++)
++
++FORMAL_PRIVACY_POLICIES = ("dynamic_mode_fixed_privacy", "full_dynfl")
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(
++        description="Aggregate the frozen Q96 Dynamic Privacy vs Fixed Privacy study."
++    )
++    parser.add_argument(
++        "--root", type=Path, default=ROOT / "out" / "paper_v31_final" / "fig3_privacy"
++    )
++    parser.add_argument("--seeds", type=int, nargs="+", default=[40, 42, 44])
++    parser.add_argument("--rounds", type=int, default=100)
++    parser.add_argument("--clients", type=int, default=100)
++    parser.add_argument("--edges", type=int, default=10)
++    parser.add_argument("--selection-period", type=int, default=1)
++    parser.add_argument("--privacy-budget", type=float, default=8.0)
++    parser.add_argument(
++        "--output-dir",
++        type=Path,
++        default=ROOT / "out" / "paper_v31_final" / "fig3_privacy_aggregate",
++    )
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    seeds = list(dict.fromkeys(int(seed) for seed in args.seeds))
++    policies = list(FORMAL_PRIVACY_POLICIES)
++    sources = discover_sources(
++        root=args.root.resolve(),
++        seeds=seeds,
++        policies=policies,
++        dataset="cifar10",
++        model="resnet18_pretrained_head",
++        rounds=args.rounds,
++        clients=args.clients,
++        edges=args.edges,
++        selection_period=args.selection_period,
++        privacy_budget=args.privacy_budget,
++    )
++    validate_sources(sources, seeds, policies)
++    rows = aggregate_privacy_trajectory(sources, seeds, policies, rounds=args.rounds)
++
++    output_dir = args.output_dir.resolve()
++    write_csv(output_dir / "privacy_trajectory.csv", rows)
++    plot_privacy_trajectory(rows, output_dir / "fig3_dynamic_vs_fixed_privacy.png")
++    print(output_dir / "privacy_trajectory.csv")
++
++
++def plot_privacy_trajectory(rows: list[dict[str, object]], output: Path) -> None:
++    fig, axes = plt.subplots(2, 1, figsize=(3.45, 4.2), sharex=True)
++    for policy in FORMAL_PRIVACY_POLICIES:
++        selected = [row for row in rows if row["policy"] == policy]
++        xs = [float(row["max_update_epsilon_mean"]) for row in selected]
++        accuracy = [100.0 * float(row["test_accuracy_mean"]) for row in selected]
++        latency = [float(row["accounted_system_time_sec_mean"]) for row in selected]
++        label = POLICY_LABELS[policy]
++        axes[0].plot(xs, accuracy, linewidth=1.35, label=label)
++        axes[1].plot(xs, latency, linewidth=1.35, label=label)
++    axes[0].set_ylabel("Accuracy (%)")
++    axes[1].set_ylabel("System latency (s)")
++    axes[1].set_xlabel("Realized update-level privacy consumption (epsilon)")
++    for axis in axes:
++        axis.grid(True, alpha=0.25, linewidth=0.55)
++        axis.legend(frameon=False, fontsize=7)
++        axis.tick_params(labelsize=7.4, pad=2)
++    fig.tight_layout(pad=0.55)
++    output.parent.mkdir(parents=True, exist_ok=True)
++    fig.savefig(output, dpi=300)
++    plt.close(fig)
++
++
++if __name__ == "__main__":
++    main()
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' step21_src/DynFL-privacy-ytt/experiments/aggregate_multiseed_results.py step21_mod/experiments/aggregate_multiseed_results.py
+--- step21_src/DynFL-privacy-ytt/experiments/aggregate_multiseed_results.py	2026-09-19 11:54:38.000000000 +0000
++++ step21_mod/experiments/aggregate_multiseed_results.py	2026-09-19 12:13:08.572118428 +0000
+@@ -493,6 +493,51 @@
+     return rows, plotted
+ 
+ 
++def aggregate_privacy_trajectory(
++    sources: dict[tuple[int, str], SourceRun],
++    seeds: list[int],
++    policies: list[str],
++    *,
++    rounds: int,
++) -> list[dict[str, Any]]:
++    """Aggregate the realized update-level client-DP trajectory by round.
++
++    The formal paper metric is the maximum cumulative update epsilon reported
++    in each round.  This is realized privacy consumption, not a sweep over the
++    configured lifetime epsilon target.
++    """
++    rows: list[dict[str, Any]] = []
++    for policy in policies:
++        per_seed: list[list[dict[str, str]]] = []
++        for seed in seeds:
++            metrics = read_csv(sources[(seed, policy)].policy_dir / "round_metrics.csv")
++            if len(metrics) != rounds:
++                raise RuntimeError(
++                    f"Expected {rounds} rows for seed={seed}, policy={policy}, got {len(metrics)}"
++                )
++            required = {"test_accuracy", "accounted_system_time_sec", "max_update_epsilon"}
++            if any(not required.issubset(item) for item in metrics):
++                raise RuntimeError(
++                    "The selected run lacks the formal Q96 privacy trajectory fields for "
++                    f"seed={seed}, policy={policy}"
++                )
++            per_seed.append(metrics)
++
++        for index in range(rounds):
++            row: dict[str, Any] = {
++                "policy": policy,
++                "label": POLICY_LABELS.get(policy, policy),
++                "round": index + 1,
++                "n_seeds": len(seeds),
++            }
++            for metric in ("max_update_epsilon", "test_accuracy", "accounted_system_time_sec"):
++                values = [float(metrics[index][metric]) for metrics in per_seed]
++                _add_mean_ci(row, metric, values)
++                row[f"{metric}_std"] = sample_std(values)
++            rows.append(row)
++    return rows
++
++
+ def aggregate_time(
+     sources: dict[tuple[int, str], SourceRun],
+     seeds: list[int],
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' step21_src/DynFL-privacy-ytt/tests/test_paper_conformance.py step21_mod/tests/test_paper_conformance.py
+--- step21_src/DynFL-privacy-ytt/tests/test_paper_conformance.py	2026-09-19 11:54:38.000000000 +0000
++++ step21_mod/tests/test_paper_conformance.py	2026-09-19 12:13:08.732518482 +0000
+@@ -2266,3 +2266,47 @@
+     base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+     with pytest.raises(ValueError, match="dataset=fmnist and model=lenet5"):
+         build_final_cases(base, studies=["auxiliary"], fast_config=None, aux_config=base)
++
++
++def test_q96_privacy_aggregation_uses_realized_update_epsilon_without_budget_sweep() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "aggregate_final_privacy.py").read_text(encoding="utf-8")
++    assert 'FORMAL_PRIVACY_POLICIES = ("dynamic_mode_fixed_privacy", "full_dynfl")' in source
++    assert '"max_update_epsilon_mean"' in source
++    assert '"test_accuracy_mean"' in source
++    assert '"accounted_system_time_sec_mean"' in source
++    assert "privacy_budget" not in source.split("def plot_privacy_trajectory", 1)[1]
++    assert "for privacy" not in source
++
++
++def test_q96_privacy_trajectory_aggregates_roundwise_realized_consumption(tmp_path: Path) -> None:
++    from experiments.aggregate_multiseed_results import SourceRun, aggregate_privacy_trajectory
++
++    sources = {}
++    for seed, epsilons in ((40, (0.2, 0.4)), (42, (0.3, 0.5)), (44, (0.4, 0.6))):
++        policy = "full_dynfl"
++        policy_dir = tmp_path / str(seed) / policy
++        policy_dir.mkdir(parents=True)
++        (policy_dir / "round_metrics.csv").write_text(
++            "test_accuracy,accounted_system_time_sec,max_update_epsilon\n"
++            + "\n".join(
++                f"{accuracy},{latency},{epsilon}"
++                for accuracy, latency, epsilon in ((0.5, 10.0, epsilons[0]), (0.6, 20.0, epsilons[1]))
++            )
++            + "\n",
++            encoding="utf-8",
++        )
++        sources[(seed, policy)] = SourceRun(seed, policy, policy_dir.parent, policy_dir, {}, {})
++    rows = aggregate_privacy_trajectory(sources, [40, 42, 44], ["full_dynfl"], rounds=2)
++    assert len(rows) == 2
++    assert rows[0]["max_update_epsilon_mean"] == pytest.approx(0.3)
++    assert rows[1]["max_update_epsilon_mean"] == pytest.approx(0.5)
++    assert rows[1]["test_accuracy_mean"] == pytest.approx(0.6)
++    assert rows[1]["accounted_system_time_sec_mean"] == pytest.approx(20.0)
++
++
++def test_controlled_aggregator_uses_current_formal_cifar_model_name() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "aggregate_controlled_results.py").read_text(encoding="utf-8")
++    assert 'model="resnet18_pretrained_head"' in source
++    assert 'model="resnet18_pretrained",' not in source
