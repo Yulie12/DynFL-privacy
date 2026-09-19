@@ -21,6 +21,8 @@ if str(ROOT) not in sys.path:
 from experiments.paper_final_plan import FORMAL_SEEDS, RESOURCE_SCENARIOS, STRATEGY_PERIOD_VALUES
 from experiments.run_paper_config import DEFAULT_CONFIG, build_command, validate_config
 
+DEFAULT_FAST_CONFIG = ROOT / "configs" / "paper_v31_cifar10_resnet18_fast_response.json"
+
 FINAL_STUDIES = ("main", "dynamic_resources", "privacy", "fast_response", "optimizer", "sp")
 
 
@@ -30,8 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fast-config",
         type=Path,
-        help=("Formal fast-response config. It must explicitly define system.fast_client_deadlines; "
-              "the orchestrator never invents a deadline or a fast-client set."),
+        default=DEFAULT_FAST_CONFIG,
+        help=("Formal fast-response config. Defaults to the frozen Fig.4 contract: "
+              "clients 0-19 (20%% of 100 clients), each with a 20 s hard deadline."),
     )
     parser.add_argument("--studies", nargs="+", choices=FINAL_STUDIES, default=list(FINAL_STUDIES))
     parser.add_argument("--seeds", type=int, nargs="+")
@@ -114,7 +117,7 @@ def main() -> None:
     studies = list(dict.fromkeys(args.studies))
     seeds = list(dict.fromkeys(args.seeds or FORMAL_SEEDS))
     base = _load(args.config)
-    fast = _load(args.fast_config) if args.fast_config else None
+    fast = _load(args.fast_config) if "fast_response" in studies else None
     cases = build_final_cases(base, studies=studies, fast_config=fast)
     rounds = int(args.rounds or base["training"]["rounds"])
     manifest: list[dict[str, Any]] = []

@@ -2148,3 +2148,30 @@ def test_multiseed_aggregator_defaults_match_formal_cifar_model() -> None:
     source = Path(aggregate_multiseed_results.__file__).read_text(encoding="utf-8")
     assert 'parser.add_argument("--model", default="resnet18_pretrained_head")' in source
     assert 'reconfiguration_policy = "full_dynfl"' in source
+
+
+def test_frozen_fast_response_config_is_twenty_percent_at_twenty_seconds() -> None:
+    root = Path(__file__).resolve().parents[1]
+    path = root / "configs" / "paper_v31_cifar10_resnet18_fast_response.json"
+    config = json.loads(path.read_text(encoding="utf-8"))
+    deadlines = config["system"]["fast_client_deadlines"]
+    assert config["system"]["clients"] == 100
+    assert len(deadlines) == 20
+    assert set(deadlines) == {str(client_id) for client_id in range(20)}
+    assert set(float(value) for value in deadlines.values()) == {20.0}
+    assert config["seeds"] == [40, 42, 44]
+
+
+def test_final_suite_defaults_to_frozen_fast_response_config() -> None:
+    from experiments.run_final_paper_suite import DEFAULT_FAST_CONFIG, build_final_cases
+    from experiments.run_paper_config import DEFAULT_CONFIG
+
+    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    fast = json.loads(DEFAULT_FAST_CONFIG.read_text(encoding="utf-8"))
+    cases = build_final_cases(base, studies=["fast_response"], fast_config=fast)
+    assert len(cases) == 1
+    case = cases[0]
+    assert case["study"] == "fast_response"
+    assert case["config"]["output_root"] == "out/paper_v31_final/fig4_fast_response"
+    assert len(case["config"]["system"]["fast_client_deadlines"]) == 20
+    assert case["policies"] == list(fast["policies"])
