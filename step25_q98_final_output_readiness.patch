@@ -1,0 +1,145 @@
+diff --git ab/experiments/validate_final_paper_outputs.py b/experiments/validate_final_paper_outputs.py
+new file mode 100644
+index 0000000..5712ee8
+--- /dev/null
++++ b/experiments/validate_final_paper_outputs.py
+@@ -0,0 +1,99 @@
++from __future__ import annotations
++
++"""Validate the frozen Q98 five-figure/two-table paper-output contract.
++
++This is a post-processing/readiness check only.  It never fabricates missing
++experimental results: every formal output must already exist on disk.
++"""
++
++import argparse
++import json
++from pathlib import Path
++from typing import Any
++
++try:
++    from paper_final_plan import FINAL_FIGURES, FINAL_TABLES
++except ImportError:  # pragma: no cover - package import in tests
++    from experiments.paper_final_plan import FINAL_FIGURES, FINAL_TABLES
++
++ROOT = Path(__file__).resolve().parents[1]
++DEFAULT_ROOT = ROOT / "out" / "paper_v31_final"
++
++# Machine-readable evidence required before the corresponding paper item can
++# be marked ready.  Figure image composition can happen later in LaTeX; this
++# gate deliberately checks the underlying formal evidence rather than merely
++# the presence of a PNG.
++OUTPUT_EVIDENCE = {
++    "fig1_main_four_methods": (
++        "fig1_main/iid/aggregate/summary_statistics.csv",
++        "fig1_main/dirichlet_0p5/aggregate/summary_statistics.csv",
++        "fig1_main/dirichlet_0p1/aggregate/summary_statistics.csv",
++    ),
++    "fig2_dynamic_resources": (
++        "fig2_dynamic_resources/communication/aggregate/stage_mode_selection.csv",
++        "fig2_dynamic_resources/compute/aggregate/stage_mode_selection.csv",
++    ),
++    "fig3_dynamic_vs_fixed_privacy": (
++        "fig3_privacy_aggregate/privacy_trajectory.csv",
++    ),
++    "fig4_fast_response": (
++        "fig4_fast_response/aggregate/summary_statistics.csv",
++    ),
++    "fig5_optimizer_and_sp": (
++        "fig5_optimizer/optimizer_summary.csv",
++        "sensitivity_aggregate/strategy_period_statistics.csv",
++    ),
++    "table1_parameters": ("table1_parameters.csv",),
++    "table2_methods_results": ("table2_methods_results.csv",),
++}
++
++
++def build_readiness(root: Path) -> dict[str, Any]:
++    expected = set(FINAL_FIGURES) | set(FINAL_TABLES)
++    if set(OUTPUT_EVIDENCE) != expected:
++        raise RuntimeError("Q98 readiness map does not match the frozen five-figure/two-table plan")
++
++    items: list[dict[str, Any]] = []
++    for name in (*FINAL_FIGURES, *FINAL_TABLES):
++        relative_paths = OUTPUT_EVIDENCE[name]
++        missing = [path for path in relative_paths if not (root / path).is_file()]
++        items.append({
++            "name": name,
++            "kind": "figure" if name in FINAL_FIGURES else "table",
++            "ready": not missing,
++            "evidence": list(relative_paths),
++            "missing": missing,
++        })
++    return {
++        "contract": "Q98: 5 core figures + 2 tables",
++        "ready": all(item["ready"] for item in items),
++        "figures_ready": sum(item["ready"] for item in items if item["kind"] == "figure"),
++        "tables_ready": sum(item["ready"] for item in items if item["kind"] == "table"),
++        "items": items,
++    }
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description="Validate frozen Q98 final paper-output readiness.")
++    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
++    parser.add_argument("--output", type=Path)
++    parser.add_argument("--require-complete", action="store_true")
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    root = args.root.resolve()
++    report = build_readiness(root)
++    output = (args.output or (root / "paper_output_readiness.json")).resolve()
++    output.parent.mkdir(parents=True, exist_ok=True)
++    output.write_text(json.dumps(report, indent=2), encoding="utf-8")
++    print(output)
++    print(f"figures={report['figures_ready']}/5 tables={report['tables_ready']}/2 ready={report['ready']}")
++    if args.require_complete and not report["ready"]:
++        missing = [item["name"] for item in report["items"] if not item["ready"]]
++        raise SystemExit("Missing formal paper outputs: " + ", ".join(missing))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index eff5862..0052584 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -2423,3 +2423,35 @@ def test_q98_table2_output_is_machine_readable_and_uses_aggregated_results() ->
+     assert '"accounted_system_time_sec_mean"' in source
+     assert '"max_update_epsilon_mean"' in source
+     assert "Run the formal multi-seed aggregation first" in source
++
++
++def test_q98_final_output_readiness_map_is_exactly_five_figures_two_tables() -> None:
++    from experiments.paper_final_plan import FINAL_FIGURES, FINAL_TABLES
++    from experiments.validate_final_paper_outputs import OUTPUT_EVIDENCE
++
++    assert set(OUTPUT_EVIDENCE) == set(FINAL_FIGURES) | set(FINAL_TABLES)
++    assert len(FINAL_FIGURES) == 5
++    assert len(FINAL_TABLES) == 2
++    assert "fig1_main/iid/aggregate/summary_statistics.csv" in OUTPUT_EVIDENCE["fig1_main_four_methods"]
++    assert "fig2_dynamic_resources/communication/aggregate/stage_mode_selection.csv" in OUTPUT_EVIDENCE["fig2_dynamic_resources"]
++    assert OUTPUT_EVIDENCE["fig3_dynamic_vs_fixed_privacy"] == ("fig3_privacy_aggregate/privacy_trajectory.csv",)
++    assert "fig5_optimizer/optimizer_summary.csv" in OUTPUT_EVIDENCE["fig5_optimizer_and_sp"]
++    assert "sensitivity_aggregate/strategy_period_statistics.csv" in OUTPUT_EVIDENCE["fig5_optimizer_and_sp"]
++
++
++def test_q98_readiness_never_marks_missing_results_complete(tmp_path: Path) -> None:
++    from experiments.validate_final_paper_outputs import OUTPUT_EVIDENCE, build_readiness
++
++    # Create only Table I evidence.  The checker must report partial readiness,
++    # not infer or fabricate any of the still-missing experimental outputs.
++    (tmp_path / OUTPUT_EVIDENCE["table1_parameters"][0]).write_text("section,parameter\n", encoding="utf-8")
++    report = build_readiness(tmp_path)
++    assert report["ready"] is False
++    assert report["figures_ready"] == 0
++    assert report["tables_ready"] == 1
++    by_name = {item["name"]: item for item in report["items"]}
++    assert by_name["table1_parameters"]["ready"] is True
++    assert by_name["table2_methods_results"]["ready"] is False
++    assert by_name["fig3_dynamic_vs_fixed_privacy"]["missing"] == [
++        "fig3_privacy_aggregate/privacy_trajectory.csv"
++    ]

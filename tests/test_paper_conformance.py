@@ -2423,3 +2423,35 @@ def test_q98_table2_output_is_machine_readable_and_uses_aggregated_results() -> 
     assert '"accounted_system_time_sec_mean"' in source
     assert '"max_update_epsilon_mean"' in source
     assert "Run the formal multi-seed aggregation first" in source
+
+
+def test_q98_final_output_readiness_map_is_exactly_five_figures_two_tables() -> None:
+    from experiments.paper_final_plan import FINAL_FIGURES, FINAL_TABLES
+    from experiments.validate_final_paper_outputs import OUTPUT_EVIDENCE
+
+    assert set(OUTPUT_EVIDENCE) == set(FINAL_FIGURES) | set(FINAL_TABLES)
+    assert len(FINAL_FIGURES) == 5
+    assert len(FINAL_TABLES) == 2
+    assert "fig1_main/iid/aggregate/summary_statistics.csv" in OUTPUT_EVIDENCE["fig1_main_four_methods"]
+    assert "fig2_dynamic_resources/communication/aggregate/stage_mode_selection.csv" in OUTPUT_EVIDENCE["fig2_dynamic_resources"]
+    assert OUTPUT_EVIDENCE["fig3_dynamic_vs_fixed_privacy"] == ("fig3_privacy_aggregate/privacy_trajectory.csv",)
+    assert "fig5_optimizer/optimizer_summary.csv" in OUTPUT_EVIDENCE["fig5_optimizer_and_sp"]
+    assert "sensitivity_aggregate/strategy_period_statistics.csv" in OUTPUT_EVIDENCE["fig5_optimizer_and_sp"]
+
+
+def test_q98_readiness_never_marks_missing_results_complete(tmp_path: Path) -> None:
+    from experiments.validate_final_paper_outputs import OUTPUT_EVIDENCE, build_readiness
+
+    # Create only Table I evidence.  The checker must report partial readiness,
+    # not infer or fabricate any of the still-missing experimental outputs.
+    (tmp_path / OUTPUT_EVIDENCE["table1_parameters"][0]).write_text("section,parameter\n", encoding="utf-8")
+    report = build_readiness(tmp_path)
+    assert report["ready"] is False
+    assert report["figures_ready"] == 0
+    assert report["tables_ready"] == 1
+    by_name = {item["name"]: item for item in report["items"]}
+    assert by_name["table1_parameters"]["ready"] is True
+    assert by_name["table2_methods_results"]["ready"] is False
+    assert by_name["fig3_dynamic_vs_fixed_privacy"]["missing"] == [
+        "fig3_privacy_aggregate/privacy_trajectory.csv"
+    ]
