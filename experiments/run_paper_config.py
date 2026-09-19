@@ -117,6 +117,7 @@ def build_command(
         "train_limit": training["train_limit"],
         "test_limit": training["test_limit"],
         "partition_mode": training["partition_mode"],
+        "dirichlet_alpha": training.get("dirichlet_alpha", 0.5),
         "local_epochs": training["local_epochs"],
         "lr": training["learning_rate"],
         "device": training["device"],

@@ -108,6 +108,7 @@ class Lenet5Config:
     l2: float = 0.0001
     iid: bool = False
     partition_mode: str = "client_noniid"
+    dirichlet_alpha: float = 0.5
     selection_period: int = 5
     dp_clip_norm: float = 1.0
     dp_noise_multiplier: float = 0.0002
@@ -478,6 +479,7 @@ def run_fmnist_lenet5_training(
         iid=train_config.iid,
         partition_mode=train_config.partition_mode,
         seed=selection.seed,
+        dirichlet_alpha=train_config.dirichlet_alpha,
     )
     client_train_indices, client_test_indices = _split_client_indices(
         client_indices, test_ratio=0.2, seed=selection.seed,
@@ -505,6 +507,7 @@ def run_fmnist_lenet5_training(
         "seed": selection.seed,
         "subset_rule": "numpy default_rng(seed) permutation followed by the configured limit",
         "partition_mode": train_config.partition_mode,
+        "dirichlet_alpha": train_config.dirichlet_alpha if train_config.partition_mode == "dirichlet" else None,
         "validation_fraction_per_client": 0.2,
         "num_clients": selection.num_clients,
         "num_edges": selection.num_edges,
@@ -4661,6 +4664,7 @@ def _partition_clients_lenet5(
     iid: bool,
     partition_mode: str,
     seed: int,
+    dirichlet_alpha: float = 0.5,
 ) -> list[np.ndarray]:
     """Same as _partition_clients from real_training; copied to avoid cross-dep."""
     rng = np.random.default_rng(seed)
@@ -4673,6 +4677,21 @@ def _partition_clients_lenet5(
         return _partition_edge_label_skew(y_train, num_clients, num_edges, rng, extreme=False)
     if partition_mode == "extreme_edge_label_skew":
         return _partition_edge_label_skew(y_train, num_clients, num_edges, rng, extreme=True)
+    if partition_mode == "dirichlet":
+        if not np.isfinite(dirichlet_alpha) or dirichlet_alpha <= 0:
+            raise ValueError("dirichlet_alpha must be positive and finite")
+        client_parts = [[] for _ in range(num_clients)]
+        for label in sorted(np.unique(y_train)):
+            label_indices = indices[y_train == label].copy()
+            rng.shuffle(label_indices)
+            proportions = rng.dirichlet(np.full(num_clients, dirichlet_alpha, dtype=float))
+            counts = rng.multinomial(len(label_indices), proportions)
+            offset = 0
+            for client_id, count in enumerate(counts):
+                if count:
+                    client_parts[client_id].extend(label_indices[offset:offset + count].tolist())
+                offset += count
+        return [np.array(sorted(part), dtype=np.int64) for part in client_parts]
 
     client_parts = [[] for _ in range(num_clients)]
     for label in sorted(np.unique(y_train)):

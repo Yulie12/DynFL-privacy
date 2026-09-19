@@ -1914,3 +1914,55 @@ def test_fixed_privacy_profile_locks_mechanism_and_dp_strength() -> None:
     assert locked
     assert all(c.mechanisms == profile[0] for c in locked)
     assert all(c.update_noise_multiplier == pytest.approx(profile[1]) for c in locked if c.update_dp_events > 0)
+
+
+def test_dirichlet_partition_is_seeded_complete_and_disjoint() -> None:
+    from dynfed.fmnist_lenet5_dynamic import _partition_clients_lenet5
+
+    labels = np.repeat(np.arange(10), 60)
+    first = _partition_clients_lenet5(
+        labels, num_clients=20, num_edges=4, iid=False,
+        partition_mode="dirichlet", seed=2026, dirichlet_alpha=0.5,
+    )
+    second = _partition_clients_lenet5(
+        labels, num_clients=20, num_edges=4, iid=False,
+        partition_mode="dirichlet", seed=2026, dirichlet_alpha=0.5,
+    )
+    assert all(np.array_equal(a, b) for a, b in zip(first, second))
+    merged = np.concatenate(first)
+    assert len(merged) == len(labels)
+    assert len(np.unique(merged)) == len(labels)
+    assert set(merged.tolist()) == set(range(len(labels)))
+
+
+def test_dirichlet_alpha_controls_non_iid_strength() -> None:
+    from dynfed.fmnist_lenet5_dynamic import _partition_clients_lenet5
+
+    labels = np.repeat(np.arange(10), 200)
+    moderate = _partition_clients_lenet5(
+        labels, 20, 4, False, "dirichlet", 77, dirichlet_alpha=0.5,
+    )
+    strong = _partition_clients_lenet5(
+        labels, 20, 4, False, "dirichlet", 77, dirichlet_alpha=0.1,
+    )
+
+    def mean_label_concentration(parts):
+        scores = []
+        for part in parts:
+            if len(part):
+                counts = np.bincount(labels[part], minlength=10)
+                scores.append(float(counts.max()) / float(counts.sum()))
+        return float(np.mean(scores))
+
+    assert mean_label_concentration(strong) > mean_label_concentration(moderate)
+
+
+def test_paper_runner_forwards_dirichlet_alpha() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = json.loads((root / "configs" / "paper_v30_cifar10_resnet18.json").read_text(encoding="utf-8"))
+    config["training"]["partition_mode"] = "dirichlet"
+    config["training"]["dirichlet_alpha"] = 0.1
+    command = build_command(config, seed=42, policies=["full_dynfl"], rounds=None)
+    assert "--partition-mode" in command
+    assert command[command.index("--partition-mode") + 1] == "dirichlet"
+    assert command[command.index("--dirichlet-alpha") + 1] == "0.1"

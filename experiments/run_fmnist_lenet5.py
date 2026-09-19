@@ -92,7 +92,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--partition-mode",
         default="client_noniid",
-        choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
+        choices=["iid", "dirichlet", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
+    )
+    parser.add_argument(
+        "--dirichlet-alpha", type=float, default=0.5,
+        help="Dirichlet concentration alpha when --partition-mode dirichlet (paper: 0.5 or 0.1).",
     )
     parser.add_argument("--selection-period", type=int, default=5)
     parser.add_argument(
@@ -321,6 +325,7 @@ def main() -> None:
         learning_rate=args.lr,
         iid=args.iid,
         partition_mode="iid" if args.iid else args.partition_mode,
+        dirichlet_alpha=args.dirichlet_alpha,
         selection_period=args.selection_period,
         dp_clip_norm=args.dp_clip_norm,
         dp_noise_multiplier=args.dp_noise_multiplier,

@@ -1,0 +1,155 @@
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index e06ba4d..7747f13 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -108,6 +108,7 @@ class Lenet5Config:
+     l2: float = 0.0001
+     iid: bool = False
+     partition_mode: str = "client_noniid"
++    dirichlet_alpha: float = 0.5
+     selection_period: int = 5
+     dp_clip_norm: float = 1.0
+     dp_noise_multiplier: float = 0.0002
+@@ -478,6 +479,7 @@ def run_fmnist_lenet5_training(
+         iid=train_config.iid,
+         partition_mode=train_config.partition_mode,
+         seed=selection.seed,
++        dirichlet_alpha=train_config.dirichlet_alpha,
+     )
+     client_train_indices, client_test_indices = _split_client_indices(
+         client_indices, test_ratio=0.2, seed=selection.seed,
+@@ -505,6 +507,7 @@ def run_fmnist_lenet5_training(
+         "seed": selection.seed,
+         "subset_rule": "numpy default_rng(seed) permutation followed by the configured limit",
+         "partition_mode": train_config.partition_mode,
++        "dirichlet_alpha": train_config.dirichlet_alpha if train_config.partition_mode == "dirichlet" else None,
+         "validation_fraction_per_client": 0.2,
+         "num_clients": selection.num_clients,
+         "num_edges": selection.num_edges,
+@@ -4661,6 +4664,7 @@ def _partition_clients_lenet5(
+     iid: bool,
+     partition_mode: str,
+     seed: int,
++    dirichlet_alpha: float = 0.5,
+ ) -> list[np.ndarray]:
+     """Same as _partition_clients from real_training; copied to avoid cross-dep."""
+     rng = np.random.default_rng(seed)
+@@ -4673,6 +4677,21 @@ def _partition_clients_lenet5(
+         return _partition_edge_label_skew(y_train, num_clients, num_edges, rng, extreme=False)
+     if partition_mode == "extreme_edge_label_skew":
+         return _partition_edge_label_skew(y_train, num_clients, num_edges, rng, extreme=True)
++    if partition_mode == "dirichlet":
++        if not np.isfinite(dirichlet_alpha) or dirichlet_alpha <= 0:
++            raise ValueError("dirichlet_alpha must be positive and finite")
++        client_parts = [[] for _ in range(num_clients)]
++        for label in sorted(np.unique(y_train)):
++            label_indices = indices[y_train == label].copy()
++            rng.shuffle(label_indices)
++            proportions = rng.dirichlet(np.full(num_clients, dirichlet_alpha, dtype=float))
++            counts = rng.multinomial(len(label_indices), proportions)
++            offset = 0
++            for client_id, count in enumerate(counts):
++                if count:
++                    client_parts[client_id].extend(label_indices[offset:offset + count].tolist())
++                offset += count
++        return [np.array(sorted(part), dtype=np.int64) for part in client_parts]
+ 
+     client_parts = [[] for _ in range(num_clients)]
+     for label in sorted(np.unique(y_train)):
+diff --git a/experiments/run_fmnist_lenet5.py b/experiments/run_fmnist_lenet5.py
+index 45bff9d..3b13f0f 100644
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -92,7 +92,11 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument(
+         "--partition-mode",
+         default="client_noniid",
+-        choices=["iid", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
++        choices=["iid", "dirichlet", "client_noniid", "edge_label_skew", "extreme_edge_label_skew"],
++    )
++    parser.add_argument(
++        "--dirichlet-alpha", type=float, default=0.5,
++        help="Dirichlet concentration alpha when --partition-mode dirichlet (paper: 0.5 or 0.1).",
+     )
+     parser.add_argument("--selection-period", type=int, default=5)
+     parser.add_argument(
+@@ -321,6 +325,7 @@ def main() -> None:
+         learning_rate=args.lr,
+         iid=args.iid,
+         partition_mode="iid" if args.iid else args.partition_mode,
++        dirichlet_alpha=args.dirichlet_alpha,
+         selection_period=args.selection_period,
+         dp_clip_norm=args.dp_clip_norm,
+         dp_noise_multiplier=args.dp_noise_multiplier,
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index d315427..23aef49 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -117,6 +117,7 @@ def build_command(
+         "train_limit": training["train_limit"],
+         "test_limit": training["test_limit"],
+         "partition_mode": training["partition_mode"],
++        "dirichlet_alpha": training.get("dirichlet_alpha", 0.5),
+         "local_epochs": training["local_epochs"],
+         "lr": training["learning_rate"],
+         "device": training["device"],
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index bee0fe4..32f0022 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -1914,3 +1914,55 @@ def test_fixed_privacy_profile_locks_mechanism_and_dp_strength() -> None:
+     assert locked
+     assert all(c.mechanisms == profile[0] for c in locked)
+     assert all(c.update_noise_multiplier == pytest.approx(profile[1]) for c in locked if c.update_dp_events > 0)
++
++
++def test_dirichlet_partition_is_seeded_complete_and_disjoint() -> None:
++    from dynfed.fmnist_lenet5_dynamic import _partition_clients_lenet5
++
++    labels = np.repeat(np.arange(10), 60)
++    first = _partition_clients_lenet5(
++        labels, num_clients=20, num_edges=4, iid=False,
++        partition_mode="dirichlet", seed=2026, dirichlet_alpha=0.5,
++    )
++    second = _partition_clients_lenet5(
++        labels, num_clients=20, num_edges=4, iid=False,
++        partition_mode="dirichlet", seed=2026, dirichlet_alpha=0.5,
++    )
++    assert all(np.array_equal(a, b) for a, b in zip(first, second))
++    merged = np.concatenate(first)
++    assert len(merged) == len(labels)
++    assert len(np.unique(merged)) == len(labels)
++    assert set(merged.tolist()) == set(range(len(labels)))
++
++
++def test_dirichlet_alpha_controls_non_iid_strength() -> None:
++    from dynfed.fmnist_lenet5_dynamic import _partition_clients_lenet5
++
++    labels = np.repeat(np.arange(10), 200)
++    moderate = _partition_clients_lenet5(
++        labels, 20, 4, False, "dirichlet", 77, dirichlet_alpha=0.5,
++    )
++    strong = _partition_clients_lenet5(
++        labels, 20, 4, False, "dirichlet", 77, dirichlet_alpha=0.1,
++    )
++
++    def mean_label_concentration(parts):
++        scores = []
++        for part in parts:
++            if len(part):
++                counts = np.bincount(labels[part], minlength=10)
++                scores.append(float(counts.max()) / float(counts.sum()))
++        return float(np.mean(scores))
++
++    assert mean_label_concentration(strong) > mean_label_concentration(moderate)
++
++
++def test_paper_runner_forwards_dirichlet_alpha() -> None:
++    root = Path(__file__).resolve().parents[1]
++    config = json.loads((root / "configs" / "paper_v30_cifar10_resnet18.json").read_text(encoding="utf-8"))
++    config["training"]["partition_mode"] = "dirichlet"
++    config["training"]["dirichlet_alpha"] = 0.1
++    command = build_command(config, seed=42, policies=["full_dynfl"], rounds=None)
++    assert "--partition-mode" in command
++    assert command[command.index("--partition-mode") + 1] == "dirichlet"
++    assert command[command.index("--dirichlet-alpha") + 1] == "0.1"
