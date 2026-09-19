@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experiments.paper_final_plan import FORMAL_SEEDS, RESOURCE_SCENARIOS, STRATEGY_PERIOD_VALUES
+from experiments.paper_final_plan import DATA_DISTRIBUTIONS, FORMAL_SEEDS, RESOURCE_SCENARIOS, STRATEGY_PERIOD_VALUES
 from experiments.run_paper_config import DEFAULT_CONFIG, build_command, validate_config
 
 DEFAULT_FAST_CONFIG = ROOT / "configs" / "paper_v31_cifar10_resnet18_fast_response.json"
@@ -64,10 +64,21 @@ def build_final_cases(
 ) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     if "main" in studies:
-        cases.append({
-            "study": "main", "setting": "four_methods", "config": _case_config(base, "out/paper_v31_final/fig1_main"),
-            "policies": list(base["policies"]),
-        })
+        # Q82/Q83: the formal four-method comparison is evaluated under IID
+        # and two frozen non-IID Dirichlet settings.  The legacy
+        # edge_label_skew partition remains available for diagnostics only.
+        for setting, partition_mode, alpha in DATA_DISTRIBUTIONS:
+            config = copy.deepcopy(base)
+            config["training"]["partition_mode"] = partition_mode
+            if alpha is None:
+                config["training"].pop("dirichlet_alpha", None)
+            else:
+                config["training"]["dirichlet_alpha"] = alpha
+            config["output_root"] = f"out/paper_v31_final/fig1_main/{setting}"
+            cases.append({
+                "study": "main", "setting": setting, "config": config,
+                "policies": list(base["policies"]),
+            })
     if "dynamic_resources" in studies:
         for scenario in RESOURCE_SCENARIOS:
             cases.append({

@@ -2082,6 +2082,12 @@ def test_final_paper_plan_is_five_figures_two_tables_and_three_seeds():
     assert len(FINAL_FIGURES) == 5
     assert len(FINAL_TABLES) == 2
     assert FORMAL_SEEDS == (40, 42, 44)
+    from experiments.paper_final_plan import DATA_DISTRIBUTIONS
+    assert DATA_DISTRIBUTIONS == (
+        ("iid", "iid", None),
+        ("dirichlet_0p5", "dirichlet", 0.5),
+        ("dirichlet_0p1", "dirichlet", 0.1),
+    )
 
 
 def test_final_parameter_sensitivity_is_strategy_period_only():
@@ -2122,7 +2128,23 @@ def test_final_suite_builds_frozen_q98_matrix_without_inventing_fast_deadlines()
         fast_config=None,
     )
     keys = [(case["study"], case["setting"]) for case in cases]
-    assert ("main", "four_methods") in keys
+    assert [(case["study"], case["setting"]) for case in cases if case["study"] == "main"] == [
+        ("main", "iid"),
+        ("main", "dirichlet_0p5"),
+        ("main", "dirichlet_0p1"),
+    ]
+    main_cases = [case for case in cases if case["study"] == "main"]
+    assert [case["config"]["training"]["partition_mode"] for case in main_cases] == [
+        "iid", "dirichlet", "dirichlet"
+    ]
+    assert "dirichlet_alpha" not in main_cases[0]["config"]["training"]
+    assert main_cases[1]["config"]["training"]["dirichlet_alpha"] == pytest.approx(0.5)
+    assert main_cases[2]["config"]["training"]["dirichlet_alpha"] == pytest.approx(0.1)
+    assert [case["config"]["output_root"] for case in main_cases] == [
+        "out/paper_v31_final/fig1_main/iid",
+        "out/paper_v31_final/fig1_main/dirichlet_0p5",
+        "out/paper_v31_final/fig1_main/dirichlet_0p1",
+    ]
     assert ("dynamic_resources", "communication") in keys
     assert ("dynamic_resources", "compute") in keys
     assert ("privacy", "dynamic_vs_fixed") in keys
@@ -2175,3 +2197,20 @@ def test_final_suite_defaults_to_frozen_fast_response_config() -> None:
     assert case["config"]["output_root"] == "out/paper_v31_final/fig4_fast_response"
     assert len(case["config"]["system"]["fast_client_deadlines"]) == 20
     assert case["policies"] == list(fast["policies"])
+
+
+def test_final_main_heterogeneity_cases_forward_frozen_partition_cli() -> None:
+    from experiments.run_final_paper_suite import build_final_cases
+    from experiments.run_paper_config import DEFAULT_CONFIG, build_command
+
+    base = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    cases = build_final_cases(base, studies=["main"], fast_config=None)
+    commands = [build_command(case["config"], seed=42, policies=case["policies"], rounds=1) for case in cases]
+    observed = []
+    for command in commands:
+        mode = command[command.index("--partition-mode") + 1]
+        alpha = command[command.index("--dirichlet-alpha") + 1]
+        observed.append((mode, alpha))
+    # The runner always forwards an alpha value, but IID ignores it.  The two
+    # non-IID formal cases must preserve the frozen Q83 alpha values exactly.
+    assert observed == [("iid", "0.5"), ("dirichlet", "0.5"), ("dirichlet", "0.1")]

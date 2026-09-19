@@ -14,6 +14,11 @@ FINAL_POLICIES = (
 FORMAL_SEEDS = (40, 42, 44)
 STRATEGY_PERIOD_VALUES = (1, 5, 10)
 RESOURCE_SCENARIOS = ("communication", "compute")
+DATA_DISTRIBUTIONS = (
+    ("iid", "iid", None),
+    ("dirichlet_0p5", "dirichlet", 0.5),
+    ("dirichlet_0p1", "dirichlet", 0.1),
+)
 
 FINAL_FIGURES = {
     "fig1_main_four_methods": "Four internal methods: accuracy/convergence, system latency, and privacy budget.",
@@ -34,3 +39,8 @@ def validate_final_plan() -> None:
     assert len(FORMAL_SEEDS) == 3
     assert STRATEGY_PERIOD_VALUES == (1, 5, 10)
     assert RESOURCE_SCENARIOS == ("communication", "compute")
+    assert DATA_DISTRIBUTIONS == (
+        ("iid", "iid", None),
+        ("dirichlet_0p5", "dirichlet", 0.5),
+        ("dirichlet_0p1", "dirichlet", 0.1),
+    )
