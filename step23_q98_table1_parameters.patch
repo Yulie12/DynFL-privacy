@@ -1,0 +1,365 @@
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/.pytest_cache/.gitignore step23_mod/.pytest_cache/.gitignore
+--- step23_src/DynFL-privacy-ytt/.pytest_cache/.gitignore	1970-01-01 00:00:00.000000000 +0000
++++ step23_mod/.pytest_cache/.gitignore	2026-09-19 13:02:38.661237212 +0000
+@@ -0,0 +1,2 @@
++# Created by pytest automatically.
++*
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/.pytest_cache/CACHEDIR.TAG step23_mod/.pytest_cache/CACHEDIR.TAG
+--- step23_src/DynFL-privacy-ytt/.pytest_cache/CACHEDIR.TAG	1970-01-01 00:00:00.000000000 +0000
++++ step23_mod/.pytest_cache/CACHEDIR.TAG	2026-09-19 13:02:38.661279005 +0000
+@@ -0,0 +1,4 @@
++Signature: 8a477f597d28d172789f06886806bc55
++# This file is a cache directory tag created by pytest.
++# For information about cache directory tags, see:
++#	https://bford.info/cachedir/spec.html
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/.pytest_cache/README.md step23_mod/.pytest_cache/README.md
+--- step23_src/DynFL-privacy-ytt/.pytest_cache/README.md	1970-01-01 00:00:00.000000000 +0000
++++ step23_mod/.pytest_cache/README.md	2026-09-19 13:02:38.661168288 +0000
+@@ -0,0 +1,8 @@
++# pytest cache directory #
++
++This directory contains data from the pytest's cache plugin,
++which provides the `--lf` and `--ff` options, as well as the `cache` fixture.
++
++**Do not** commit this to version control.
++
++See [the docs](https://docs.pytest.org/en/stable/how-to/cache.html) for more information.
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/.pytest_cache/v/cache/nodeids step23_mod/.pytest_cache/v/cache/nodeids
+--- step23_src/DynFL-privacy-ytt/.pytest_cache/v/cache/nodeids	1970-01-01 00:00:00.000000000 +0000
++++ step23_mod/.pytest_cache/v/cache/nodeids	2026-09-19 13:02:38.661545787 +0000
+@@ -0,0 +1,182 @@
++[
++  "tests/test_paper_conformance.py::test_aggregate_dp_clips_one_complete_client_contribution",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights0-fractions0-1.0-3.0]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights1-fractions1-1.0-3.0]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights2-fractions2-1.0-3.0]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights3-fractions3-1.0-3.0]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights4-fractions4-1.0-3.0]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights5-fractions5-0.0-3.0]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights6-fractions6-1.0-0.0]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_rejects_invalid_calibration[weights7-fractions7-1.0-nan]",
++  "tests/test_paper_conformance.py::test_aggregate_dp_unequal_weights_with_unprotected_and_zero_weight_packets",
++  "tests/test_paper_conformance.py::test_all_mode_topologies_use_the_tex_aggregation_endpoints",
++  "tests/test_paper_conformance.py::test_buffer_admits_all_clients_tied_at_trigger_time",
++  "tests/test_paper_conformance.py::test_candidate_link_metric_matches_tex_link_formula",
++  "tests/test_paper_conformance.py::test_client_training_seed_is_stable_and_stage_specific",
++  "tests/test_paper_conformance.py::test_cloud_mode_synchronizes_global_while_edge_mode_keeps_returned_state",
++  "tests/test_paper_conformance.py::test_cloud_round_fuses_direct_and_interface_iii_contributions_once",
++  "tests/test_paper_conformance.py::test_cloud_weights_are_exact_represented_sample_mass",
++  "tests/test_paper_conformance.py::test_combined_update_packet_keeps_he_after_worker_dp_is_deferred",
++  "tests/test_paper_conformance.py::test_communication_scenario_only_reduces_middle_phase_bandwidth",
++  "tests/test_paper_conformance.py::test_compute_scenario_only_slows_middle_phase_compute",
++  "tests/test_paper_conformance.py::test_controlled_aggregator_uses_current_formal_cifar_model_name",
++  "tests/test_paper_conformance.py::test_cross_domain_update_dp_is_applied_to_the_transmission_packet",
++  "tests/test_paper_conformance.py::test_deadline_satisfaction_ratio_counts_skip_as_miss_and_ignores_ordinary_clients",
++  "tests/test_paper_conformance.py::test_deadline_satisfaction_ratio_is_none_without_fast_response_clients",
++  "tests/test_paper_conformance.py::test_direct_cloud_flow_counts_each_latency_stage_once",
++  "tests/test_paper_conformance.py::test_direct_cloud_is_round_synchronous_even_when_edge_buffer_is_partial",
++  "tests/test_paper_conformance.py::test_direct_cloud_update_is_rebased_to_current_global_model",
++  "tests/test_paper_conformance.py::test_dirichlet_alpha_controls_non_iid_strength",
++  "tests/test_paper_conformance.py::test_dirichlet_partition_is_seeded_complete_and_disjoint",
++  "tests/test_paper_conformance.py::test_distributed_aggregate_dp_is_disabled_without_combined_packets",
++  "tests/test_paper_conformance.py::test_distributed_aggregate_dp_shares_match_release_noise",
++  "tests/test_paper_conformance.py::test_dp_event_counts_match_every_tex_mode",
++  "tests/test_paper_conformance.py::test_dp_noise_seed_supports_stable_composite_edge_group_ids",
++  "tests/test_paper_conformance.py::test_dp_tiers_start_at_client_specific_minimum_feasible_noise",
++  "tests/test_paper_conformance.py::test_dynamic_resource_aggregation_writes_stage_mode_selection_output",
++  "tests/test_paper_conformance.py::test_edge_aggregate_and_direct_updates_match_flat_sample_mass_fedavg",
++  "tests/test_paper_conformance.py::test_edge_aggregate_carries_sum_of_admitted_client_mass_only",
++  "tests/test_paper_conformance.py::test_edge_cloud_dp_packet_consumes_update_budget",
++  "tests/test_paper_conformance.py::test_edge_fedavg_returns_average_of_client_model_states",
++  "tests/test_paper_conformance.py::test_exact_solver_validation_reports_gap_and_both_solve_times",
++  "tests/test_paper_conformance.py::test_exposure_requirement_can_forbid_plaintext_without_requiring_dp",
++  "tests/test_paper_conformance.py::test_exposure_requirement_combines_confidentiality_and_dp_orthogonally",
++  "tests/test_paper_conformance.py::test_exposure_requirement_rejects_mode_when_requested_confidentiality_is_unavailable",
++  "tests/test_paper_conformance.py::test_extreme_edge_partition_uses_every_sample_once_across_all_clients",
++  "tests/test_paper_conformance.py::test_fast_response_deadline_is_hard_only_for_marked_client",
++  "tests/test_paper_conformance.py::test_fast_response_deadline_keeps_only_candidates_within_tau_max",
++  "tests/test_paper_conformance.py::test_feature_clip_profile_uses_actual_tex_excess",
++  "tests/test_paper_conformance.py::test_feature_dp_noise_uses_replacement_sensitivity",
++  "tests/test_paper_conformance.py::test_final_controlled_aggregator_excludes_legacy_privacy_scale_ablation_runs",
++  "tests/test_paper_conformance.py::test_final_main_heterogeneity_cases_forward_frozen_partition_cli",
++  "tests/test_paper_conformance.py::test_final_paper_plan_is_five_figures_two_tables_and_three_seeds",
++  "tests/test_paper_conformance.py::test_final_parameter_sensitivity_is_strategy_period_only",
++  "tests/test_paper_conformance.py::test_final_plan_freezes_fmnist_lightweight_cnn_as_auxiliary_validation",
++  "tests/test_paper_conformance.py::test_final_suite_builds_fmnist_auxiliary_case_without_expanding_main_figures",
++  "tests/test_paper_conformance.py::test_final_suite_builds_frozen_q98_matrix_without_inventing_fast_deadlines",
++  "tests/test_paper_conformance.py::test_final_suite_defaults_to_frozen_fast_response_config",
++  "tests/test_paper_conformance.py::test_final_suite_rejects_non_fmnist_auxiliary_config",
++  "tests/test_paper_conformance.py::test_final_suite_requires_explicit_fast_response_contract",
++  "tests/test_paper_conformance.py::test_fixed_dp_he_forces_combined_cross_domain_update_protection",
++  "tests/test_paper_conformance.py::test_fixed_mode_baselines_use_liieiiic_without_relaxing_feasibility",
++  "tests/test_paper_conformance.py::test_fixed_privacy_profile_locks_mechanism_and_dp_strength",
++  "tests/test_paper_conformance.py::test_fixed_splitfed_dp_diagnostic_forces_update_packet_dp",
++  "tests/test_paper_conformance.py::test_fixed_splitfed_uses_shared_trusted_edge_boundary",
++  "tests/test_paper_conformance.py::test_formal_configs_use_only_frozen_four_internal_baselines",
++  "tests/test_paper_conformance.py::test_formal_configs_use_three_frozen_random_seeds",
++  "tests/test_paper_conformance.py::test_formal_feature_dp_horizon_is_disabled",
++  "tests/test_paper_conformance.py::test_formal_paper_runner_isolated_from_async_staleness_mainline",
++  "tests/test_paper_conformance.py::test_formal_runner_rejects_top_level_async_staleness_controls",
++  "tests/test_paper_conformance.py::test_frozen_fast_response_config_is_twenty_percent_at_twenty_seconds",
++  "tests/test_paper_conformance.py::test_global_omega_excludes_dropped_cloud_clients",
++  "tests/test_paper_conformance.py::test_incremental_full_buffer_latency_matches_event_executor",
++  "tests/test_paper_conformance.py::test_incremental_profile_omega_matches_full_formula",
++  "tests/test_paper_conformance.py::test_lieiic_uploads_directly_to_cloud_without_edge_preaggregation",
++  "tests/test_paper_conformance.py::test_liieiiic_update_upload_links_select_mechanisms_independently",
++  "tests/test_paper_conformance.py::test_link_bandwidth_is_shared_across_candidates_in_one_round",
++  "tests/test_paper_conformance.py::test_local_block_iterator_respects_epoch_and_step_limits",
++  "tests/test_paper_conformance.py::test_local_training_is_reproducible_with_explicit_seed",
++  "tests/test_paper_conformance.py::test_logical_admission_is_independent_of_serial_wall_time",
++  "tests/test_paper_conformance.py::test_mode_link_events_share_counts_between_budget_and_communication",
++  "tests/test_paper_conformance.py::test_multilevel_dp_events_distinguish_client_and_edge_releases",
++  "tests/test_paper_conformance.py::test_multilevel_flow_uses_configured_edge_loop_count",
++  "tests/test_paper_conformance.py::test_multiseed_aggregator_defaults_match_formal_cifar_model",
++  "tests/test_paper_conformance.py::test_multiseed_aggregator_defaults_to_final_four_and_mean_std_metrics",
++  "tests/test_paper_conformance.py::test_paper_runner_forwards_dirichlet_alpha",
++  "tests/test_paper_conformance.py::test_paper_runner_forwards_staged_resource_scenario",
++  "tests/test_paper_conformance.py::test_paper_search_defaults_are_explicit",
++  "tests/test_paper_conformance.py::test_paper_smoke_limit_does_not_change_rdp_round_horizon",
++  "tests/test_paper_conformance.py::test_pareto_archive_scan_matches_exhaustive_dominance",
++  "tests/test_paper_conformance.py::test_pretrained_dp_keeps_frozen_parameters_constant[resnet18_pretrained-LIEIIC]",
++  "tests/test_paper_conformance.py::test_pretrained_dp_keeps_frozen_parameters_constant[resnet18_pretrained-LIIC]",
++  "tests/test_paper_conformance.py::test_pretrained_dp_keeps_frozen_parameters_constant[resnet18_pretrained_head-LIEIIC]",
++  "tests/test_paper_conformance.py::test_pretrained_dp_keeps_frozen_parameters_constant[resnet18_pretrained_head-LIIC]",
++  "tests/test_paper_conformance.py::test_profiled_feature_clip_excess_changes_local_omega",
++  "tests/test_paper_conformance.py::test_profiled_memory_capacity_filters_full_local_modes",
++  "tests/test_paper_conformance.py::test_proposed_policy_does_not_offer_unprotected_private_links",
++  "tests/test_paper_conformance.py::test_q96_privacy_aggregation_uses_realized_update_epsilon_without_budget_sweep",
++  "tests/test_paper_conformance.py::test_q96_privacy_trajectory_aggregates_roundwise_realized_consumption",
++  "tests/test_paper_conformance.py::test_q97_optimizer_output_contract_has_no_pareto_frontier_plot",
++  "tests/test_paper_conformance.py::test_q97_optimizer_summary_is_compact_mean_std_by_client_count",
++  "tests/test_paper_conformance.py::test_q98_table1_is_generated_from_formal_config_without_duplicate_constants",
++  "tests/test_paper_conformance.py::test_q98_table1_output_contract_is_machine_readable_and_traceable",
++  "tests/test_paper_conformance.py::test_random_policy_does_not_offer_unprotected_private_links",
++  "tests/test_paper_conformance.py::test_remaining_budget_raises_next_round_sigma_minimum",
++  "tests/test_paper_conformance.py::test_selector_cloud_weights_match_actual_sample_mass_fedavg",
++  "tests/test_paper_conformance.py::test_selector_profiles_use_actual_partition_sample_counts",
++  "tests/test_paper_conformance.py::test_split_modes_keep_labels_local",
++  "tests/test_paper_conformance.py::test_stage_mode_selection_uses_frozen_normal_constrained_normal_boundaries",
++  "tests/test_paper_conformance.py::test_staged_resource_phase_is_normal_constrained_normal",
++  "tests/test_paper_conformance.py::test_summary_flow_matches_event_executor_when_all_buffers_fill",
++  "tests/test_paper_conformance.py::test_trusted_edge_boundary_applies_to_all_policies",
++  "tests/test_paper_conformance.py::test_trusted_edge_splitfed_uses_he_without_feature_dp",
++  "tests/test_paper_conformance.py::test_unprotected_output_gradient_uses_ordinary_batch_average",
++  "tests/test_paper_conformance.py::test_update_dp_defaults_to_one_global_l2_clip",
++  "tests/test_paper_conformance.py::test_update_dp_is_applied_at_the_correct_multilevel_stage",
++  "tests/test_paper_conformance.py::test_update_dp_noise_uses_replacement_sensitivity",
++  "tests/test_paper_conformance.py::test_update_dp_variance_uses_admitted_aggregation_size",
++  "tests/test_paper_conformance.py::test_update_packet_dp_uses_max_within_packet_client_fraction",
++  "tests/test_paper_conformance.py::test_weighted_state_difference_norm_matches_fedavg_update",
++  "tests/test_privacy_accounting.py::test_calibrated_noise_reaches_fixed_total_target",
++  "tests/test_privacy_accounting.py::test_combined_update_mechanism_uses_both_guarantees",
++  "tests/test_privacy_accounting.py::test_dp_and_he_are_distinct_update_mechanisms",
++  "tests/test_privacy_accounting.py::test_empty_and_legacy_audits_do_not_claim_full_coverage",
++  "tests/test_privacy_accounting.py::test_feature_and_update_guarantees_are_not_added",
++  "tests/test_privacy_accounting.py::test_full_dp_coverage_is_not_a_privacy_proof",
++  "tests/test_privacy_accounting.py::test_later_dp_does_not_erase_an_earlier_non_dp_release",
++  "tests/test_privacy_accounting.py::test_more_rounds_increase_noise_not_total_target",
++  "tests/test_privacy_accounting.py::test_update_dp_is_applied_on_the_tex_eligible_stage",
++  "tests/test_privacy_accounting.py::test_zero_dp_events_and_profiled_he_do_not_imply_transcript_dp",
++  "tests/test_privacy_accounting.py::test_zero_events_have_zero_epsilon",
++  "tests/test_protection_rules.py::test_actual_packet_dp_and_budget_must_both_be_present",
++  "tests/test_protection_rules.py::test_aggregate_noise_shares_alone_are_not_packet_dp",
++  "tests/test_protection_rules.py::test_budget_exhaustion_can_leave_he_only_for_packet_goal",
++  "tests/test_protection_rules.py::test_edge_packet_dependency_uses_edge_weight_not_client_fraction",
++  "tests/test_protection_rules.py::test_he_does_not_consume_or_reset_dp_ledger",
++  "tests/test_protection_rules.py::test_independent_packets_have_max_weight_sensitivity",
++  "tests/test_protection_rules.py::test_individual_ciphertext_decryption_is_not_aggregate_only",
++  "tests/test_protection_rules.py::test_invalid_release_weights_are_rejected[weights0-deps0]",
++  "tests/test_protection_rules.py::test_invalid_release_weights_are_rejected[weights1-deps1]",
++  "tests/test_protection_rules.py::test_invalid_release_weights_are_rejected[weights2-deps2]",
++  "tests/test_protection_rules.py::test_invalid_release_weights_are_rejected[weights3-deps3]",
++  "tests/test_protection_rules.py::test_invalid_release_weights_are_rejected[weights4-deps4]",
++  "tests/test_protection_rules.py::test_no_available_protection_does_not_fall_back_to_plaintext",
++  "tests/test_protection_rules.py::test_output_goal_excludes_pure_he_even_with_available_budget",
++  "tests/test_protection_rules.py::test_profiled_he_does_not_cover_a_real_packet",
++  "tests/test_protection_rules.py::test_real_ckks_without_key_isolation_is_not_secure_aggregation",
++  "tests/test_protection_rules.py::test_shared_state_can_remove_averaging_sensitivity_reduction",
++  "tests/test_protection_rules.py::test_unknown_goal_is_rejected[]",
++  "tests/test_protection_rules.py::test_unknown_goal_is_rejected[encrypt_everything]",
++  "tests/test_protection_rules.py::test_unknown_goal_is_rejected[epsilon_zero]",
++  "tests/test_result_dp_selection.py::test_actual_candidate_enumeration_requires_cloud_dp[fixed_dp]",
++  "tests/test_result_dp_selection.py::test_actual_candidate_enumeration_requires_cloud_dp[fixed_dp_he]",
++  "tests/test_result_dp_selection.py::test_actual_candidate_enumeration_requires_cloud_dp[fixed_splitfed]",
++  "tests/test_result_dp_selection.py::test_actual_candidate_enumeration_requires_cloud_dp[individual_optimal]",
++  "tests/test_result_dp_selection.py::test_actual_candidate_enumeration_requires_cloud_dp[nsga2]",
++  "tests/test_result_dp_selection.py::test_actual_candidate_enumeration_requires_cloud_dp[ours]",
++  "tests/test_result_dp_selection.py::test_actual_candidate_enumeration_requires_cloud_dp[random]",
++  "tests/test_result_dp_selection.py::test_disabling_he_keeps_dp_only",
++  "tests/test_result_dp_selection.py::test_incompatible_controls_fail_explicitly[fixed_he]",
++  "tests/test_result_dp_selection.py::test_incompatible_controls_fail_explicitly[fixed_splitfed_no_protection]",
++  "tests/test_result_dp_selection.py::test_incompatible_controls_fail_explicitly[fixed_splitfed_trusted_edge]",
++  "tests/test_result_dp_selection.py::test_incompatible_controls_fail_explicitly[no_protection]",
++  "tests/test_result_dp_selection.py::test_legacy_pool_retains_pure_he_but_strict_gate_rejects_reuse",
++  "tests/test_result_dp_selection.py::test_stability_filter_cannot_restore_pure_he",
++  "tests/test_result_dp_selection.py::test_unknown_goal_and_unsupported_trust_boundary_fail",
++  "tests/test_selection.py::test_adaptive_baselines_share_cloud_dp_stability_filter",
++  "tests/test_selection.py::test_cloud_update_dp_is_removed_when_only_update_link_can_use_he",
++  "tests/test_selection.py::test_each_profile_derives_its_own_admitted_clients",
++  "tests/test_selection.py::test_edge_cloud_coverage_repair_keeps_one_cloud_path_per_edge",
++  "tests/test_selection.py::test_fixed_dp_is_not_rewritten_by_he_stability_filter",
++  "tests/test_selection.py::test_fixed_mode_ablation_keeps_global_privacy_selection",
++  "tests/test_selection.py::test_latency_ablation_ignores_convergence_objective",
++  "tests/test_selection.py::test_lowest_omega_seed_prefers_cloud_when_local_error_is_tied",
++  "tests/test_selection.py::test_nsga2_reference_search_is_deterministic_and_coverage_feasible",
++  "tests/test_selection.py::test_optimized_pareto_search_matches_full_event_evaluation",
++  "tests/test_selection.py::test_pareto_archive_contains_only_coverage_feasible_profiles",
++  "tests/test_selection.py::test_pareto_conflict_only_limits_search_clients",
++  "tests/test_selection.py::test_pareto_neighbor_budget_search_runs",
++  "tests/test_selection.py::test_reference_policies_fix_only_the_collaboration_topology",
++  "tests/test_selection.py::test_tex_stability_uses_coordinate_noise_not_dimension",
++  "tests/test_selection.py::test_unstable_cloud_dp_is_removed_when_he_is_available"
++]
+\ No newline at end of file
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/__init__.cpython-313.pyc and step23_mod/dynfed/__pycache__/__init__.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/config.cpython-313.pyc and step23_mod/dynfed/__pycache__/config.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/dynamic_training.cpython-313.pyc and step23_mod/dynfed/__pycache__/dynamic_training.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/flow_executor.cpython-313.pyc and step23_mod/dynfed/__pycache__/flow_executor.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/fmnist_dynamic_training.cpython-313.pyc and step23_mod/dynfed/__pycache__/fmnist_dynamic_training.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/fmnist_lenet5_dynamic.cpython-313.pyc and step23_mod/dynfed/__pycache__/fmnist_lenet5_dynamic.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/he_backend.cpython-313.pyc and step23_mod/dynfed/__pycache__/he_backend.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/independent_release.cpython-313.pyc and step23_mod/dynfed/__pycache__/independent_release.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/lenet5_training.cpython-313.pyc and step23_mod/dynfed/__pycache__/lenet5_training.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/nodes.cpython-313.pyc and step23_mod/dynfed/__pycache__/nodes.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/privacy.cpython-313.pyc and step23_mod/dynfed/__pycache__/privacy.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/protection_rules.cpython-313.pyc and step23_mod/dynfed/__pycache__/protection_rules.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/real_training.cpython-313.pyc and step23_mod/dynfed/__pycache__/real_training.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/selection.cpython-313.pyc and step23_mod/dynfed/__pycache__/selection.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/split_learning.cpython-313.pyc and step23_mod/dynfed/__pycache__/split_learning.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/training.cpython-313.pyc and step23_mod/dynfed/__pycache__/training.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/dynfed/__pycache__/version.cpython-313.pyc and step23_mod/dynfed/__pycache__/version.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/experiments/__pycache__/aggregate_multiseed_results.cpython-313.pyc and step23_mod/experiments/__pycache__/aggregate_multiseed_results.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/experiments/__pycache__/generate_table1_parameters.cpython-313.pyc and step23_mod/experiments/__pycache__/generate_table1_parameters.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/experiments/__pycache__/paper_final_plan.cpython-313.pyc and step23_mod/experiments/__pycache__/paper_final_plan.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/experiments/__pycache__/run_controlled_sweeps.cpython-313.pyc and step23_mod/experiments/__pycache__/run_controlled_sweeps.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/experiments/__pycache__/run_final_paper_suite.cpython-313.pyc and step23_mod/experiments/__pycache__/run_final_paper_suite.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/experiments/__pycache__/run_paper_config.cpython-313.pyc and step23_mod/experiments/__pycache__/run_paper_config.cpython-313.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/experiments/__pycache__/validate_pareto_search.cpython-313.pyc and step23_mod/experiments/__pycache__/validate_pareto_search.cpython-313.pyc differ
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/experiments/generate_table1_parameters.py step23_mod/experiments/generate_table1_parameters.py
+--- step23_src/DynFL-privacy-ytt/experiments/generate_table1_parameters.py	1970-01-01 00:00:00.000000000 +0000
++++ step23_mod/experiments/generate_table1_parameters.py	2026-09-19 13:02:31.491828140 +0000
+@@ -0,0 +1,85 @@
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++from pathlib import Path
++from typing import Any
++
++ROOT = Path(__file__).resolve().parents[1]
++DEFAULT_CONFIG = ROOT / "configs" / "paper_v30_cifar10_resnet18.json"
++DEFAULT_OUTPUT = ROOT / "out" / "paper_v31_final" / "table1_parameters.csv"
++
++# Frozen Q98 Table I: report formal system/training/privacy parameters directly
++# from the executable paper configuration instead of maintaining a second copy.
++TABLE1_FIELDS = (
++    ("Training", "Dataset", "training.dataset"),
++    ("Training", "Model", "training.model"),
++    ("Training", "Rounds", "training.rounds"),
++    ("Training", "Local epochs", "training.local_epochs"),
++    ("Training", "Learning rate", "training.learning_rate"),
++    ("Training", "Strategy period S_P", "training.selection_period"),
++    ("System", "Clients", "system.clients"),
++    ("System", "Edges", "system.edges"),
++    ("System", "Client heterogeneity", "system.client_heterogeneity"),
++    ("System", "Edge heterogeneity", "system.edge_heterogeneity"),
++    ("Network", "End-Edge rate (MB/s)", "network.end_edge_rate_mb_s"),
++    ("Network", "End-Cloud rate (MB/s)", "network.end_cloud_rate_mb_s"),
++    ("Network", "Edge-Cloud rate (MB/s)", "network.edge_cloud_rate_mb_s"),
++    ("Privacy", "Lifetime update epsilon", "privacy.update_epsilon_budget"),
++    ("Privacy", "Delta", "privacy.delta"),
++    ("Privacy", "Clipping norm C", "privacy.clip_norm"),
++    ("Privacy", "Accounting mode", "privacy.accounting_mode"),
++    ("Privacy", "Candidate mechanisms", "privacy.candidate_mechanisms"),
++    ("Optimization", "Pareto archive size", "optimization.pareto_archive_size"),
++    ("Optimization", "Pareto beam size", "optimization.pareto_beam_size"),
++    ("Optimization", "Pareto max iterations", "optimization.pareto_max_iters"),
++)
++
++
++def _get(config: dict[str, Any], path: str) -> Any:
++    value: Any = config
++    for key in path.split("."):
++        value = value[key]
++    return value
++
++
++def build_table1_rows(config: dict[str, Any]) -> list[dict[str, str]]:
++    rows = []
++    for section, parameter, path in TABLE1_FIELDS:
++        value = _get(config, path)
++        if isinstance(value, list):
++            rendered = ", ".join(str(item) for item in value)
++        elif isinstance(value, bool):
++            rendered = str(value).lower()
++        else:
++            rendered = str(value)
++        rows.append({"section": section, "parameter": parameter, "value": rendered, "config_path": path})
++    return rows
++
++
++def write_table1(rows: list[dict[str, str]], output: Path) -> None:
++    output.parent.mkdir(parents=True, exist_ok=True)
++    with output.open("w", newline="", encoding="utf-8") as handle:
++        writer = csv.DictWriter(handle, fieldnames=("section", "parameter", "value", "config_path"))
++        writer.writeheader()
++        writer.writerows(rows)
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description="Generate frozen Q98 Table I from the formal executable config.")
++    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
++    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    config = json.loads(args.config.resolve().read_text(encoding="utf-8"))
++    rows = build_table1_rows(config)
++    write_table1(rows, args.output.resolve())
++    print(args.output.resolve())
++
++
++if __name__ == "__main__":
++    main()
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_paper_conformance.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_paper_conformance.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_privacy_accounting.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_privacy_accounting.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_protection_rules.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_protection_rules.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_result_dp_selection.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_result_dp_selection.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_selection.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_selection.cpython-313-pytest-9.0.2.pyc differ
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/tests/test_paper_conformance.py step23_mod/tests/test_paper_conformance.py
+--- step23_src/DynFL-privacy-ytt/tests/test_paper_conformance.py	2026-09-19 12:54:19.000000000 +0000
++++ step23_mod/tests/test_paper_conformance.py	2026-09-19 13:02:31.491828140 +0000
+@@ -2347,3 +2347,30 @@
+     assert '"bounded_pareto_solve_time_sec"' in source
+     assert '"exact_solver_solve_time_sec"' in source
+     assert "pareto_frontier" not in source
++
++
++def test_q98_table1_is_generated_from_formal_config_without_duplicate_constants() -> None:
++    from experiments.generate_table1_parameters import build_table1_rows
++    from experiments.run_paper_config import DEFAULT_CONFIG
++
++    config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
++    rows = build_table1_rows(config)
++    by_path = {row["config_path"]: row for row in rows}
++    assert by_path["training.dataset"]["value"] == "cifar10"
++    assert by_path["training.model"]["value"] == "resnet18_pretrained_head"
++    assert by_path["system.clients"]["value"] == "100"
++    assert by_path["system.edges"]["value"] == "10"
++    assert by_path["privacy.update_epsilon_budget"]["value"] == "8"
++    assert by_path["privacy.delta"]["value"] == "1e-05"
++    assert by_path["privacy.clip_norm"]["value"] == "0.25"
++    assert by_path["privacy.candidate_mechanisms"]["value"] == "dp, he3, dp_he3"
++
++
++def test_q98_table1_output_contract_is_machine_readable_and_traceable() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "generate_table1_parameters.py").read_text(encoding="utf-8")
++    assert 'table1_parameters.csv' in source
++    assert '"config_path"' in source
++    assert '"training.selection_period"' in source
++    assert '"privacy.update_epsilon_budget"' in source
++    assert '"optimization.pareto_max_iters"' in source

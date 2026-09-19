@@ -1,0 +1,128 @@
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/experiments/generate_table1_parameters.py step23_mod/experiments/generate_table1_parameters.py
+--- step23_src/DynFL-privacy-ytt/experiments/generate_table1_parameters.py	1970-01-01 00:00:00.000000000 +0000
++++ step23_mod/experiments/generate_table1_parameters.py	2026-09-19 13:02:31.491828140 +0000
+@@ -0,0 +1,85 @@
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++from pathlib import Path
++from typing import Any
++
++ROOT = Path(__file__).resolve().parents[1]
++DEFAULT_CONFIG = ROOT / "configs" / "paper_v30_cifar10_resnet18.json"
++DEFAULT_OUTPUT = ROOT / "out" / "paper_v31_final" / "table1_parameters.csv"
++
++# Frozen Q98 Table I: report formal system/training/privacy parameters directly
++# from the executable paper configuration instead of maintaining a second copy.
++TABLE1_FIELDS = (
++    ("Training", "Dataset", "training.dataset"),
++    ("Training", "Model", "training.model"),
++    ("Training", "Rounds", "training.rounds"),
++    ("Training", "Local epochs", "training.local_epochs"),
++    ("Training", "Learning rate", "training.learning_rate"),
++    ("Training", "Strategy period S_P", "training.selection_period"),
++    ("System", "Clients", "system.clients"),
++    ("System", "Edges", "system.edges"),
++    ("System", "Client heterogeneity", "system.client_heterogeneity"),
++    ("System", "Edge heterogeneity", "system.edge_heterogeneity"),
++    ("Network", "End-Edge rate (MB/s)", "network.end_edge_rate_mb_s"),
++    ("Network", "End-Cloud rate (MB/s)", "network.end_cloud_rate_mb_s"),
++    ("Network", "Edge-Cloud rate (MB/s)", "network.edge_cloud_rate_mb_s"),
++    ("Privacy", "Lifetime update epsilon", "privacy.update_epsilon_budget"),
++    ("Privacy", "Delta", "privacy.delta"),
++    ("Privacy", "Clipping norm C", "privacy.clip_norm"),
++    ("Privacy", "Accounting mode", "privacy.accounting_mode"),
++    ("Privacy", "Candidate mechanisms", "privacy.candidate_mechanisms"),
++    ("Optimization", "Pareto archive size", "optimization.pareto_archive_size"),
++    ("Optimization", "Pareto beam size", "optimization.pareto_beam_size"),
++    ("Optimization", "Pareto max iterations", "optimization.pareto_max_iters"),
++)
++
++
++def _get(config: dict[str, Any], path: str) -> Any:
++    value: Any = config
++    for key in path.split("."):
++        value = value[key]
++    return value
++
++
++def build_table1_rows(config: dict[str, Any]) -> list[dict[str, str]]:
++    rows = []
++    for section, parameter, path in TABLE1_FIELDS:
++        value = _get(config, path)
++        if isinstance(value, list):
++            rendered = ", ".join(str(item) for item in value)
++        elif isinstance(value, bool):
++            rendered = str(value).lower()
++        else:
++            rendered = str(value)
++        rows.append({"section": section, "parameter": parameter, "value": rendered, "config_path": path})
++    return rows
++
++
++def write_table1(rows: list[dict[str, str]], output: Path) -> None:
++    output.parent.mkdir(parents=True, exist_ok=True)
++    with output.open("w", newline="", encoding="utf-8") as handle:
++        writer = csv.DictWriter(handle, fieldnames=("section", "parameter", "value", "config_path"))
++        writer.writeheader()
++        writer.writerows(rows)
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description="Generate frozen Q98 Table I from the formal executable config.")
++    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
++    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    config = json.loads(args.config.resolve().read_text(encoding="utf-8"))
++    rows = build_table1_rows(config)
++    write_table1(rows, args.output.resolve())
++    print(args.output.resolve())
++
++
++if __name__ == "__main__":
++    main()
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_paper_conformance.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_paper_conformance.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_privacy_accounting.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_privacy_accounting.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_protection_rules.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_protection_rules.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_result_dp_selection.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_result_dp_selection.cpython-313-pytest-9.0.2.pyc differ
+Binary files step23_src/DynFL-privacy-ytt/tests/__pycache__/test_selection.cpython-313-pytest-9.0.2.pyc and step23_mod/tests/__pycache__/test_selection.cpython-313-pytest-9.0.2.pyc differ
+diff -ruN '--exclude=.git' step23_src/DynFL-privacy-ytt/tests/test_paper_conformance.py step23_mod/tests/test_paper_conformance.py
+--- step23_src/DynFL-privacy-ytt/tests/test_paper_conformance.py	2026-09-19 12:54:19.000000000 +0000
++++ step23_mod/tests/test_paper_conformance.py	2026-09-19 13:02:31.491828140 +0000
+@@ -2347,3 +2347,30 @@
+     assert '"bounded_pareto_solve_time_sec"' in source
+     assert '"exact_solver_solve_time_sec"' in source
+     assert "pareto_frontier" not in source
++
++
++def test_q98_table1_is_generated_from_formal_config_without_duplicate_constants() -> None:
++    from experiments.generate_table1_parameters import build_table1_rows
++    from experiments.run_paper_config import DEFAULT_CONFIG
++
++    config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
++    rows = build_table1_rows(config)
++    by_path = {row["config_path"]: row for row in rows}
++    assert by_path["training.dataset"]["value"] == "cifar10"
++    assert by_path["training.model"]["value"] == "resnet18_pretrained_head"
++    assert by_path["system.clients"]["value"] == "100"
++    assert by_path["system.edges"]["value"] == "10"
++    assert by_path["privacy.update_epsilon_budget"]["value"] == "8"
++    assert by_path["privacy.delta"]["value"] == "1e-05"
++    assert by_path["privacy.clip_norm"]["value"] == "0.25"
++    assert by_path["privacy.candidate_mechanisms"]["value"] == "dp, he3, dp_he3"
++
++
++def test_q98_table1_output_contract_is_machine_readable_and_traceable() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "generate_table1_parameters.py").read_text(encoding="utf-8")
++    assert 'table1_parameters.csv' in source
++    assert '"config_path"' in source
++    assert '"training.selection_period"' in source
++    assert '"privacy.update_epsilon_budget"' in source
++    assert '"optimization.pareto_max_iters"' in source

@@ -2347,3 +2347,30 @@ def test_q97_optimizer_output_contract_has_no_pareto_frontier_plot() -> None:
     assert '"bounded_pareto_solve_time_sec"' in source
     assert '"exact_solver_solve_time_sec"' in source
     assert "pareto_frontier" not in source
+
+
+def test_q98_table1_is_generated_from_formal_config_without_duplicate_constants() -> None:
+    from experiments.generate_table1_parameters import build_table1_rows
+    from experiments.run_paper_config import DEFAULT_CONFIG
+
+    config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    rows = build_table1_rows(config)
+    by_path = {row["config_path"]: row for row in rows}
+    assert by_path["training.dataset"]["value"] == "cifar10"
+    assert by_path["training.model"]["value"] == "resnet18_pretrained_head"
+    assert by_path["system.clients"]["value"] == "100"
+    assert by_path["system.edges"]["value"] == "10"
+    assert by_path["privacy.update_epsilon_budget"]["value"] == "8"
+    assert by_path["privacy.delta"]["value"] == "1e-05"
+    assert by_path["privacy.clip_norm"]["value"] == "0.25"
+    assert by_path["privacy.candidate_mechanisms"]["value"] == "dp, he3, dp_he3"
+
+
+def test_q98_table1_output_contract_is_machine_readable_and_traceable() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "generate_table1_parameters.py").read_text(encoding="utf-8")
+    assert 'table1_parameters.csv' in source
+    assert '"config_path"' in source
+    assert '"training.selection_period"' in source
+    assert '"privacy.update_epsilon_budget"' in source
+    assert '"optimization.pareto_max_iters"' in source
