@@ -2072,3 +2072,40 @@ def test_multiseed_aggregator_defaults_to_final_four_and_mean_std_metrics() -> N
         assert policy in text
     assert 'row[f"{metric}_mean"]' in text
     assert 'row[f"{metric}_std"]' in text
+
+
+def test_final_paper_plan_is_five_figures_two_tables_and_three_seeds():
+    from experiments.paper_final_plan import (
+        FINAL_FIGURES, FINAL_TABLES, FORMAL_SEEDS, validate_final_plan,
+    )
+    validate_final_plan()
+    assert len(FINAL_FIGURES) == 5
+    assert len(FINAL_TABLES) == 2
+    assert FORMAL_SEEDS == (40, 42, 44)
+
+
+def test_final_parameter_sensitivity_is_strategy_period_only():
+    import json
+    import sys
+    from pathlib import Path
+    experiments_dir = Path(__file__).resolve().parents[1] / "experiments"
+    sys.path.insert(0, str(experiments_dir))
+    from run_controlled_sweeps import build_cases
+    from run_paper_config import DEFAULT_CONFIG
+
+    base = json.loads(DEFAULT_CONFIG.resolve().read_text(encoding="utf-8"))
+    cases = build_cases(base, ["period"])
+    assert [(case.study, case.setting) for case in cases] == [
+        ("period", "1"), ("period", "5"), ("period", "10")
+    ]
+    assert all(case.policies == ["full_dynfl"] for case in cases)
+
+
+def test_final_controlled_aggregator_excludes_legacy_privacy_scale_ablation_runs():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "experiments" / "aggregate_controlled_results.py").read_text(encoding="utf-8")
+    main_body = source.split("def main() -> None:", 1)[1].split("\ndef plot_period", 1)[0]
+    assert 'for period in (1, 5, 10)' in main_body
+    assert 'root / "privacy"' not in main_body
+    assert 'root / "scale"' not in main_body
+    assert 'root / "ablation"' not in main_body

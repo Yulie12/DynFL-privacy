@@ -1,0 +1,317 @@
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' step15_src/DynFL-privacy-ytt/experiments/aggregate_controlled_results.py step15_mod/experiments/aggregate_controlled_results.py
+--- step15_src/DynFL-privacy-ytt/experiments/aggregate_controlled_results.py	2026-09-19 09:41:50.000000000 +0000
++++ step15_mod/experiments/aggregate_controlled_results.py	2026-09-19 09:44:49.634865705 +0000
+@@ -28,18 +28,12 @@
+         description="Aggregate the versioned controlled paper experiments."
+     )
+     parser.add_argument(
+-        "--root", type=Path, default=ROOT / "out" / "paper_v28_controlled"
++        "--root", type=Path, default=ROOT / "out" / "paper_v31_final" / "sensitivity"
+     )
+     parser.add_argument("--seeds", type=int, nargs="+", default=[40, 42, 44])
+-    parser.add_argument(
+-        "--ablation-seeds",
+-        type=int,
+-        nargs="+",
+-        default=[40, 41, 42, 43, 44],
+-    )
+     parser.add_argument("--rounds", type=int, default=100)
+     parser.add_argument("--edges", type=int, default=10)
+-    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v28_controlled_aggregate")
++    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v31_final" / "sensitivity_aggregate")
+     parser.add_argument("--paper-figure-dir", type=Path, default=ROOT / "tex" / "paper" / "figures")
+     return parser.parse_args()
+ 
+@@ -72,21 +66,19 @@
+ 
+ 
+ def main() -> None:
++    """Aggregate only the frozen Q94 S_P sensitivity study."""
+     args = parse_args()
+     root = args.root.resolve()
+     seeds = list(dict.fromkeys(int(seed) for seed in args.seeds))
+-    ablation_seeds = list(
+-        dict.fromkeys(int(seed) for seed in args.ablation_seeds)
+-    )
+     output_dir = args.output_dir.resolve()
+     figure_dir = args.paper_figure_dir.resolve()
+     output_dir.mkdir(parents=True, exist_ok=True)
+     figure_dir.mkdir(parents=True, exist_ok=True)
+ 
+     period_rows: list[dict[str, Any]] = []
+-    for period in (1, 5, 10, 20):
++    for period in (1, 5, 10):
+         _sources, rows = collect_case(
+-            root=root / "period" / f"sp_{period}",
++            root=root / f"sp_{period}",
+             seeds=seeds,
+             policies=["full_dynfl"],
+             rounds=args.rounds,
+@@ -97,76 +89,7 @@
+         )
+         period_rows.append({"period": period, **rows[0]})
+     write_csv(output_dir / "strategy_period_statistics.csv", period_rows)
+-    plot_period(period_rows, figure_dir / "cifar10_strategy_period_v26.png")
+-
+-    privacy_rows: list[dict[str, Any]] = []
+-    for budget in (1.0, 2.0, 4.0, 8.0):
+-        _sources, rows = collect_case(
+-            root=root / "privacy" / f"eps_{budget:g}",
+-            seeds=seeds,
+-            policies=["full_dynfl"],
+-            rounds=args.rounds,
+-            clients=100,
+-            edges=args.edges,
+-            selection_period=1,
+-            privacy_budget=budget,
+-        )
+-        privacy_rows.append({"privacy_budget": budget, **rows[0]})
+-    write_csv(output_dir / "privacy_budget_statistics.csv", privacy_rows)
+-    plot_privacy(privacy_rows, figure_dir / "cifar10_privacy_budget_v26.png")
+-
+-    scale_rows: list[dict[str, Any]] = []
+-    for clients in (20, 50, 100):
+-        _sources, rows = collect_case(
+-            root=root / "scale" / f"clients_{clients}",
+-            seeds=seeds,
+-            policies=["full_dynfl"],
+-            rounds=args.rounds,
+-            clients=clients,
+-            edges=args.edges,
+-            selection_period=1,
+-            privacy_budget=8.0,
+-        )
+-        scale_rows.extend({"clients": clients, **row} for row in rows)
+-    write_csv(output_dir / "decision_scalability_statistics.csv", scale_rows)
+-    plot_scale(scale_rows, figure_dir / "cifar10_decision_scalability_v26.png")
+-
+-    ablation_policies = [
+-        "fixed_mode_fixed_privacy",
+-        "dynamic_mode_fixed_privacy",
+-        "fixed_mode_dynamic_privacy",
+-        "full_dynfl",
+-    ]
+-    ablation_sources, ablation_rows = collect_case(
+-        root=root / "ablation",
+-        seeds=ablation_seeds,
+-        policies=ablation_policies,
+-        rounds=args.rounds,
+-        clients=100,
+-        edges=args.edges,
+-        selection_period=1,
+-        privacy_budget=8.0,
+-    )
+-    write_csv(output_dir / "ablation_statistics.csv", ablation_rows)
+-    time_rows, plotted, _horizon = aggregate_time(
+-        ablation_sources,
+-        ablation_seeds,
+-        ablation_policies,
+-        rounds=args.rounds,
+-    )
+-    write_csv(output_dir / "ablation_wall_time_statistics.csv", time_rows)
+-    plot_accuracy_over_time(
+-        plotted,
+-        ablation_policies,
+-        figure_dir / "cifar10_ablation_wall_time_accuracy_v26.png",
+-        tail_fraction=0.25,
+-        labels={
+-            "fixed_mode_fixed_privacy": "Fixed Mode + Fixed Privacy",
+-            "dynamic_mode_fixed_privacy": "Dynamic Mode + Fixed Privacy",
+-            "fixed_mode_dynamic_privacy": "Fixed Mode + Dynamic Privacy",
+-            "full_dynfl": "Full DynFL",
+-        },
+-    )
++    plot_period(period_rows, figure_dir / "fig5_strategy_period_sensitivity.png")
+     print(output_dir)
+ 
+ 
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' step15_src/DynFL-privacy-ytt/experiments/paper_final_plan.py step15_mod/experiments/paper_final_plan.py
+--- step15_src/DynFL-privacy-ytt/experiments/paper_final_plan.py	1970-01-01 00:00:00.000000000 +0000
++++ step15_mod/experiments/paper_final_plan.py	2026-09-19 09:44:08.320672005 +0000
+@@ -0,0 +1,36 @@
++"""Frozen Q94--Q98 paper-output contract.
++
++This module is intentionally declarative: it prevents legacy diagnostics and
++older sweeps from silently becoming formal paper experiments again.
++"""
++from __future__ import annotations
++
++FINAL_POLICIES = (
++    "fixed_mode_fixed_privacy",
++    "dynamic_mode_fixed_privacy",
++    "fixed_mode_dynamic_privacy",
++    "full_dynfl",
++)
++FORMAL_SEEDS = (40, 42, 44)
++STRATEGY_PERIOD_VALUES = (1, 5, 10)
++RESOURCE_SCENARIOS = ("communication", "compute")
++
++FINAL_FIGURES = {
++    "fig1_main_four_methods": "Four internal methods: accuracy/convergence, system latency, and privacy budget.",
++    "fig2_dynamic_resources": "Communication/compute constrained Normal-Constrained-Normal scenarios with stage-wise Mode Selection Ratio.",
++    "fig3_dynamic_vs_fixed_privacy": "Dynamic Privacy vs Fixed Privacy: accuracy/convergence and system latency against privacy-budget consumption.",
++    "fig4_fast_response": "Fast-response scenario: Deadline Satisfaction Ratio, Feasible Participation Ratio, system latency, and model performance.",
++    "fig5_optimizer_and_sp": "Exact Solver vs Bounded Pareto objective gap/solve time plus S_P sensitivity.",
++}
++FINAL_TABLES = {
++    "table1_parameters": "System, training, and privacy parameters.",
++    "table2_methods_results": "Definitions of the four internal methods and compact core-result summary.",
++}
++
++
++def validate_final_plan() -> None:
++    assert len(FINAL_FIGURES) == 5
++    assert len(FINAL_TABLES) == 2
++    assert len(FORMAL_SEEDS) == 3
++    assert STRATEGY_PERIOD_VALUES == (1, 5, 10)
++    assert RESOURCE_SCENARIOS == ("communication", "compute")
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' step15_src/DynFL-privacy-ytt/experiments/run_controlled_sweeps.py step15_mod/experiments/run_controlled_sweeps.py
+--- step15_src/DynFL-privacy-ytt/experiments/run_controlled_sweeps.py	2026-09-19 09:41:50.000000000 +0000
++++ step15_mod/experiments/run_controlled_sweeps.py	2026-09-19 09:44:08.182662882 +0000
+@@ -27,14 +27,14 @@
+     parser.add_argument(
+         "--studies",
+         nargs="+",
+-        choices=["period", "privacy", "scale", "ablation"],
+-        default=["period", "privacy", "scale", "ablation"],
++        choices=["period"],
++        default=["period"],
+     )
+     parser.add_argument(
+         "--seeds",
+         type=int,
+         nargs="+",
+-        help="Override the default three seed sweeps and five seed ablation.",
++        help="Override the default three formal seeds.",
+     )
+     parser.add_argument("--rounds", type=int)
+     parser.add_argument("--dry-run", action="store_true")
+@@ -47,53 +47,20 @@
+ 
+ 
+ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
++    """Build the final Q94 parameter-sensitivity study.
++
++    Privacy-budget and client-scale sweeps are intentionally not part of the
++    formal paper sensitivity suite.  The only parameter sensitivity retained
++    by Q94 is the strategy update period S_P, using three representative
++    values around the default.
++    """
+     cases: list[SweepCase] = []
+     if "period" in studies:
+-        for period in (1, 5, 10, 20):
++        for period in (1, 5, 10):
+             config = copy.deepcopy(base)
+             config["training"]["selection_period"] = period
+-            config["output_root"] = f"out/paper_v28_controlled/period/sp_{period}"
++            config["output_root"] = f"out/paper_v31_final/sensitivity/sp_{period}"
+             cases.append(SweepCase("period", str(period), config, ["full_dynfl"]))
+-
+-    if "privacy" in studies:
+-        for budget in (1.0, 2.0, 4.0, 8.0):
+-            config = copy.deepcopy(base)
+-            config["privacy"]["initial_epsilon"] = budget
+-            config["privacy"]["update_epsilon_budget"] = budget
+-            label = f"{budget:g}"
+-            config["output_root"] = f"out/paper_v28_controlled/privacy/eps_{label}"
+-            cases.append(SweepCase("privacy", label, config, ["full_dynfl"]))
+-
+-    if "scale" in studies:
+-        for clients in (20, 50, 100):
+-            config = copy.deepcopy(base)
+-            config["system"]["clients"] = clients
+-            config["output_root"] = f"out/paper_v28_controlled/scale/clients_{clients}"
+-            cases.append(
+-                SweepCase(
+-                    "scale",
+-                    str(clients),
+-                    config,
+-                    ["full_dynfl"],
+-                )
+-            )
+-
+-    if "ablation" in studies:
+-        config = copy.deepcopy(base)
+-        config["output_root"] = "out/paper_v28_controlled/ablation"
+-        cases.append(
+-            SweepCase(
+-                "ablation",
+-                "complete",
+-                config,
+-                [
+-                    "fixed_mode_fixed_privacy",
+-                    "dynamic_mode_fixed_privacy",
+-                    "fixed_mode_dynamic_privacy",
+-                    "full_dynfl",
+-                ],
+-            )
+-        )
+     return cases
+ 
+ 
+@@ -150,11 +117,7 @@
+     manifest: list[dict[str, object]] = []
+ 
+     for case in build_cases(base, list(dict.fromkeys(args.studies))):
+-        case_seeds = args.seeds or (
+-            [40, 41, 42, 43, 44]
+-            if case.study == "ablation"
+-            else [40, 42, 44]
+-        )
++        case_seeds = args.seeds or [40, 42, 44]
+         for seed in list(dict.fromkeys(int(value) for value in case_seeds)):
+             output_root = ROOT / case.config["output_root"]
+             skipped = (
+@@ -191,7 +154,7 @@
+             if not args.dry_run and not skipped:
+                 subprocess.run(command, cwd=ROOT, check=True)
+ 
+-    manifest_path = ROOT / "out" / "paper_v28_controlled" / "sweep_manifest.json"
++    manifest_path = ROOT / "out" / "paper_v31_final" / "sensitivity" / "sweep_manifest.json"
+     if not args.dry_run:
+         manifest_path.parent.mkdir(parents=True, exist_ok=True)
+         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+diff -ruN '--exclude=.pytest_cache' '--exclude=__pycache__' '--exclude=*.pyc' step15_src/DynFL-privacy-ytt/tests/test_paper_conformance.py step15_mod/tests/test_paper_conformance.py
+--- step15_src/DynFL-privacy-ytt/tests/test_paper_conformance.py	2026-09-19 09:41:50.000000000 +0000
++++ step15_mod/tests/test_paper_conformance.py	2026-09-19 09:44:49.769610329 +0000
+@@ -2072,3 +2072,40 @@
+         assert policy in text
+     assert 'row[f"{metric}_mean"]' in text
+     assert 'row[f"{metric}_std"]' in text
++
++
++def test_final_paper_plan_is_five_figures_two_tables_and_three_seeds():
++    from experiments.paper_final_plan import (
++        FINAL_FIGURES, FINAL_TABLES, FORMAL_SEEDS, validate_final_plan,
++    )
++    validate_final_plan()
++    assert len(FINAL_FIGURES) == 5
++    assert len(FINAL_TABLES) == 2
++    assert FORMAL_SEEDS == (40, 42, 44)
++
++
++def test_final_parameter_sensitivity_is_strategy_period_only():
++    import json
++    import sys
++    from pathlib import Path
++    experiments_dir = Path(__file__).resolve().parents[1] / "experiments"
++    sys.path.insert(0, str(experiments_dir))
++    from run_controlled_sweeps import build_cases
++    from run_paper_config import DEFAULT_CONFIG
++
++    base = json.loads(DEFAULT_CONFIG.resolve().read_text(encoding="utf-8"))
++    cases = build_cases(base, ["period"])
++    assert [(case.study, case.setting) for case in cases] == [
++        ("period", "1"), ("period", "5"), ("period", "10")
++    ]
++    assert all(case.policies == ["full_dynfl"] for case in cases)
++
++
++def test_final_controlled_aggregator_excludes_legacy_privacy_scale_ablation_runs():
++    from pathlib import Path
++    source = (Path(__file__).resolve().parents[1] / "experiments" / "aggregate_controlled_results.py").read_text(encoding="utf-8")
++    main_body = source.split("def main() -> None:", 1)[1].split("\ndef plot_period", 1)[0]
++    assert 'for period in (1, 5, 10)' in main_body
++    assert 'root / "privacy"' not in main_body
++    assert 'root / "scale"' not in main_body
++    assert 'root / "ablation"' not in main_body

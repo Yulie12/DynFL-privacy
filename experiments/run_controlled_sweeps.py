@@ -27,14 +27,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--studies",
         nargs="+",
-        choices=["period", "privacy", "scale", "ablation"],
-        default=["period", "privacy", "scale", "ablation"],
+        choices=["period"],
+        default=["period"],
     )
     parser.add_argument(
         "--seeds",
         type=int,
         nargs="+",
-        help="Override the default three seed sweeps and five seed ablation.",
+        help="Override the default three formal seeds.",
     )
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--dry-run", action="store_true")
@@ -47,53 +47,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
+    """Build the final Q94 parameter-sensitivity study.
+
+    Privacy-budget and client-scale sweeps are intentionally not part of the
+    formal paper sensitivity suite.  The only parameter sensitivity retained
+    by Q94 is the strategy update period S_P, using three representative
+    values around the default.
+    """
     cases: list[SweepCase] = []
     if "period" in studies:
-        for period in (1, 5, 10, 20):
+        for period in (1, 5, 10):
             config = copy.deepcopy(base)
             config["training"]["selection_period"] = period
-            config["output_root"] = f"out/paper_v28_controlled/period/sp_{period}"
+            config["output_root"] = f"out/paper_v31_final/sensitivity/sp_{period}"
             cases.append(SweepCase("period", str(period), config, ["full_dynfl"]))
-
-    if "privacy" in studies:
-        for budget in (1.0, 2.0, 4.0, 8.0):
-            config = copy.deepcopy(base)
-            config["privacy"]["initial_epsilon"] = budget
-            config["privacy"]["update_epsilon_budget"] = budget
-            label = f"{budget:g}"
-            config["output_root"] = f"out/paper_v28_controlled/privacy/eps_{label}"
-            cases.append(SweepCase("privacy", label, config, ["full_dynfl"]))
-
-    if "scale" in studies:
-        for clients in (20, 50, 100):
-            config = copy.deepcopy(base)
-            config["system"]["clients"] = clients
-            config["output_root"] = f"out/paper_v28_controlled/scale/clients_{clients}"
-            cases.append(
-                SweepCase(
-                    "scale",
-                    str(clients),
-                    config,
-                    ["full_dynfl"],
-                )
-            )
-
-    if "ablation" in studies:
-        config = copy.deepcopy(base)
-        config["output_root"] = "out/paper_v28_controlled/ablation"
-        cases.append(
-            SweepCase(
-                "ablation",
-                "complete",
-                config,
-                [
-                    "fixed_mode_fixed_privacy",
-                    "dynamic_mode_fixed_privacy",
-                    "fixed_mode_dynamic_privacy",
-                    "full_dynfl",
-                ],
-            )
-        )
     return cases
 
 
@@ -150,11 +117,7 @@ def main() -> None:
     manifest: list[dict[str, object]] = []
 
     for case in build_cases(base, list(dict.fromkeys(args.studies))):
-        case_seeds = args.seeds or (
-            [40, 41, 42, 43, 44]
-            if case.study == "ablation"
-            else [40, 42, 44]
-        )
+        case_seeds = args.seeds or [40, 42, 44]
         for seed in list(dict.fromkeys(int(value) for value in case_seeds)):
             output_root = ROOT / case.config["output_root"]
             skipped = (
@@ -191,7 +154,7 @@ def main() -> None:
             if not args.dry_run and not skipped:
                 subprocess.run(command, cwd=ROOT, check=True)
 
-    manifest_path = ROOT / "out" / "paper_v28_controlled" / "sweep_manifest.json"
+    manifest_path = ROOT / "out" / "paper_v31_final" / "sensitivity" / "sweep_manifest.json"
     if not args.dry_run:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

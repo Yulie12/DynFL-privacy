@@ -28,18 +28,12 @@ def parse_args() -> argparse.Namespace:
         description="Aggregate the versioned controlled paper experiments."
     )
     parser.add_argument(
-        "--root", type=Path, default=ROOT / "out" / "paper_v28_controlled"
+        "--root", type=Path, default=ROOT / "out" / "paper_v31_final" / "sensitivity"
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[40, 42, 44])
-    parser.add_argument(
-        "--ablation-seeds",
-        type=int,
-        nargs="+",
-        default=[40, 41, 42, 43, 44],
-    )
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument("--edges", type=int, default=10)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v28_controlled_aggregate")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "out" / "paper_v31_final" / "sensitivity_aggregate")
     parser.add_argument("--paper-figure-dir", type=Path, default=ROOT / "tex" / "paper" / "figures")
     return parser.parse_args()
 
@@ -72,21 +66,19 @@ def collect_case(
 
 
 def main() -> None:
+    """Aggregate only the frozen Q94 S_P sensitivity study."""
     args = parse_args()
     root = args.root.resolve()
     seeds = list(dict.fromkeys(int(seed) for seed in args.seeds))
-    ablation_seeds = list(
-        dict.fromkeys(int(seed) for seed in args.ablation_seeds)
-    )
     output_dir = args.output_dir.resolve()
     figure_dir = args.paper_figure_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     figure_dir.mkdir(parents=True, exist_ok=True)
 
     period_rows: list[dict[str, Any]] = []
-    for period in (1, 5, 10, 20):
+    for period in (1, 5, 10):
         _sources, rows = collect_case(
-            root=root / "period" / f"sp_{period}",
+            root=root / f"sp_{period}",
             seeds=seeds,
             policies=["full_dynfl"],
             rounds=args.rounds,
@@ -97,76 +89,7 @@ def main() -> None:
         )
         period_rows.append({"period": period, **rows[0]})
     write_csv(output_dir / "strategy_period_statistics.csv", period_rows)
-    plot_period(period_rows, figure_dir / "cifar10_strategy_period_v26.png")
-
-    privacy_rows: list[dict[str, Any]] = []
-    for budget in (1.0, 2.0, 4.0, 8.0):
-        _sources, rows = collect_case(
-            root=root / "privacy" / f"eps_{budget:g}",
-            seeds=seeds,
-            policies=["full_dynfl"],
-            rounds=args.rounds,
-            clients=100,
-            edges=args.edges,
-            selection_period=1,
-            privacy_budget=budget,
-        )
-        privacy_rows.append({"privacy_budget": budget, **rows[0]})
-    write_csv(output_dir / "privacy_budget_statistics.csv", privacy_rows)
-    plot_privacy(privacy_rows, figure_dir / "cifar10_privacy_budget_v26.png")
-
-    scale_rows: list[dict[str, Any]] = []
-    for clients in (20, 50, 100):
-        _sources, rows = collect_case(
-            root=root / "scale" / f"clients_{clients}",
-            seeds=seeds,
-            policies=["full_dynfl"],
-            rounds=args.rounds,
-            clients=clients,
-            edges=args.edges,
-            selection_period=1,
-            privacy_budget=8.0,
-        )
-        scale_rows.extend({"clients": clients, **row} for row in rows)
-    write_csv(output_dir / "decision_scalability_statistics.csv", scale_rows)
-    plot_scale(scale_rows, figure_dir / "cifar10_decision_scalability_v26.png")
-
-    ablation_policies = [
-        "fixed_mode_fixed_privacy",
-        "dynamic_mode_fixed_privacy",
-        "fixed_mode_dynamic_privacy",
-        "full_dynfl",
-    ]
-    ablation_sources, ablation_rows = collect_case(
-        root=root / "ablation",
-        seeds=ablation_seeds,
-        policies=ablation_policies,
-        rounds=args.rounds,
-        clients=100,
-        edges=args.edges,
-        selection_period=1,
-        privacy_budget=8.0,
-    )
-    write_csv(output_dir / "ablation_statistics.csv", ablation_rows)
-    time_rows, plotted, _horizon = aggregate_time(
-        ablation_sources,
-        ablation_seeds,
-        ablation_policies,
-        rounds=args.rounds,
-    )
-    write_csv(output_dir / "ablation_wall_time_statistics.csv", time_rows)
-    plot_accuracy_over_time(
-        plotted,
-        ablation_policies,
-        figure_dir / "cifar10_ablation_wall_time_accuracy_v26.png",
-        tail_fraction=0.25,
-        labels={
-            "fixed_mode_fixed_privacy": "Fixed Mode + Fixed Privacy",
-            "dynamic_mode_fixed_privacy": "Dynamic Mode + Fixed Privacy",
-            "fixed_mode_dynamic_privacy": "Fixed Mode + Dynamic Privacy",
-            "full_dynfl": "Full DynFL",
-        },
-    )
+    plot_period(period_rows, figure_dir / "fig5_strategy_period_sensitivity.png")
     print(output_dir)
 
 
