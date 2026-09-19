@@ -8,13 +8,10 @@
     44
   ],
   "policies": [
-    "ours",
-    "individual_optimal",
-    "random",
-    "fixed_fedavg",
-    "fixed_splitfed",
-    "fixed_hfl",
-    "nsga2"
+    "fixed_mode_fixed_privacy",
+    "dynamic_mode_fixed_privacy",
+    "fixed_mode_dynamic_privacy",
+    "full_dynfl"
   ],
   "training": {
     "dataset": "fmnist",
@@ -60,7 +57,8 @@
     "protection_scope": "cross_domain_update_and_secure_aggregate",
     "candidate_mechanisms": [
       "dp",
-      "he3"
+      "he3",
+      "dp_he3"
     ],
     "accounting_mode": "rdp_auto",
     "initial_epsilon": 8,

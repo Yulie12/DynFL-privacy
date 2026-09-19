@@ -1,0 +1,458 @@
+diff --git a/configs/paper_v30_cifar10_resnet18.json b/configs/paper_v30_cifar10_resnet18.json
+index c257572..149c924 100644
+--- a/configs/paper_v30_cifar10_resnet18.json
++++ b/configs/paper_v30_cifar10_resnet18.json
+@@ -6,13 +6,10 @@
+     42
+   ],
+   "policies": [
+-    "ours",
+-    "individual_optimal",
+-    "random",
+-    "fixed_fedavg",
+-    "fixed_splitfed",
+-    "fixed_hfl",
+-    "nsga2"
++    "fixed_mode_fixed_privacy",
++    "dynamic_mode_fixed_privacy",
++    "fixed_mode_dynamic_privacy",
++    "full_dynfl"
+   ],
+   "training": {
+     "dataset": "cifar10",
+@@ -58,7 +55,8 @@
+     "protection_scope": "cross_domain_update_and_secure_aggregate",
+     "candidate_mechanisms": [
+       "dp",
+-      "he3"
++      "he3",
++      "dp_he3"
+     ],
+     "accounting_mode": "rdp_auto",
+     "initial_epsilon": 8,
+diff --git a/configs/paper_v30_fmnist_lenet5.json b/configs/paper_v30_fmnist_lenet5.json
+index 82c1942..e4a939b 100644
+--- a/configs/paper_v30_fmnist_lenet5.json
++++ b/configs/paper_v30_fmnist_lenet5.json
+@@ -8,13 +8,10 @@
+     44
+   ],
+   "policies": [
+-    "ours",
+-    "individual_optimal",
+-    "random",
+-    "fixed_fedavg",
+-    "fixed_splitfed",
+-    "fixed_hfl",
+-    "nsga2"
++    "fixed_mode_fixed_privacy",
++    "dynamic_mode_fixed_privacy",
++    "fixed_mode_dynamic_privacy",
++    "full_dynfl"
+   ],
+   "training": {
+     "dataset": "fmnist",
+@@ -60,7 +57,8 @@
+     "protection_scope": "cross_domain_update_and_secure_aggregate",
+     "candidate_mechanisms": [
+       "dp",
+-      "he3"
++      "he3",
++      "dp_he3"
+     ],
+     "accounting_mode": "rdp_auto",
+     "initial_epsilon": 8,
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index fcabc70..e06ba4d 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -1033,6 +1033,7 @@ def _run_lenet5_policy(
+         )
+     selection_period = max(1, int(train_config.selection_period))
+     previous_choices: dict[int, Candidate] = {}
++    fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]] = {}
+     start_round = 0
+     real_he_rounds = 0
+     real_he_aggregated_clients = 0
+@@ -1130,6 +1131,7 @@ def _run_lenet5_policy(
+         best_accuracy = float(checkpoint.get("best_accuracy", 0.0))
+         logical_time = float(checkpoint.get("logical_time", 0.0))
+         previous_choices = dict(checkpoint.get("previous_choices", {}))
++        fixed_privacy_profiles = dict(checkpoint.get("fixed_privacy_profiles", {}))
+         real_he_rounds = int(checkpoint.get("real_he_rounds", 0))
+         real_he_aggregated_clients = int(checkpoint.get("real_he_aggregated_clients", 0))
+         global_pareto_selection_rounds = int(checkpoint.get("global_pareto_selection_rounds", 0))
+@@ -1224,6 +1226,11 @@ def _run_lenet5_policy(
+                 privacy_ledger=privacy_ledgers[client.client_id],
+                 privacy_requirement=paper_client_privacy_requirement(),
+                 fast_response_deadline=dict(effective_selection.fast_client_deadlines).get(client.client_id),
++                fixed_privacy_profile=(
++                    fixed_privacy_profiles.get(client.client_id)
++                    if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}
++                    else None
++                ),
+             )
+             should_update = round_idx == 0 or round_idx % selection_period == 0
+             candidate = None
+@@ -1236,7 +1243,7 @@ def _run_lenet5_policy(
+             if candidate is None:
+                 forced_feasibility_repair = forced_feasibility_repair or not should_update
+                 sensitivity = None
+-                if policy == "ours":
++                if policy in {"ours", "full_dynfl"}:
+                     sensitivity = _client_coordination_sensitivity(
+                         client.edge_id,
+                         selection.num_edges,
+@@ -1324,6 +1331,10 @@ def _run_lenet5_policy(
+             "ours",
+             "ours_no_omega",
+             "ours_fixed_liieiiic",
++            "full_dynfl",
++            "fixed_mode_fixed_privacy",
++            "dynamic_mode_fixed_privacy",
++            "fixed_mode_dynamic_privacy",
+             "no_protection",
+             "fixed_fedavg",
+             "fixed_splitfed",
+@@ -1356,13 +1367,17 @@ def _run_lenet5_policy(
+                 search_method=search_method,
+                 diagnostics=selection_diagnostics,
+             )
+-            if policy == "ours":
++            if policy in {"ours", "full_dynfl"}:
+                 global_pareto_selection_rounds += 1
+ 
+         if policy in {
+             "ours",
+             "ours_no_omega",
+             "ours_fixed_liieiiic",
++            "full_dynfl",
++            "fixed_mode_fixed_privacy",
++            "dynamic_mode_fixed_privacy",
++            "fixed_mode_dynamic_privacy",
+             "no_protection",
+             "fixed_fedavg",
+             "fixed_splitfed",
+@@ -1382,6 +1397,13 @@ def _run_lenet5_policy(
+             )
+ 
+         selection_wall_time_sec = time.perf_counter() - selection_wall_started_at
++        if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}:
++            for client_id, candidate, _candidates, _rem in selected:
++                if client_id not in fixed_privacy_profiles and candidate.mode != "SKIP":
++                    fixed_privacy_profiles[client_id] = (
++                        dict(candidate.mechanisms),
++                        candidate.update_noise_multiplier,
++                    )
+         previous_choices = {client_id: candidate for client_id, candidate, _candidates, _rem in selected}
+ 
+         if effective_selection.mainline_fusion:
+@@ -2863,6 +2885,7 @@ def _run_lenet5_policy(
+             remaining_epsilon=remaining_epsilon,
+             privacy_ledgers=privacy_ledgers,
+             previous_choices=previous_choices,
++            fixed_privacy_profiles=fixed_privacy_profiles,
+             round_rows=round_rows,
+             decision_rows=decision_rows,
+             flow_event_rows=flow_event_rows,
+@@ -4565,6 +4588,7 @@ def _save_policy_checkpoint(
+     remaining_epsilon: dict[int, float],
+     privacy_ledgers: dict[int, ClientPrivacyLedger],
+     previous_choices: dict[int, Candidate],
++    fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]],
+     round_rows: list[dict[str, Any]],
+     decision_rows: list[dict[str, Any]],
+     flow_event_rows: list[dict[str, Any]],
+@@ -4595,6 +4619,7 @@ def _save_policy_checkpoint(
+                 for client_id, ledger in privacy_ledgers.items()
+             },
+             "previous_choices": previous_choices,
++            "fixed_privacy_profiles": fixed_privacy_profiles,
+             "round_rows": round_rows,
+             "decision_rows": decision_rows,
+             "flow_event_rows": flow_event_rows,
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index 6301fba..5a38a2f 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -698,6 +698,7 @@ def enumerate_candidates(
+     privacy_ledger: ClientPrivacyLedger | None = None,
+     privacy_requirement: ExposurePrivacyRequirement | None = None,
+     fast_response_deadline: float | None = None,
++    fixed_privacy_profile: tuple[dict[str, str], float | None] | None = None,
+ ) -> list[Candidate]:
+     validate_update_protection_goal(config, policy)
+     candidates: list[Candidate] = []
+@@ -724,6 +725,10 @@ def enumerate_candidates(
+             privacy_requirement=privacy_requirement,
+         )
+         for mechanisms, link_mechanisms in assignments:
++            if fixed_privacy_profile is not None:
++                fixed_mechanisms, _fixed_sigma = fixed_privacy_profile
++                if mechanisms != fixed_mechanisms:
++                    continue
+             update_events = sum(
+                 count
+                 for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
+@@ -733,7 +738,12 @@ def enumerate_candidates(
+                 and obj == "upd"
+                 and mechanism_uses_dp(link_mechanisms[link_id])
+             )
+-            if update_events > 0 and privacy_ledger is not None:
++            fixed_sigma = fixed_privacy_profile[1] if fixed_privacy_profile is not None else None
++            if update_events > 0 and fixed_privacy_profile is not None:
++                if fixed_sigma is None:
++                    continue
++                noise_tiers = (float(fixed_sigma),)
++            elif update_events > 0 and privacy_ledger is not None:
+                 try:
+                     sigma_min = privacy_ledger.minimum_feasible_update_noise(update_events)
+                 except ValueError:
+@@ -795,6 +805,8 @@ def _apply_policy_candidate_filters(
+         "fixed_hfl": "LIIEIIIC",
+         "fixed_liieiiic": "LIIEIIIC",
+         "ours_fixed_liieiiic": "LIIEIIIC",
++        "fixed_mode_fixed_privacy": "LIIEIIIC",
++        "fixed_mode_dynamic_privacy": "LIIEIIIC",
+     }.get(policy)
+     if fixed_mode is not None:
+         candidates = [
+@@ -901,6 +913,8 @@ def choose_candidate(
+         "fixed_hfl": "LIIEIIIC",
+         "fixed_liieiiic": "LIIEIIIC",
+         "ours_fixed_liieiiic": "LIIEIIIC",
++        "fixed_mode_fixed_privacy": "LIIEIIIC",
++        "fixed_mode_dynamic_privacy": "LIIEIIIC",
+     }.get(policy)
+     if fixed_mode is not None:
+         fixed_pool = [c for c in pool if c.mode == fixed_mode]
+diff --git a/experiments/aggregate_controlled_results.py b/experiments/aggregate_controlled_results.py
+index b3b4834..3a05245 100644
+--- a/experiments/aggregate_controlled_results.py
++++ b/experiments/aggregate_controlled_results.py
+@@ -88,7 +88,7 @@ def main() -> None:
+         _sources, rows = collect_case(
+             root=root / "period" / f"sp_{period}",
+             seeds=seeds,
+-            policies=["ours"],
++            policies=["full_dynfl"],
+             rounds=args.rounds,
+             clients=100,
+             edges=args.edges,
+@@ -104,7 +104,7 @@ def main() -> None:
+         _sources, rows = collect_case(
+             root=root / "privacy" / f"eps_{budget:g}",
+             seeds=seeds,
+-            policies=["ours"],
++            policies=["full_dynfl"],
+             rounds=args.rounds,
+             clients=100,
+             edges=args.edges,
+@@ -120,7 +120,7 @@ def main() -> None:
+         _sources, rows = collect_case(
+             root=root / "scale" / f"clients_{clients}",
+             seeds=seeds,
+-            policies=["ours", "individual_optimal"],
++            policies=["full_dynfl"],
+             rounds=args.rounds,
+             clients=clients,
+             edges=args.edges,
+@@ -132,10 +132,10 @@ def main() -> None:
+     plot_scale(scale_rows, figure_dir / "cifar10_decision_scalability_v26.png")
+ 
+     ablation_policies = [
+-        "ours",
+-        "individual_optimal",
+-        "ours_no_omega",
+-        "ours_fixed_liieiiic",
++        "fixed_mode_fixed_privacy",
++        "dynamic_mode_fixed_privacy",
++        "fixed_mode_dynamic_privacy",
++        "full_dynfl",
+     ]
+     ablation_sources, ablation_rows = collect_case(
+         root=root / "ablation",
+@@ -161,10 +161,10 @@ def main() -> None:
+         figure_dir / "cifar10_ablation_wall_time_accuracy_v26.png",
+         tail_fraction=0.25,
+         labels={
+-            "ours": "Ours",
+-            "individual_optimal": "No Global Coordination",
+-            "ours_no_omega": "No Error Cost Estimate",
+-            "ours_fixed_liieiiic": "Fixed LIIEIIIC",
++            "fixed_mode_fixed_privacy": "Fixed Mode + Fixed Privacy",
++            "dynamic_mode_fixed_privacy": "Dynamic Mode + Fixed Privacy",
++            "fixed_mode_dynamic_privacy": "Fixed Mode + Dynamic Privacy",
++            "full_dynfl": "Full DynFL",
+         },
+     )
+     print(output_dir)
+@@ -212,7 +212,7 @@ def plot_privacy(rows: list[dict[str, Any]], output: Path) -> None:
+ 
+ 
+ def plot_scale(rows: list[dict[str, Any]], output: Path) -> None:
+-    policies = ("ours", "individual_optimal")
++    policies = ("full_dynfl",)
+     fig, axes = plt.subplots(2, 1, figsize=(3.45, 3.8), sharex=True)
+     for policy in policies:
+         policy_rows = sorted(
+diff --git a/experiments/run_controlled_sweeps.py b/experiments/run_controlled_sweeps.py
+index 8c5fa7f..7dae6a3 100644
+--- a/experiments/run_controlled_sweeps.py
++++ b/experiments/run_controlled_sweeps.py
+@@ -53,7 +53,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
+             config = copy.deepcopy(base)
+             config["training"]["selection_period"] = period
+             config["output_root"] = f"out/paper_v28_controlled/period/sp_{period}"
+-            cases.append(SweepCase("period", str(period), config, ["ours"]))
++            cases.append(SweepCase("period", str(period), config, ["full_dynfl"]))
+ 
+     if "privacy" in studies:
+         for budget in (1.0, 2.0, 4.0, 8.0):
+@@ -62,7 +62,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
+             config["privacy"]["update_epsilon_budget"] = budget
+             label = f"{budget:g}"
+             config["output_root"] = f"out/paper_v28_controlled/privacy/eps_{label}"
+-            cases.append(SweepCase("privacy", label, config, ["ours"]))
++            cases.append(SweepCase("privacy", label, config, ["full_dynfl"]))
+ 
+     if "scale" in studies:
+         for clients in (20, 50, 100):
+@@ -74,7 +74,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
+                     "scale",
+                     str(clients),
+                     config,
+-                    ["ours", "individual_optimal"],
++                    ["full_dynfl"],
+                 )
+             )
+ 
+@@ -87,10 +87,10 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
+                 "complete",
+                 config,
+                 [
+-                    "ours",
+-                    "individual_optimal",
+-                    "ours_no_omega",
+-                    "ours_fixed_liieiiic",
++                    "fixed_mode_fixed_privacy",
++                    "dynamic_mode_fixed_privacy",
++                    "fixed_mode_dynamic_privacy",
++                    "full_dynfl",
+                 ],
+             )
+         )
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index c4fe5f9..d315427 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -19,6 +19,13 @@ from dynfed.he_backend import (
+ )
+ from dynfed.version import CURRENT_EXECUTION_REVISION
+ 
++FORMAL_BASELINE_POLICIES = (
++    "fixed_mode_fixed_privacy",
++    "dynamic_mode_fixed_privacy",
++    "fixed_mode_dynamic_privacy",
++    "full_dynfl",
++)
++
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+@@ -261,6 +268,12 @@ def validate_config(config: dict) -> None:
+         raise ValueError("HE execution must be real or profiled")
+     if he.get("require_real_he") and he.get("execution", "real") != "real":
+         raise ValueError("require_real_he is only valid with real HE execution")
++    policies = tuple(config.get("policies", ()))
++    if policies != FORMAL_BASELINE_POLICIES:
++        raise ValueError(
++            "Formal paper configurations must use exactly the four frozen internal baselines: "
++            + ", ".join(FORMAL_BASELINE_POLICIES)
++        )
+     privacy = config["privacy"]
+     if config["system"].get("mainline_fusion"):
+         if he.get("backend") != "seal":
+@@ -297,9 +310,9 @@ def validate_config(config: dict) -> None:
+             raise ValueError(
+                 "Formal configurations must protect cross-domain updates and secure aggregate releases"
+             )
+-        if privacy.get("candidate_mechanisms") != ["dp", "he3"]:
++        if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
+             raise ValueError(
+-                "TeX configurations must expose DP and HE as the update choices"
++                "Formal configurations must expose DP, HE, and their combined DP+HE update mechanism"
+             )
+         if privacy.get("release_calibration") != "tex_packet":
+             raise ValueError("TeX configurations require whole packet DP calibration")
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 4e965c4..bee0fe4 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -1851,3 +1851,66 @@ def test_fast_response_deadline_keeps_only_candidates_within_tau_max() -> None:
+     assert constrained
+     assert all(candidate.time <= deadline + 1e-12 for candidate in constrained)
+     assert len(constrained) < len(baseline)
++
++
++def test_formal_configs_use_only_frozen_four_internal_baselines() -> None:
++    root = Path(__file__).resolve().parents[1]
++    expected = [
++        "fixed_mode_fixed_privacy",
++        "dynamic_mode_fixed_privacy",
++        "fixed_mode_dynamic_privacy",
++        "full_dynfl",
++    ]
++    for name in ("paper_v30_cifar10_resnet18.json", "paper_v30_fmnist_lenet5.json"):
++        config = json.loads((root / "configs" / name).read_text(encoding="utf-8"))
++        assert config["policies"] == expected
++        assert config["privacy"]["candidate_mechanisms"] == ["dp", "he3", "dp_he3"]
++
++
++def test_fixed_mode_baselines_use_liieiiic_without_relaxing_feasibility() -> None:
++    config = SelectionConfig(update_mechanism_options=("dp", "he3", "dp_he3"))
++    ledger = build_client_privacy_ledger(config)
++    requirement = ExposurePrivacyRequirement(
++        plaintext_forbidden_links=frozenset({"E_C_upd"}),
++        dp_required_links=frozenset({"E_C_upd"}),
++    )
++    for policy in ("fixed_mode_fixed_privacy", "fixed_mode_dynamic_privacy"):
++        candidates = enumerate_candidates(
++            config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
++            samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
++            rng=random.Random(202), policy=policy, privacy_ledger=ledger,
++            privacy_requirement=requirement,
++        )
++        assert candidates
++        assert {candidate.mode for candidate in candidates} == {"LIIEIIIC"}
++        assert all(candidate.feasible_privacy for candidate in candidates)
++
++
++def test_fixed_privacy_profile_locks_mechanism_and_dp_strength() -> None:
++    config = SelectionConfig(
++        rounds=20,
++        update_mechanism_options=("dp", "he3", "dp_he3"),
++        dp_tier_count=3,
++    )
++    ledger = build_client_privacy_ledger(config)
++    requirement = ExposurePrivacyRequirement(
++        plaintext_forbidden_links=frozenset({"L_C_upd", "E_C_upd"}),
++        dp_required_links=frozenset({"L_C_upd", "E_C_upd"}),
++    )
++    initial = enumerate_candidates(
++        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
++        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
++        rng=random.Random(303), policy="dynamic_mode_fixed_privacy", privacy_ledger=ledger,
++        privacy_requirement=requirement,
++    )
++    chosen = next(c for c in initial if c.mode == "LIIC" and c.update_dp_events > 0)
++    profile = (dict(chosen.mechanisms), chosen.update_noise_multiplier)
++    locked = enumerate_candidates(
++        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
++        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=1,
++        rng=random.Random(304), policy="dynamic_mode_fixed_privacy", privacy_ledger=ledger,
++        privacy_requirement=requirement, fixed_privacy_profile=profile,
++    )
++    assert locked
++    assert all(c.mechanisms == profile[0] for c in locked)
++    assert all(c.update_noise_multiplier == pytest.approx(profile[1]) for c in locked if c.update_dp_events > 0)

@@ -53,7 +53,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
             config = copy.deepcopy(base)
             config["training"]["selection_period"] = period
             config["output_root"] = f"out/paper_v28_controlled/period/sp_{period}"
-            cases.append(SweepCase("period", str(period), config, ["ours"]))
+            cases.append(SweepCase("period", str(period), config, ["full_dynfl"]))
 
     if "privacy" in studies:
         for budget in (1.0, 2.0, 4.0, 8.0):
@@ -62,7 +62,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
             config["privacy"]["update_epsilon_budget"] = budget
             label = f"{budget:g}"
             config["output_root"] = f"out/paper_v28_controlled/privacy/eps_{label}"
-            cases.append(SweepCase("privacy", label, config, ["ours"]))
+            cases.append(SweepCase("privacy", label, config, ["full_dynfl"]))
 
     if "scale" in studies:
         for clients in (20, 50, 100):
@@ -74,7 +74,7 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
                     "scale",
                     str(clients),
                     config,
-                    ["ours", "individual_optimal"],
+                    ["full_dynfl"],
                 )
             )
 
@@ -87,10 +87,10 @@ def build_cases(base: dict, studies: list[str]) -> list[SweepCase]:
                 "complete",
                 config,
                 [
-                    "ours",
-                    "individual_optimal",
-                    "ours_no_omega",
-                    "ours_fixed_liieiiic",
+                    "fixed_mode_fixed_privacy",
+                    "dynamic_mode_fixed_privacy",
+                    "fixed_mode_dynamic_privacy",
+                    "full_dynfl",
                 ],
             )
         )

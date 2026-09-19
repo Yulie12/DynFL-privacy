@@ -1033,6 +1033,7 @@ def _run_lenet5_policy(
         )
     selection_period = max(1, int(train_config.selection_period))
     previous_choices: dict[int, Candidate] = {}
+    fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]] = {}
     start_round = 0
     real_he_rounds = 0
     real_he_aggregated_clients = 0
@@ -1130,6 +1131,7 @@ def _run_lenet5_policy(
         best_accuracy = float(checkpoint.get("best_accuracy", 0.0))
         logical_time = float(checkpoint.get("logical_time", 0.0))
         previous_choices = dict(checkpoint.get("previous_choices", {}))
+        fixed_privacy_profiles = dict(checkpoint.get("fixed_privacy_profiles", {}))
         real_he_rounds = int(checkpoint.get("real_he_rounds", 0))
         real_he_aggregated_clients = int(checkpoint.get("real_he_aggregated_clients", 0))
         global_pareto_selection_rounds = int(checkpoint.get("global_pareto_selection_rounds", 0))
@@ -1224,6 +1226,11 @@ def _run_lenet5_policy(
                 privacy_ledger=privacy_ledgers[client.client_id],
                 privacy_requirement=paper_client_privacy_requirement(),
                 fast_response_deadline=dict(effective_selection.fast_client_deadlines).get(client.client_id),
+                fixed_privacy_profile=(
+                    fixed_privacy_profiles.get(client.client_id)
+                    if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}
+                    else None
+                ),
             )
             should_update = round_idx == 0 or round_idx % selection_period == 0
             candidate = None
@@ -1236,7 +1243,7 @@ def _run_lenet5_policy(
             if candidate is None:
                 forced_feasibility_repair = forced_feasibility_repair or not should_update
                 sensitivity = None
-                if policy == "ours":
+                if policy in {"ours", "full_dynfl"}:
                     sensitivity = _client_coordination_sensitivity(
                         client.edge_id,
                         selection.num_edges,
@@ -1324,6 +1331,10 @@ def _run_lenet5_policy(
             "ours",
             "ours_no_omega",
             "ours_fixed_liieiiic",
+            "full_dynfl",
+            "fixed_mode_fixed_privacy",
+            "dynamic_mode_fixed_privacy",
+            "fixed_mode_dynamic_privacy",
             "no_protection",
             "fixed_fedavg",
             "fixed_splitfed",
@@ -1356,13 +1367,17 @@ def _run_lenet5_policy(
                 search_method=search_method,
                 diagnostics=selection_diagnostics,
             )
-            if policy == "ours":
+            if policy in {"ours", "full_dynfl"}:
                 global_pareto_selection_rounds += 1
 
         if policy in {
             "ours",
             "ours_no_omega",
             "ours_fixed_liieiiic",
+            "full_dynfl",
+            "fixed_mode_fixed_privacy",
+            "dynamic_mode_fixed_privacy",
+            "fixed_mode_dynamic_privacy",
             "no_protection",
             "fixed_fedavg",
             "fixed_splitfed",
@@ -1382,6 +1397,13 @@ def _run_lenet5_policy(
             )
 
         selection_wall_time_sec = time.perf_counter() - selection_wall_started_at
+        if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}:
+            for client_id, candidate, _candidates, _rem in selected:
+                if client_id not in fixed_privacy_profiles and candidate.mode != "SKIP":
+                    fixed_privacy_profiles[client_id] = (
+                        dict(candidate.mechanisms),
+                        candidate.update_noise_multiplier,
+                    )
         previous_choices = {client_id: candidate for client_id, candidate, _candidates, _rem in selected}
 
         if effective_selection.mainline_fusion:
@@ -2863,6 +2885,7 @@ def _run_lenet5_policy(
             remaining_epsilon=remaining_epsilon,
             privacy_ledgers=privacy_ledgers,
             previous_choices=previous_choices,
+            fixed_privacy_profiles=fixed_privacy_profiles,
             round_rows=round_rows,
             decision_rows=decision_rows,
             flow_event_rows=flow_event_rows,
@@ -4565,6 +4588,7 @@ def _save_policy_checkpoint(
     remaining_epsilon: dict[int, float],
     privacy_ledgers: dict[int, ClientPrivacyLedger],
     previous_choices: dict[int, Candidate],
+    fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]],
     round_rows: list[dict[str, Any]],
     decision_rows: list[dict[str, Any]],
     flow_event_rows: list[dict[str, Any]],
@@ -4595,6 +4619,7 @@ def _save_policy_checkpoint(
                 for client_id, ledger in privacy_ledgers.items()
             },
             "previous_choices": previous_choices,
+            "fixed_privacy_profiles": fixed_privacy_profiles,
             "round_rows": round_rows,
             "decision_rows": decision_rows,
             "flow_event_rows": flow_event_rows,

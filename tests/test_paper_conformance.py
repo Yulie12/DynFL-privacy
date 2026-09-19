@@ -1851,3 +1851,66 @@ def test_fast_response_deadline_keeps_only_candidates_within_tau_max() -> None:
     assert constrained
     assert all(candidate.time <= deadline + 1e-12 for candidate in constrained)
     assert len(constrained) < len(baseline)
+
+
+def test_formal_configs_use_only_frozen_four_internal_baselines() -> None:
+    root = Path(__file__).resolve().parents[1]
+    expected = [
+        "fixed_mode_fixed_privacy",
+        "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy",
+        "full_dynfl",
+    ]
+    for name in ("paper_v30_cifar10_resnet18.json", "paper_v30_fmnist_lenet5.json"):
+        config = json.loads((root / "configs" / name).read_text(encoding="utf-8"))
+        assert config["policies"] == expected
+        assert config["privacy"]["candidate_mechanisms"] == ["dp", "he3", "dp_he3"]
+
+
+def test_fixed_mode_baselines_use_liieiiic_without_relaxing_feasibility() -> None:
+    config = SelectionConfig(update_mechanism_options=("dp", "he3", "dp_he3"))
+    ledger = build_client_privacy_ledger(config)
+    requirement = ExposurePrivacyRequirement(
+        plaintext_forbidden_links=frozenset({"E_C_upd"}),
+        dp_required_links=frozenset({"E_C_upd"}),
+    )
+    for policy in ("fixed_mode_fixed_privacy", "fixed_mode_dynamic_privacy"):
+        candidates = enumerate_candidates(
+            config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
+            samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
+            rng=random.Random(202), policy=policy, privacy_ledger=ledger,
+            privacy_requirement=requirement,
+        )
+        assert candidates
+        assert {candidate.mode for candidate in candidates} == {"LIIEIIIC"}
+        assert all(candidate.feasible_privacy for candidate in candidates)
+
+
+def test_fixed_privacy_profile_locks_mechanism_and_dp_strength() -> None:
+    config = SelectionConfig(
+        rounds=20,
+        update_mechanism_options=("dp", "he3", "dp_he3"),
+        dp_tier_count=3,
+    )
+    ledger = build_client_privacy_ledger(config)
+    requirement = ExposurePrivacyRequirement(
+        plaintext_forbidden_links=frozenset({"L_C_upd", "E_C_upd"}),
+        dp_required_links=frozenset({"L_C_upd", "E_C_upd"}),
+    )
+    initial = enumerate_candidates(
+        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
+        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
+        rng=random.Random(303), policy="dynamic_mode_fixed_privacy", privacy_ledger=ledger,
+        privacy_requirement=requirement,
+    )
+    chosen = next(c for c in initial if c.mode == "LIIC" and c.update_dp_events > 0)
+    profile = (dict(chosen.mechanisms), chosen.update_noise_multiplier)
+    locked = enumerate_candidates(
+        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
+        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=1,
+        rng=random.Random(304), policy="dynamic_mode_fixed_privacy", privacy_ledger=ledger,
+        privacy_requirement=requirement, fixed_privacy_profile=profile,
+    )
+    assert locked
+    assert all(c.mechanisms == profile[0] for c in locked)
+    assert all(c.update_noise_multiplier == pytest.approx(profile[1]) for c in locked if c.update_dp_events > 0)

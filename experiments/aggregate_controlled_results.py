@@ -88,7 +88,7 @@ def main() -> None:
         _sources, rows = collect_case(
             root=root / "period" / f"sp_{period}",
             seeds=seeds,
-            policies=["ours"],
+            policies=["full_dynfl"],
             rounds=args.rounds,
             clients=100,
             edges=args.edges,
@@ -104,7 +104,7 @@ def main() -> None:
         _sources, rows = collect_case(
             root=root / "privacy" / f"eps_{budget:g}",
             seeds=seeds,
-            policies=["ours"],
+            policies=["full_dynfl"],
             rounds=args.rounds,
             clients=100,
             edges=args.edges,
@@ -120,7 +120,7 @@ def main() -> None:
         _sources, rows = collect_case(
             root=root / "scale" / f"clients_{clients}",
             seeds=seeds,
-            policies=["ours", "individual_optimal"],
+            policies=["full_dynfl"],
             rounds=args.rounds,
             clients=clients,
             edges=args.edges,
@@ -132,10 +132,10 @@ def main() -> None:
     plot_scale(scale_rows, figure_dir / "cifar10_decision_scalability_v26.png")
 
     ablation_policies = [
-        "ours",
-        "individual_optimal",
-        "ours_no_omega",
-        "ours_fixed_liieiiic",
+        "fixed_mode_fixed_privacy",
+        "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy",
+        "full_dynfl",
     ]
     ablation_sources, ablation_rows = collect_case(
         root=root / "ablation",
@@ -161,10 +161,10 @@ def main() -> None:
         figure_dir / "cifar10_ablation_wall_time_accuracy_v26.png",
         tail_fraction=0.25,
         labels={
-            "ours": "Ours",
-            "individual_optimal": "No Global Coordination",
-            "ours_no_omega": "No Error Cost Estimate",
-            "ours_fixed_liieiiic": "Fixed LIIEIIIC",
+            "fixed_mode_fixed_privacy": "Fixed Mode + Fixed Privacy",
+            "dynamic_mode_fixed_privacy": "Dynamic Mode + Fixed Privacy",
+            "fixed_mode_dynamic_privacy": "Fixed Mode + Dynamic Privacy",
+            "full_dynfl": "Full DynFL",
         },
     )
     print(output_dir)
@@ -212,7 +212,7 @@ def plot_privacy(rows: list[dict[str, Any]], output: Path) -> None:
 
 
 def plot_scale(rows: list[dict[str, Any]], output: Path) -> None:
-    policies = ("ours", "individual_optimal")
+    policies = ("full_dynfl",)
     fig, axes = plt.subplots(2, 1, figsize=(3.45, 3.8), sharex=True)
     for policy in policies:
         policy_rows = sorted(

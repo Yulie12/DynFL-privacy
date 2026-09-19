@@ -698,6 +698,7 @@ def enumerate_candidates(
     privacy_ledger: ClientPrivacyLedger | None = None,
     privacy_requirement: ExposurePrivacyRequirement | None = None,
     fast_response_deadline: float | None = None,
+    fixed_privacy_profile: tuple[dict[str, str], float | None] | None = None,
 ) -> list[Candidate]:
     validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
@@ -724,6 +725,10 @@ def enumerate_candidates(
             privacy_requirement=privacy_requirement,
         )
         for mechanisms, link_mechanisms in assignments:
+            if fixed_privacy_profile is not None:
+                fixed_mechanisms, _fixed_sigma = fixed_privacy_profile
+                if mechanisms != fixed_mechanisms:
+                    continue
             update_events = sum(
                 count
                 for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
@@ -733,7 +738,12 @@ def enumerate_candidates(
                 and obj == "upd"
                 and mechanism_uses_dp(link_mechanisms[link_id])
             )
-            if update_events > 0 and privacy_ledger is not None:
+            fixed_sigma = fixed_privacy_profile[1] if fixed_privacy_profile is not None else None
+            if update_events > 0 and fixed_privacy_profile is not None:
+                if fixed_sigma is None:
+                    continue
+                noise_tiers = (float(fixed_sigma),)
+            elif update_events > 0 and privacy_ledger is not None:
                 try:
                     sigma_min = privacy_ledger.minimum_feasible_update_noise(update_events)
                 except ValueError:
@@ -795,6 +805,8 @@ def _apply_policy_candidate_filters(
         "fixed_hfl": "LIIEIIIC",
         "fixed_liieiiic": "LIIEIIIC",
         "ours_fixed_liieiiic": "LIIEIIIC",
+        "fixed_mode_fixed_privacy": "LIIEIIIC",
+        "fixed_mode_dynamic_privacy": "LIIEIIIC",
     }.get(policy)
     if fixed_mode is not None:
         candidates = [
@@ -901,6 +913,8 @@ def choose_candidate(
         "fixed_hfl": "LIIEIIIC",
         "fixed_liieiiic": "LIIEIIIC",
         "ours_fixed_liieiiic": "LIIEIIIC",
+        "fixed_mode_fixed_privacy": "LIIEIIIC",
+        "fixed_mode_dynamic_privacy": "LIIEIIIC",
     }.get(policy)
     if fixed_mode is not None:
         fixed_pool = [c for c in pool if c.mode == fixed_mode]

@@ -19,6 +19,13 @@ from dynfed.he_backend import (
 )
 from dynfed.version import CURRENT_EXECUTION_REVISION
 
+FORMAL_BASELINE_POLICIES = (
+    "fixed_mode_fixed_privacy",
+    "dynamic_mode_fixed_privacy",
+    "fixed_mode_dynamic_privacy",
+    "full_dynfl",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -261,6 +268,12 @@ def validate_config(config: dict) -> None:
         raise ValueError("HE execution must be real or profiled")
     if he.get("require_real_he") and he.get("execution", "real") != "real":
         raise ValueError("require_real_he is only valid with real HE execution")
+    policies = tuple(config.get("policies", ()))
+    if policies != FORMAL_BASELINE_POLICIES:
+        raise ValueError(
+            "Formal paper configurations must use exactly the four frozen internal baselines: "
+            + ", ".join(FORMAL_BASELINE_POLICIES)
+        )
     privacy = config["privacy"]
     if config["system"].get("mainline_fusion"):
         if he.get("backend") != "seal":
@@ -297,9 +310,9 @@ def validate_config(config: dict) -> None:
             raise ValueError(
                 "Formal configurations must protect cross-domain updates and secure aggregate releases"
             )
-        if privacy.get("candidate_mechanisms") != ["dp", "he3"]:
+        if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
             raise ValueError(
-                "TeX configurations must expose DP and HE as the update choices"
+                "Formal configurations must expose DP, HE, and their combined DP+HE update mechanism"
             )
         if privacy.get("release_calibration") != "tex_packet":
             raise ValueError("TeX configurations require whole packet DP calibration")
