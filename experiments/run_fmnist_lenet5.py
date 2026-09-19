@@ -182,6 +182,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cloud-aggregation-fixed", type=float, default=0.04)
     parser.add_argument("--client-heterogeneity", type=float, default=2.0)
     parser.add_argument("--edge-heterogeneity", type=float, default=1.5)
+    parser.add_argument("--resource-scenario", choices=["none", "communication", "compute"], default="none")
+    parser.add_argument("--constrained-start-fraction", type=float, default=1.0 / 3.0)
+    parser.add_argument("--constrained-end-fraction", type=float, default=2.0 / 3.0)
+    parser.add_argument("--communication-constrained-multiplier", type=float, default=0.35)
+    parser.add_argument("--compute-constrained-multiplier", type=float, default=2.0)
     parser.add_argument("--network-jitter", type=float, default=0.25)
     parser.add_argument("--network-periodic-amplitude", type=float, default=0.2)
     parser.add_argument("--network-period-rounds", type=float, default=3.0)
@@ -293,6 +298,11 @@ def main() -> None:
         cloud_aggregation_fixed=args.cloud_aggregation_fixed,
         client_heterogeneity=args.client_heterogeneity,
         edge_heterogeneity=args.edge_heterogeneity,
+        resource_scenario=args.resource_scenario,
+        constrained_start_fraction=args.constrained_start_fraction,
+        constrained_end_fraction=args.constrained_end_fraction,
+        communication_constrained_multiplier=args.communication_constrained_multiplier,
+        compute_constrained_multiplier=args.compute_constrained_multiplier,
         network_jitter=args.network_jitter,
         network_periodic_amplitude=args.network_periodic_amplitude,
         network_period_rounds=args.network_period_rounds,

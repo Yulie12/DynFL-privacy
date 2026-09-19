@@ -62,6 +62,7 @@ from .selection import (
     Candidate,
     ProfileEvaluation,
     SelectionConfig,
+    staged_compute_factor,
     candidate_arrival_with_switch,
     candidate_has_he,
     candidate_link_mechanism,
@@ -1218,8 +1219,8 @@ def _run_lenet5_policy(
             candidates = enumerate_candidates(
                 config=effective_selection,
                 client_id=client.client_id,
-                edge_factor=edge_by_id[client.edge_id].compute_factor,
-                compute_factor=client.compute_factor,
+                edge_factor=staged_compute_factor(selection, edge_by_id[client.edge_id].compute_factor, round_idx),
+                compute_factor=staged_compute_factor(selection, client.compute_factor, round_idx),
                 memory_capacity_factor=client.memory_capacity_factor,
                 samples=client.samples,
                 remaining_epsilon=rem,
@@ -1573,7 +1574,7 @@ def _run_lenet5_policy(
             spec_mode = MODE_SPECS[candidate.mode]
             L = selection.L_block_cycles
             samples = client_info.samples
-            compute_factor = client_info.compute_factor
+            compute_factor = staged_compute_factor(selection, client_info.compute_factor, round_idx)
             per_block_local = spec_mode.local_work * samples / 150.0 / max(L, 1) * compute_factor
             est_local = L * per_block_local
             flow_inputs.append(

@@ -119,6 +119,12 @@ class SelectionConfig:
     dp_tier_count: int = 3
     client_heterogeneity: float = 2.0
     edge_heterogeneity: float = 1.5
+    # Q86/Q87: optional staged Normal -> Constrained -> Normal resource scenario.
+    resource_scenario: str = "none"
+    constrained_start_fraction: float = 1.0 / 3.0
+    constrained_end_fraction: float = 2.0 / 3.0
+    communication_constrained_multiplier: float = 0.35
+    compute_constrained_multiplier: float = 2.0
     network_jitter: float = 0.25
     network_periodic_amplitude: float = 0.2
     network_period_rounds: float = 3.0
@@ -4053,6 +4059,25 @@ def _link_route(link_id: str) -> str:
     return f"{parts[0]}_{parts[1]}"
 
 
+
+def resource_phase(config: SelectionConfig, round_idx: int) -> str:
+    """Return the Q86 staged resource phase for a training round."""
+    if config.resource_scenario == "none":
+        return "normal"
+    if config.resource_scenario not in {"communication", "compute"}:
+        raise ValueError(f"unknown resource_scenario: {config.resource_scenario}")
+    progress = float(round_idx) / max(int(config.rounds), 1)
+    if float(config.constrained_start_fraction) <= progress < float(config.constrained_end_fraction):
+        return "constrained"
+    return "normal"
+
+
+def staged_compute_factor(config: SelectionConfig, base_factor: float, round_idx: int) -> float:
+    if config.resource_scenario == "compute" and resource_phase(config, round_idx) == "constrained":
+        return float(base_factor) * float(config.compute_constrained_multiplier)
+    return float(base_factor)
+
+
 def _link_bandwidth(
     config: SelectionConfig,
     client_id: int,
@@ -4069,6 +4094,8 @@ def _link_bandwidth(
     }
     route = _link_route(link_id)
     base = base_rates[route]
+    if config.resource_scenario == "communication" and resource_phase(config, round_idx) == "constrained":
+        base *= float(config.communication_constrained_multiplier)
     period = max(float(config.network_period_rounds), 1e-9)
     periodic = 1.0 + float(config.network_periodic_amplitude) * math.sin(
         round_idx / period

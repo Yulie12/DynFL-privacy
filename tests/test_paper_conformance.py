@@ -1966,3 +1966,61 @@ def test_paper_runner_forwards_dirichlet_alpha() -> None:
     assert "--partition-mode" in command
     assert command[command.index("--partition-mode") + 1] == "dirichlet"
     assert command[command.index("--dirichlet-alpha") + 1] == "0.1"
+
+
+def test_staged_resource_phase_is_normal_constrained_normal() -> None:
+    from dynfed.selection import resource_phase
+
+    config = SelectionConfig(rounds=90, resource_scenario="communication")
+    assert resource_phase(config, 0) == "normal"
+    assert resource_phase(config, 29) == "normal"
+    assert resource_phase(config, 30) == "constrained"
+    assert resource_phase(config, 59) == "constrained"
+    assert resource_phase(config, 60) == "normal"
+    assert resource_phase(config, 89) == "normal"
+
+
+def test_communication_scenario_only_reduces_middle_phase_bandwidth() -> None:
+    config = SelectionConfig(
+        rounds=90,
+        resource_scenario="communication",
+        communication_constrained_multiplier=0.25,
+        network_jitter=0.0,
+        network_periodic_amplitude=0.0,
+    )
+    normal = _link_bandwidth(config, client_id=0, round_idx=0, link_id="L_E_upd")
+    constrained = _link_bandwidth(config, client_id=0, round_idx=45, link_id="L_E_upd")
+    restored = _link_bandwidth(config, client_id=0, round_idx=75, link_id="L_E_upd")
+    assert constrained == pytest.approx(normal * 0.25)
+    assert restored == pytest.approx(normal)
+
+
+def test_compute_scenario_only_slows_middle_phase_compute() -> None:
+    from dynfed.selection import staged_compute_factor
+
+    config = SelectionConfig(
+        rounds=90,
+        resource_scenario="compute",
+        compute_constrained_multiplier=2.5,
+    )
+    assert staged_compute_factor(config, 1.2, 0) == pytest.approx(1.2)
+    assert staged_compute_factor(config, 1.2, 45) == pytest.approx(3.0)
+    assert staged_compute_factor(config, 1.2, 75) == pytest.approx(1.2)
+
+
+def test_paper_runner_forwards_staged_resource_scenario() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = json.loads((root / "configs" / "paper_v30_cifar10_resnet18.json").read_text(encoding="utf-8"))
+    config["system"].update({
+        "resource_scenario": "communication",
+        "constrained_start_fraction": 0.25,
+        "constrained_end_fraction": 0.75,
+        "communication_constrained_multiplier": 0.4,
+        "compute_constrained_multiplier": 2.2,
+    })
+    command = build_command(config, seed=42, policies=["full_dynfl"], rounds=None)
+    assert command[command.index("--resource-scenario") + 1] == "communication"
+    assert command[command.index("--constrained-start-fraction") + 1] == "0.25"
+    assert command[command.index("--constrained-end-fraction") + 1] == "0.75"
+    assert command[command.index("--communication-constrained-multiplier") + 1] == "0.4"
+    assert command[command.index("--compute-constrained-multiplier") + 1] == "2.2"

@@ -1,0 +1,189 @@
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' step12_src/DynFL-privacy-ytt/dynfed/fmnist_lenet5_dynamic.py step12_mod/dynfed/fmnist_lenet5_dynamic.py
+--- step12_src/DynFL-privacy-ytt/dynfed/fmnist_lenet5_dynamic.py	2026-09-19 07:42:21.000000000 +0000
++++ step12_mod/dynfed/fmnist_lenet5_dynamic.py	2026-09-19 07:47:08.566723211 +0000
+@@ -62,6 +62,7 @@
+     Candidate,
+     ProfileEvaluation,
+     SelectionConfig,
++    staged_compute_factor,
+     candidate_arrival_with_switch,
+     candidate_has_he,
+     candidate_link_mechanism,
+@@ -1218,8 +1219,8 @@
+             candidates = enumerate_candidates(
+                 config=effective_selection,
+                 client_id=client.client_id,
+-                edge_factor=edge_by_id[client.edge_id].compute_factor,
+-                compute_factor=client.compute_factor,
++                edge_factor=staged_compute_factor(selection, edge_by_id[client.edge_id].compute_factor, round_idx),
++                compute_factor=staged_compute_factor(selection, client.compute_factor, round_idx),
+                 memory_capacity_factor=client.memory_capacity_factor,
+                 samples=client.samples,
+                 remaining_epsilon=rem,
+@@ -1573,7 +1574,7 @@
+             spec_mode = MODE_SPECS[candidate.mode]
+             L = selection.L_block_cycles
+             samples = client_info.samples
+-            compute_factor = client_info.compute_factor
++            compute_factor = staged_compute_factor(selection, client_info.compute_factor, round_idx)
+             per_block_local = spec_mode.local_work * samples / 150.0 / max(L, 1) * compute_factor
+             est_local = L * per_block_local
+             flow_inputs.append(
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' step12_src/DynFL-privacy-ytt/dynfed/selection.py step12_mod/dynfed/selection.py
+--- step12_src/DynFL-privacy-ytt/dynfed/selection.py	2026-09-19 07:42:21.000000000 +0000
++++ step12_mod/dynfed/selection.py	2026-09-19 07:47:08.565701493 +0000
+@@ -119,6 +119,12 @@
+     dp_tier_count: int = 3
+     client_heterogeneity: float = 2.0
+     edge_heterogeneity: float = 1.5
++    # Q86/Q87: optional staged Normal -> Constrained -> Normal resource scenario.
++    resource_scenario: str = "none"
++    constrained_start_fraction: float = 1.0 / 3.0
++    constrained_end_fraction: float = 2.0 / 3.0
++    communication_constrained_multiplier: float = 0.35
++    compute_constrained_multiplier: float = 2.0
+     network_jitter: float = 0.25
+     network_periodic_amplitude: float = 0.2
+     network_period_rounds: float = 3.0
+@@ -4053,6 +4059,25 @@
+     return f"{parts[0]}_{parts[1]}"
+ 
+ 
++
++def resource_phase(config: SelectionConfig, round_idx: int) -> str:
++    """Return the Q86 staged resource phase for a training round."""
++    if config.resource_scenario == "none":
++        return "normal"
++    if config.resource_scenario not in {"communication", "compute"}:
++        raise ValueError(f"unknown resource_scenario: {config.resource_scenario}")
++    progress = float(round_idx) / max(int(config.rounds), 1)
++    if float(config.constrained_start_fraction) <= progress < float(config.constrained_end_fraction):
++        return "constrained"
++    return "normal"
++
++
++def staged_compute_factor(config: SelectionConfig, base_factor: float, round_idx: int) -> float:
++    if config.resource_scenario == "compute" and resource_phase(config, round_idx) == "constrained":
++        return float(base_factor) * float(config.compute_constrained_multiplier)
++    return float(base_factor)
++
++
+ def _link_bandwidth(
+     config: SelectionConfig,
+     client_id: int,
+@@ -4069,6 +4094,8 @@
+     }
+     route = _link_route(link_id)
+     base = base_rates[route]
++    if config.resource_scenario == "communication" and resource_phase(config, round_idx) == "constrained":
++        base *= float(config.communication_constrained_multiplier)
+     period = max(float(config.network_period_rounds), 1e-9)
+     periodic = 1.0 + float(config.network_periodic_amplitude) * math.sin(
+         round_idx / period
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' step12_src/DynFL-privacy-ytt/experiments/run_fmnist_lenet5.py step12_mod/experiments/run_fmnist_lenet5.py
+--- step12_src/DynFL-privacy-ytt/experiments/run_fmnist_lenet5.py	2026-09-19 07:42:21.000000000 +0000
++++ step12_mod/experiments/run_fmnist_lenet5.py	2026-09-19 07:47:08.566030966 +0000
+@@ -182,6 +182,11 @@
+     parser.add_argument("--cloud-aggregation-fixed", type=float, default=0.04)
+     parser.add_argument("--client-heterogeneity", type=float, default=2.0)
+     parser.add_argument("--edge-heterogeneity", type=float, default=1.5)
++    parser.add_argument("--resource-scenario", choices=["none", "communication", "compute"], default="none")
++    parser.add_argument("--constrained-start-fraction", type=float, default=1.0 / 3.0)
++    parser.add_argument("--constrained-end-fraction", type=float, default=2.0 / 3.0)
++    parser.add_argument("--communication-constrained-multiplier", type=float, default=0.35)
++    parser.add_argument("--compute-constrained-multiplier", type=float, default=2.0)
+     parser.add_argument("--network-jitter", type=float, default=0.25)
+     parser.add_argument("--network-periodic-amplitude", type=float, default=0.2)
+     parser.add_argument("--network-period-rounds", type=float, default=3.0)
+@@ -293,6 +298,11 @@
+         cloud_aggregation_fixed=args.cloud_aggregation_fixed,
+         client_heterogeneity=args.client_heterogeneity,
+         edge_heterogeneity=args.edge_heterogeneity,
++        resource_scenario=args.resource_scenario,
++        constrained_start_fraction=args.constrained_start_fraction,
++        constrained_end_fraction=args.constrained_end_fraction,
++        communication_constrained_multiplier=args.communication_constrained_multiplier,
++        compute_constrained_multiplier=args.compute_constrained_multiplier,
+         network_jitter=args.network_jitter,
+         network_periodic_amplitude=args.network_periodic_amplitude,
+         network_period_rounds=args.network_period_rounds,
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' step12_src/DynFL-privacy-ytt/experiments/run_paper_config.py step12_mod/experiments/run_paper_config.py
+--- step12_src/DynFL-privacy-ytt/experiments/run_paper_config.py	2026-09-19 07:42:21.000000000 +0000
++++ step12_mod/experiments/run_paper_config.py	2026-09-19 07:47:08.566182490 +0000
+@@ -132,6 +132,11 @@
+         "aggregation_fraction": system["aggregation_fraction"],
+         "client_heterogeneity": system["client_heterogeneity"],
+         "edge_heterogeneity": system["edge_heterogeneity"],
++        "resource_scenario": system.get("resource_scenario", "none"),
++        "constrained_start_fraction": system.get("constrained_start_fraction", 1.0 / 3.0),
++        "constrained_end_fraction": system.get("constrained_end_fraction", 2.0 / 3.0),
++        "communication_constrained_multiplier": system.get("communication_constrained_multiplier", 0.35),
++        "compute_constrained_multiplier": system.get("compute_constrained_multiplier", 2.0),
+         "network_jitter": network["jitter"],
+         "network_periodic_amplitude": network["periodic_amplitude"],
+         "network_period_rounds": network["period_rounds"],
+diff -ruN '--exclude=__pycache__' '--exclude=.pytest_cache' step12_src/DynFL-privacy-ytt/tests/test_paper_conformance.py step12_mod/tests/test_paper_conformance.py
+--- step12_src/DynFL-privacy-ytt/tests/test_paper_conformance.py	2026-09-19 07:42:21.000000000 +0000
++++ step12_mod/tests/test_paper_conformance.py	2026-09-19 07:47:25.482027142 +0000
+@@ -1966,3 +1966,61 @@
+     assert "--partition-mode" in command
+     assert command[command.index("--partition-mode") + 1] == "dirichlet"
+     assert command[command.index("--dirichlet-alpha") + 1] == "0.1"
++
++
++def test_staged_resource_phase_is_normal_constrained_normal() -> None:
++    from dynfed.selection import resource_phase
++
++    config = SelectionConfig(rounds=90, resource_scenario="communication")
++    assert resource_phase(config, 0) == "normal"
++    assert resource_phase(config, 29) == "normal"
++    assert resource_phase(config, 30) == "constrained"
++    assert resource_phase(config, 59) == "constrained"
++    assert resource_phase(config, 60) == "normal"
++    assert resource_phase(config, 89) == "normal"
++
++
++def test_communication_scenario_only_reduces_middle_phase_bandwidth() -> None:
++    config = SelectionConfig(
++        rounds=90,
++        resource_scenario="communication",
++        communication_constrained_multiplier=0.25,
++        network_jitter=0.0,
++        network_periodic_amplitude=0.0,
++    )
++    normal = _link_bandwidth(config, client_id=0, round_idx=0, link_id="L_E_upd")
++    constrained = _link_bandwidth(config, client_id=0, round_idx=45, link_id="L_E_upd")
++    restored = _link_bandwidth(config, client_id=0, round_idx=75, link_id="L_E_upd")
++    assert constrained == pytest.approx(normal * 0.25)
++    assert restored == pytest.approx(normal)
++
++
++def test_compute_scenario_only_slows_middle_phase_compute() -> None:
++    from dynfed.selection import staged_compute_factor
++
++    config = SelectionConfig(
++        rounds=90,
++        resource_scenario="compute",
++        compute_constrained_multiplier=2.5,
++    )
++    assert staged_compute_factor(config, 1.2, 0) == pytest.approx(1.2)
++    assert staged_compute_factor(config, 1.2, 45) == pytest.approx(3.0)
++    assert staged_compute_factor(config, 1.2, 75) == pytest.approx(1.2)
++
++
++def test_paper_runner_forwards_staged_resource_scenario() -> None:
++    root = Path(__file__).resolve().parents[1]
++    config = json.loads((root / "configs" / "paper_v30_cifar10_resnet18.json").read_text(encoding="utf-8"))
++    config["system"].update({
++        "resource_scenario": "communication",
++        "constrained_start_fraction": 0.25,
++        "constrained_end_fraction": 0.75,
++        "communication_constrained_multiplier": 0.4,
++        "compute_constrained_multiplier": 2.2,
++    })
++    command = build_command(config, seed=42, policies=["full_dynfl"], rounds=None)
++    assert command[command.index("--resource-scenario") + 1] == "communication"
++    assert command[command.index("--constrained-start-fraction") + 1] == "0.25"
++    assert command[command.index("--constrained-end-fraction") + 1] == "0.75"
++    assert command[command.index("--communication-constrained-multiplier") + 1] == "0.4"
++    assert command[command.index("--compute-constrained-multiplier") + 1] == "2.2"
