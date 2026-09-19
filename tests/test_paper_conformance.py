@@ -2455,3 +2455,37 @@ def test_q98_readiness_never_marks_missing_results_complete(tmp_path: Path) -> N
     assert by_name["fig3_dynamic_vs_fixed_privacy"]["missing"] == [
         "fig3_privacy_aggregate/privacy_trajectory.csv"
     ]
+
+
+def test_step26_postprocess_covers_all_q98_training_outputs() -> None:
+    from experiments.postprocess_final_paper_suite import build_commands
+
+    commands = build_commands(seeds=[40, 42, 44], rounds=100)
+    rendered = [" ".join(command) for command in commands]
+    assert len(commands) == 11
+    for setting in ("iid", "dirichlet_0p5", "dirichlet_0p1"):
+        assert any(f"fig1_main/{setting}" in command.replace("\\", "/") for command in rendered)
+    for scenario in ("communication", "compute"):
+        assert any(f"fig2_dynamic_resources/{scenario}" in command.replace("\\", "/") for command in rendered)
+    assert any("aggregate_final_privacy.py" in command for command in rendered)
+    assert any("fig4_fast_response" in command for command in rendered)
+    assert any("aggregate_controlled_results.py" in command and "fig5_sp" in command for command in rendered)
+    assert any("generate_table1_parameters.py" in command for command in rendered)
+    assert any("generate_table2_methods_results.py" in command for command in rendered)
+    assert rendered[-1].endswith("validate_final_paper_outputs.py --require-complete")
+
+
+def test_step26_sp_aggregator_default_matches_final_suite_output_root() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "aggregate_controlled_results.py").read_text(encoding="utf-8")
+    assert 'default=ROOT / "out" / "paper_v31_final" / "fig5_sp"' in source
+    assert 'default=ROOT / "out" / "paper_v31_final" / "sensitivity"' not in source
+
+
+def test_step26_postprocess_is_aggregation_only_and_requires_complete_evidence() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "postprocess_final_paper_suite.py").read_text(encoding="utf-8")
+    assert "run_paper_config.py" not in source
+    assert "run_final_paper_suite.py" not in source
+    assert '"--require-complete"' in source
+    assert "subprocess.run(command, cwd=ROOT, check=True)" in source

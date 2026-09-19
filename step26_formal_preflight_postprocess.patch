@@ -1,0 +1,156 @@
+diff --git a/experiments/aggregate_controlled_results.py b/experiments/aggregate_controlled_results.py
+index a0eaa6a..2c77c8b 100644
+--- a/experiments/aggregate_controlled_results.py
++++ b/experiments/aggregate_controlled_results.py
+@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
+         description="Aggregate the versioned controlled paper experiments."
+     )
+     parser.add_argument(
+-        "--root", type=Path, default=ROOT / "out" / "paper_v31_final" / "sensitivity"
++        "--root", type=Path, default=ROOT / "out" / "paper_v31_final" / "fig5_sp"
+     )
+     parser.add_argument("--seeds", type=int, nargs="+", default=[40, 42, 44])
+     parser.add_argument("--rounds", type=int, default=100)
+diff --git a/experiments/postprocess_final_paper_suite.py b/experiments/postprocess_final_paper_suite.py
+new file mode 100644
+index 0000000..bdd8cb3
+--- /dev/null
++++ b/experiments/postprocess_final_paper_suite.py
+@@ -0,0 +1,95 @@
++from __future__ import annotations
++
++"""Post-process the frozen Q98 formal suite after all training runs finish.
++
++This script only aggregates existing formal results, generates Tables I/II,
++and runs the Step25 readiness gate.  It never launches training and never
++fills missing results with placeholders.
++"""
++
++import argparse
++import subprocess
++import sys
++from pathlib import Path
++
++try:
++    from paper_final_plan import DATA_DISTRIBUTIONS, FORMAL_SEEDS, RESOURCE_SCENARIOS
++except ImportError:  # pragma: no cover
++    from experiments.paper_final_plan import DATA_DISTRIBUTIONS, FORMAL_SEEDS, RESOURCE_SCENARIOS
++
++ROOT = Path(__file__).resolve().parents[1]
++FINAL_ROOT = ROOT / "out" / "paper_v31_final"
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description="Aggregate and validate the frozen Q98 paper outputs.")
++    parser.add_argument("--seeds", type=int, nargs="+", default=list(FORMAL_SEEDS))
++    parser.add_argument("--rounds", type=int, default=100)
++    parser.add_argument("--dry-run", action="store_true")
++    return parser.parse_args()
++
++
++def build_commands(*, seeds: list[int], rounds: int) -> list[list[str]]:
++    py = sys.executable
++    seed_args = [str(seed) for seed in seeds]
++    commands: list[list[str]] = []
++
++    for setting, _partition, _alpha in DATA_DISTRIBUTIONS:
++        case_root = FINAL_ROOT / "fig1_main" / setting
++        commands.append([
++            py, str(ROOT / "experiments" / "aggregate_multiseed_results.py"),
++            "--root", str(case_root), "--seeds", *seed_args,
++            "--rounds", str(rounds), "--clients", "100", "--edges", "10",
++            "--selection-period", "1", "--privacy-budget", "8",
++            "--output-dir", str(case_root / "aggregate"),
++        ])
++
++    for scenario in RESOURCE_SCENARIOS:
++        case_root = FINAL_ROOT / "fig2_dynamic_resources" / scenario
++        commands.append([
++            py, str(ROOT / "experiments" / "aggregate_multiseed_results.py"),
++            "--root", str(case_root), "--seeds", *seed_args,
++            "--policies", "full_dynfl", "--rounds", str(rounds),
++            "--clients", "100", "--edges", "10", "--selection-period", "1",
++            "--privacy-budget", "8", "--output-dir", str(case_root / "aggregate"),
++        ])
++
++    commands.append([
++        py, str(ROOT / "experiments" / "aggregate_final_privacy.py"),
++        "--seeds", *seed_args, "--rounds", str(rounds),
++    ])
++
++    fast_root = FINAL_ROOT / "fig4_fast_response"
++    commands.append([
++        py, str(ROOT / "experiments" / "aggregate_multiseed_results.py"),
++        "--root", str(fast_root), "--seeds", *seed_args,
++        "--rounds", str(rounds), "--clients", "100", "--edges", "10",
++        "--selection-period", "1", "--privacy-budget", "8",
++        "--output-dir", str(fast_root / "aggregate"),
++    ])
++
++    commands.append([
++        py, str(ROOT / "experiments" / "aggregate_controlled_results.py"),
++        "--root", str(FINAL_ROOT / "fig5_sp"), "--seeds", *seed_args,
++        "--rounds", str(rounds), "--output-dir", str(FINAL_ROOT / "sensitivity_aggregate"),
++    ])
++    commands.append([py, str(ROOT / "experiments" / "generate_table1_parameters.py")])
++    commands.append([py, str(ROOT / "experiments" / "generate_table2_methods_results.py")])
++    commands.append([
++        py, str(ROOT / "experiments" / "validate_final_paper_outputs.py"), "--require-complete",
++    ])
++    return commands
++
++
++def main() -> None:
++    args = parse_args()
++    seeds = list(dict.fromkeys(int(seed) for seed in args.seeds))
++    commands = build_commands(seeds=seeds, rounds=int(args.rounds))
++    for command in commands:
++        print(subprocess.list2cmdline(command), flush=True)
++        if not args.dry_run:
++            subprocess.run(command, cwd=ROOT, check=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 0052584..072b49d 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -2455,3 +2455,37 @@ def test_q98_readiness_never_marks_missing_results_complete(tmp_path: Path) -> N
+     assert by_name["fig3_dynamic_vs_fixed_privacy"]["missing"] == [
+         "fig3_privacy_aggregate/privacy_trajectory.csv"
+     ]
++
++
++def test_step26_postprocess_covers_all_q98_training_outputs() -> None:
++    from experiments.postprocess_final_paper_suite import build_commands
++
++    commands = build_commands(seeds=[40, 42, 44], rounds=100)
++    rendered = [" ".join(command) for command in commands]
++    assert len(commands) == 11
++    for setting in ("iid", "dirichlet_0p5", "dirichlet_0p1"):
++        assert any(f"fig1_main/{setting}" in command.replace("\\", "/") for command in rendered)
++    for scenario in ("communication", "compute"):
++        assert any(f"fig2_dynamic_resources/{scenario}" in command.replace("\\", "/") for command in rendered)
++    assert any("aggregate_final_privacy.py" in command for command in rendered)
++    assert any("fig4_fast_response" in command for command in rendered)
++    assert any("aggregate_controlled_results.py" in command and "fig5_sp" in command for command in rendered)
++    assert any("generate_table1_parameters.py" in command for command in rendered)
++    assert any("generate_table2_methods_results.py" in command for command in rendered)
++    assert rendered[-1].endswith("validate_final_paper_outputs.py --require-complete")
++
++
++def test_step26_sp_aggregator_default_matches_final_suite_output_root() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "aggregate_controlled_results.py").read_text(encoding="utf-8")
++    assert 'default=ROOT / "out" / "paper_v31_final" / "fig5_sp"' in source
++    assert 'default=ROOT / "out" / "paper_v31_final" / "sensitivity"' not in source
++
++
++def test_step26_postprocess_is_aggregation_only_and_requires_complete_evidence() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "experiments" / "postprocess_final_paper_suite.py").read_text(encoding="utf-8")
++    assert "run_paper_config.py" not in source
++    assert "run_final_paper_suite.py" not in source
++    assert '"--require-complete"' in source
++    assert "subprocess.run(command, cwd=ROOT, check=True)" in source
