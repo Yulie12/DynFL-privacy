@@ -2374,3 +2374,52 @@ def test_q98_table1_output_contract_is_machine_readable_and_traceable() -> None:
     assert '"training.selection_period"' in source
     assert '"privacy.update_epsilon_budget"' in source
     assert '"optimization.pareto_max_iters"' in source
+
+
+def test_q98_table2_freezes_four_internal_method_definitions() -> None:
+    from experiments.generate_table2_methods_results import METHOD_DEFINITIONS
+    from experiments.paper_final_plan import FINAL_POLICIES
+
+    assert tuple(METHOD_DEFINITIONS) == FINAL_POLICIES
+    assert METHOD_DEFINITIONS["fixed_mode_fixed_privacy"]["mode_definition"] == "LIIEIIIC"
+    assert METHOD_DEFINITIONS["fixed_mode_dynamic_privacy"]["mode_definition"] == "LIIEIIIC"
+    assert METHOD_DEFINITIONS["dynamic_mode_fixed_privacy"]["mode_policy"] == "Dynamic"
+    assert METHOD_DEFINITIONS["full_dynfl"]["privacy_policy"] == "Dynamic"
+
+
+def test_q98_table2_joins_definitions_with_compact_core_results() -> None:
+    from experiments.generate_table2_methods_results import build_table2_rows
+    from experiments.paper_final_plan import FINAL_POLICIES
+
+    summary = {}
+    for index, policy in enumerate(FINAL_POLICIES):
+        summary[policy] = {
+            "final_test_accuracy_mean": 0.70 + index * 0.01,
+            "final_test_accuracy_std": 0.01,
+            "avg_last_10_accuracy_mean": 0.69 + index * 0.01,
+            "avg_last_10_accuracy_std": 0.02,
+            "accounted_system_time_sec_mean": 100.0 + index,
+            "accounted_system_time_sec_std": 2.0,
+            "max_update_epsilon_mean": 4.0 + index * 0.1,
+            "max_update_epsilon_std": 0.1,
+            "feasible_participation_ratio_mean": 0.95,
+            "feasible_participation_ratio_std": 0.01,
+        }
+    rows = build_table2_rows(summary)
+    assert [row["policy"] for row in rows] == list(FINAL_POLICIES)
+    assert rows[-1]["label"] == "Full DynFL"
+    assert rows[-1]["final_test_accuracy_mean"] == pytest.approx(0.73)
+    assert rows[0]["accounted_system_time_sec_mean"] == pytest.approx(100.0)
+    assert rows[0]["max_update_epsilon_mean"] == pytest.approx(4.0)
+
+
+def test_q98_table2_output_is_machine_readable_and_uses_aggregated_results() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "experiments" / "generate_table2_methods_results.py").read_text(encoding="utf-8")
+    assert "table2_methods_results.csv" in source
+    assert "summary_statistics.csv" in source
+    assert "FINAL_POLICIES" in source
+    assert '"final_test_accuracy_mean"' in source
+    assert '"accounted_system_time_sec_mean"' in source
+    assert '"max_update_epsilon_mean"' in source
+    assert "Run the formal multi-seed aggregation first" in source
