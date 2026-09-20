@@ -1473,6 +1473,15 @@ def _run_lenet5_policy(
                     "update_epsilon": ledger.update.current_epsilon(),
                     "projected_feature_epsilon": projection.feature_epsilon_after,
                     "projected_update_epsilon": projection.update_epsilon_after,
+                    # Step32.2 runtime audit: preserve the exact sigma selected by
+                    # the candidate so it can be reconciled with execution and
+                    # realized accounting after the round.
+                    "selected_update_noise_multiplier": (
+                        float(candidate.update_noise_multiplier)
+                        if candidate.update_noise_multiplier is not None
+                        else None
+                    ),
+                    "accounted_update_noise_multiplier": None,
                     "communication_volume": candidate.communication_volume,
                     "feasible": candidate.feasible,
                     "feasible_resource": candidate.feasible_resource,
@@ -1664,6 +1673,12 @@ def _run_lenet5_policy(
                 )
                 row["feature_dp_events"] = projection.feature_events
                 row["update_dp_events"] = projection.update_events
+                row["accounted_update_noise_multiplier"] = (
+                    float(candidate.update_noise_multiplier)
+                    if projection.update_events > 0
+                    and candidate.update_noise_multiplier is not None
+                    else None
+                )
             else:
                 row["feature_dp_events"] = 0
                 row["update_dp_events"] = 0
@@ -2451,6 +2466,35 @@ def _run_lenet5_policy(
                 key_isolation_enforced=bool(fused_he_audit.get("key_isolation_enforced")),
                 aggregate_only_decryption_enforced=bool(fused_he_audit.get("aggregate_only_decryption_enforced")),
             )
+            selected_sigmas = [
+                float(selected_by_id[cid].update_noise_multiplier)
+                for cid in client_ids
+                if cid in selected_by_id
+                and selected_by_id[cid].update_noise_multiplier is not None
+            ]
+            accounted_sigmas = [
+                float(round_decision_rows_by_client[cid]["accounted_update_noise_multiplier"])
+                for cid in client_ids
+                if cid in round_decision_rows_by_client
+                and round_decision_rows_by_client[cid].get("accounted_update_noise_multiplier") is not None
+            ]
+            executed_sigma = (
+                float(selected_sigmas[0])
+                if noise_location == "packet" and selected_sigmas
+                else float(aggregate_noise_multiplier)
+                if noise_location == "aggregate_share"
+                else None
+            )
+            sigma_consistent = (
+                None
+                if executed_sigma is None
+                else bool(
+                    selected_sigmas
+                    and accounted_sigmas
+                    and all(abs(sigma - executed_sigma) <= 1e-12 for sigma in selected_sigmas)
+                    and all(abs(sigma - executed_sigma) <= 1e-12 for sigma in accounted_sigmas)
+                )
+            )
             protection_releases.append({
                 "round": round_idx, "packet_index": packet_index,
                 "source": "edge" if candidate and candidate.mode in EDGE_CLOUD_MODES else "end",
@@ -2458,6 +2502,14 @@ def _run_lenet5_policy(
                 "client_ids": ";".join(str(cid) for cid in client_ids),
                 "source_domain": _cloud_update_edge(client_ids, client_edges),
                 "mode": candidate.mode if candidate else "none",
+                "selected_update_noise_multipliers": ";".join(
+                    f"{sigma:.17g}" for sigma in selected_sigmas
+                ),
+                "executed_update_noise_multiplier": executed_sigma,
+                "accounted_update_noise_multipliers": ";".join(
+                    f"{sigma:.17g}" for sigma in accounted_sigmas
+                ),
+                "sigma_execution_accounting_consistent": sigma_consistent,
                 **audit,
             })
 

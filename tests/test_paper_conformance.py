@@ -2596,3 +2596,16 @@ def test_formal_cloud_dp_he_execution_is_not_gated_by_removed_trusted_edge_flag(
     assert _candidate_uses_cross_domain_update_dp(candidate, False)
     assert not _candidate_uses_local_packet_update_dp(candidate, False)
     assert _candidate_uses_secure_aggregate_update_dp(candidate, False)
+
+
+def test_step32_2_runtime_sigma_audit_fields_are_emitted() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "dynfed" / "fmnist_lenet5_dynamic.py").read_text(encoding="utf-8")
+    assert '"selected_update_noise_multiplier"' in source
+    assert '"accounted_update_noise_multiplier"' in source
+    assert '"executed_update_noise_multiplier"' in source
+    assert '"selected_update_noise_multipliers"' in source
+    assert '"accounted_update_noise_multipliers"' in source
+    assert '"sigma_execution_accounting_consistent"' in source
+    assert 'if noise_location == "packet" and selected_sigmas' in source
+    assert 'if noise_location == "aggregate_share"' in source
