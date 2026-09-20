@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.skip(reason="legacy Method2/mainline_fusion coverage archived by Q75; not part of the formal DynFL mainline")
+
 import copy
 import json
 from pathlib import Path

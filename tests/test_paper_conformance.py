@@ -2560,3 +2560,39 @@ def test_step30_skip_completed_is_opt_in_and_does_not_fake_partial_completion() 
     assert 'int(status.get("round", -1)) != int(rounds)' in source
     assert 'summary_table.csv' in source
     assert '"skipped_completed"' in source
+
+
+def test_formal_cloud_dp_execution_is_not_gated_by_removed_trusted_edge_flag() -> None:
+    candidate = Candidate(
+        **{
+            **_candidate("LIEIIC").__dict__,
+            "mechanisms": {"upd": "dp"},
+            "link_mechanisms": {
+                "L_E_emb": "none",
+                "L_E_grad": "none",
+                "E_C_upd": "dp",
+            },
+            "update_noise_multiplier": 2.75,
+        }
+    )
+
+    assert _candidate_uses_cross_domain_update_dp(candidate, False)
+    assert _candidate_uses_local_packet_update_dp(candidate, False)
+    assert not _candidate_uses_secure_aggregate_update_dp(candidate, False)
+    deferred = _candidate_training_mechanisms(candidate, aggregate_cloud_update_dp=True)
+    assert deferred["upd"] == "none"
+
+
+def test_formal_cloud_dp_he_execution_is_not_gated_by_removed_trusted_edge_flag() -> None:
+    candidate = Candidate(
+        **{
+            **_candidate("LIIEIIIC").__dict__,
+            "mechanisms": {"upd": "dp_he3"},
+            "link_mechanisms": {"L_E_upd": "none", "E_C_upd": "dp_he3"},
+            "update_noise_multiplier": 3.25,
+        }
+    )
+
+    assert _candidate_uses_cross_domain_update_dp(candidate, False)
+    assert not _candidate_uses_local_packet_update_dp(candidate, False)
+    assert _candidate_uses_secure_aggregate_update_dp(candidate, False)

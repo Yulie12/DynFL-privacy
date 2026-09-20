@@ -309,8 +309,11 @@ def _candidate_uses_cross_domain_update_dp(
     candidate: Candidate | None,
     trusted_edge_split_execution: bool = False,
 ) -> bool:
+    # Formal Q39--Q47 semantics are exposure/link based.  The removed
+    # trusted-edge compatibility flag must not decide whether a selected
+    # cloud-link DP mechanism is actually executed.
     mechanism = _candidate_cloud_update_mechanism(candidate)
-    return trusted_edge_split_execution and mechanism_uses_dp(mechanism)
+    return mechanism_uses_dp(mechanism)
 
 
 def _candidate_uses_local_packet_update_dp(
@@ -318,11 +321,7 @@ def _candidate_uses_local_packet_update_dp(
     trusted_edge_split_execution: bool = False,
 ) -> bool:
     mechanism = _candidate_cloud_update_mechanism(candidate)
-    return (
-        trusted_edge_split_execution
-        and mechanism_uses_dp(mechanism)
-        and not mechanism_uses_he(mechanism)
-    )
+    return mechanism_uses_dp(mechanism) and not mechanism_uses_he(mechanism)
 
 
 def _candidate_uses_secure_aggregate_update_dp(
@@ -330,11 +329,7 @@ def _candidate_uses_secure_aggregate_update_dp(
     trusted_edge_split_execution: bool = False,
 ) -> bool:
     mechanism = _candidate_cloud_update_mechanism(candidate)
-    return (
-        trusted_edge_split_execution
-        and mechanism_uses_dp(mechanism)
-        and mechanism_uses_he(mechanism)
-    )
+    return mechanism_uses_dp(mechanism) and mechanism_uses_he(mechanism)
 
 
 def _client_train_worker(
@@ -1427,6 +1422,7 @@ def _run_lenet5_policy(
             projection = ledger.project(
                 candidate.feature_dp_events,
                 candidate.update_dp_events,
+                update_noise_multiplier=candidate.update_noise_multiplier,
             )
             if (effective_selection.update_protection_goal == "released_model_dp"
                     and not ledger.can_apply(projection)):
@@ -2167,6 +2163,22 @@ def _run_lenet5_policy(
             cloud_signal_updates,
             global_aggregation_weights,
         )
+        secure_aggregate_sigmas = [
+            float(candidate.update_noise_multiplier)
+            for (_state, _count, candidate, _client_ids), fraction
+            in zip(cloud_updates, secure_aggregate_dp_client_fractions)
+            if fraction > 0.0
+            and candidate is not None
+            and candidate.update_noise_multiplier is not None
+        ]
+        aggregate_noise_multiplier = (
+            release_account.multiplier
+            if effective_selection.mainline_fusion and release_account is not None
+            else max(
+                secure_aggregate_sigmas,
+                default=float(privacy_parameters["update_noise_multiplier"]),
+            )
+        )
         (
             normalized_global_weights,
             aggregate_dp_max_client_weight,
@@ -2177,11 +2189,7 @@ def _run_lenet5_policy(
             global_aggregation_weights,
             secure_aggregate_dp_client_fractions,
             clip_norm=train_config.dp_clip_norm,
-            noise_multiplier=(
-                release_account.multiplier
-                if effective_selection.mainline_fusion and release_account is not None
-                else float(privacy_parameters["update_noise_multiplier"])
-            ),
+            noise_multiplier=aggregate_noise_multiplier,
         )
         cloud_signal_updates.clear()
         local_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
@@ -3384,11 +3392,17 @@ def _run_client_training_tasks(
             "num_classes": num_classes,
             "mechanisms": _candidate_training_mechanisms(
                 candidate,
-                aggregate_cloud_update_dp=selection.trusted_edge_split_execution,
+                # Cloud-link DP is executed at the actual packet/aggregate
+                # boundary below, so do not also apply it inside the worker.
+                aggregate_cloud_update_dp=True,
             ),
             "dp_clip_norm": train_config.dp_clip_norm,
             "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
-            "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
+            "dp_update_noise_multiplier": float(
+                candidate.update_noise_multiplier
+                if candidate.update_noise_multiplier is not None
+                else privacy_parameters["update_noise_multiplier"]
+            ),
             "dp_update_mode": train_config.dp_update_mode,
             "dp_epsilon": max(selection.dp_emb_epsilon, 1e-6),
             "dp_seed": _dp_noise_seed(
@@ -4307,7 +4321,7 @@ def _coordinate_accuracy_oracle_round(
                 num_classes=num_classes,
                 mechanisms=_candidate_training_mechanisms(
                     candidate,
-                    aggregate_cloud_update_dp=selection_config.trusted_edge_split_execution,
+                    aggregate_cloud_update_dp=True,
                 ),
                 dp_clip_norm=train_config.dp_clip_norm,
                 dp_noise_multiplier=float(privacy_parameters["feature_noise_multiplier"]),
@@ -4324,7 +4338,7 @@ def _coordinate_accuracy_oracle_round(
             if _should_apply_update_dp(
                 _candidate_training_mechanisms(
                     candidate,
-                    aggregate_cloud_update_dp=selection_config.trusted_edge_split_execution,
+                    aggregate_cloud_update_dp=True,
                 ),
                 train_config.dp_update_mode,
                 candidate.mode,
@@ -4333,7 +4347,11 @@ def _coordinate_accuracy_oracle_round(
                     state_diff,
                     mechanism="dp",
                     clip_norm=train_config.dp_clip_norm,
-                    noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
+                    noise_multiplier=float(
+                        candidate.update_noise_multiplier
+                        if candidate.update_noise_multiplier is not None
+                        else privacy_parameters["update_noise_multiplier"]
+                    ),
                     rng=eval_rng,
                     device=device,
                 )
