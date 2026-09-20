@@ -1,0 +1,11 @@
+aggregate_only_decryption_enforced,client_ids,destination,dp_budget_ok,dp_event_observed,formal_dp_status,he_crypto_observed,he_execution,key_isolation_enforced,mechanism,mode,noise_location,object,packet_index,packet_protection_status,released_model_dp_status,round,source,source_domain
+False,0;10;30;40;50;70;80;90,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,0,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,0
+False,1;11;21;31;41;51;61;71;81;91,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,1,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,1
+False,2;12;22;42;62;82;92,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,2,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,2
+False,3;13;23;33;43;53;63;73;83;93,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,3,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,3
+False,4;14;24;34;44;64;74;84;94,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,4,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,4
+False,6;16;26;36;56;66;76;86;96,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,5,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,6
+False,7;17;27;37;47;57;67;87;97,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,6,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,7
+False,9;19;29;39;49;59;79;89;99,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,7,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,9
+False,15;25;35;45;55;75;95,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,8,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,5
+False,18;28;38;48;58;68;78;88,cloud,True,False,not_established,True,real,False,dp_he3,LIIEIIIC,none,model_update,9,real_he_pending_role_isolation,no_valid_dp_calibration_for_contribution,0,edge,8

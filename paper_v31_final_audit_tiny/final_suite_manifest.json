@@ -1,0 +1,41 @@
+[
+  {
+    "study": "main",
+    "setting": "iid",
+    "seed": 40,
+    "rounds": 100,
+    "policies": [
+      "fixed_mode_fixed_privacy",
+      "dynamic_mode_fixed_privacy",
+      "fixed_mode_dynamic_privacy",
+      "full_dynfl"
+    ],
+    "output_root": "out/paper_v31_final/fig1_main/iid"
+  },
+  {
+    "study": "main",
+    "setting": "dirichlet_0p5",
+    "seed": 40,
+    "rounds": 100,
+    "policies": [
+      "fixed_mode_fixed_privacy",
+      "dynamic_mode_fixed_privacy",
+      "fixed_mode_dynamic_privacy",
+      "full_dynfl"
+    ],
+    "output_root": "out/paper_v31_final/fig1_main/dirichlet_0p5"
+  },
+  {
+    "study": "main",
+    "setting": "dirichlet_0p1",
+    "seed": 40,
+    "rounds": 100,
+    "policies": [
+      "fixed_mode_fixed_privacy",
+      "dynamic_mode_fixed_privacy",
+      "fixed_mode_dynamic_privacy",
+      "full_dynfl"
+    ],
+    "output_root": "out/paper_v31_final/fig1_main/dirichlet_0p1"
+  }
+]

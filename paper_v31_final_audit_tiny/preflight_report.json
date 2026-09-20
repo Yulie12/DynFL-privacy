@@ -1,0 +1,178 @@
+{
+  "ready": true,
+  "checks": {
+    "python_modules": {
+      "ready": true,
+      "modules": {
+        "numpy": {
+          "ready": true,
+          "version": "2.2.6"
+        },
+        "sklearn": {
+          "ready": true,
+          "version": "1.7.2"
+        },
+        "matplotlib": {
+          "ready": true,
+          "version": "3.10.9"
+        },
+        "torch": {
+          "ready": true,
+          "version": "2.5.1+cu121"
+        },
+        "torchvision": {
+          "ready": true,
+          "version": "0.20.1+cu121"
+        }
+      }
+    },
+    "cuda": {
+      "ready": true,
+      "required_device": "cuda",
+      "detail": "NVIDIA GeForce GTX 1660 Ti"
+    },
+    "real_he": {
+      "ready": true,
+      "backend": "seal",
+      "required": true,
+      "detail": "SEAL CKKS encrypted-vector validation passed (max error 8.194e-10)."
+    },
+    "output_writable": {
+      "ready": true,
+      "path": "E:\\YTT\\GROUP\\DynFL-privacy\\out"
+    }
+  },
+  "workload": {
+    "studies": [
+      "main",
+      "dynamic_resources",
+      "privacy",
+      "fast_response",
+      "optimizer",
+      "sp",
+      "auxiliary"
+    ],
+    "seeds": [
+      40,
+      42,
+      44
+    ],
+    "formal_cases": 11,
+    "training_invocations": 33,
+    "policy_runs": 81,
+    "configured_rounds_per_policy": 100,
+    "policy_rounds": 8100,
+    "optimizer_validation_invocations": 1
+  },
+  "cases": [
+    {
+      "study": "main",
+      "setting": "iid",
+      "policies": [
+        "fixed_mode_fixed_privacy",
+        "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy",
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig1_main/iid"
+    },
+    {
+      "study": "main",
+      "setting": "dirichlet_0p5",
+      "policies": [
+        "fixed_mode_fixed_privacy",
+        "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy",
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig1_main/dirichlet_0p5"
+    },
+    {
+      "study": "main",
+      "setting": "dirichlet_0p1",
+      "policies": [
+        "fixed_mode_fixed_privacy",
+        "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy",
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig1_main/dirichlet_0p1"
+    },
+    {
+      "study": "dynamic_resources",
+      "setting": "communication",
+      "policies": [
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig2_dynamic_resources/communication"
+    },
+    {
+      "study": "dynamic_resources",
+      "setting": "compute",
+      "policies": [
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig2_dynamic_resources/compute"
+    },
+    {
+      "study": "privacy",
+      "setting": "dynamic_vs_fixed",
+      "policies": [
+        "dynamic_mode_fixed_privacy",
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig3_privacy"
+    },
+    {
+      "study": "fast_response",
+      "setting": "configured_fast_clients",
+      "policies": [
+        "fixed_mode_fixed_privacy",
+        "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy",
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig4_fast_response"
+    },
+    {
+      "study": "sp",
+      "setting": "1",
+      "policies": [
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig5_sp/sp_1"
+    },
+    {
+      "study": "sp",
+      "setting": "5",
+      "policies": [
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig5_sp/sp_5"
+    },
+    {
+      "study": "sp",
+      "setting": "10",
+      "policies": [
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/fig5_sp/sp_10"
+    },
+    {
+      "study": "auxiliary",
+      "setting": "fmnist_lightweight_cnn",
+      "policies": [
+        "fixed_mode_fixed_privacy",
+        "dynamic_mode_fixed_privacy",
+        "fixed_mode_dynamic_privacy",
+        "full_dynfl"
+      ],
+      "output_root": "out/paper_v31_final/aux_fmnist"
+    }
+  ],
+  "notes": [
+    "Dataset loaders may download CIFAR-10/Fashion-MNIST on first use.",
+    "The pretrained ResNet-18 path may download torchvision weights on first use.",
+    "Preflight validates availability; it does not train models or create experimental evidence."
+  ]
+}

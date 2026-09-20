@@ -1,0 +1,556 @@
+{
+  "policy": "dynamic_mode_fixed_privacy",
+  "model": "resnet18pretrainedhead",
+  "dataset": "CIFAR-10",
+  "rounds": 1,
+  "final_test_accuracy": 0.1755,
+  "best_test_accuracy": 0.1755,
+  "avg_last_5_accuracy": 0.1755,
+  "avg_last_10_accuracy": 0.1755,
+  "round_to_best": 0,
+  "final_train_accuracy": 0.162,
+  "total_logical_time": 92.8063672456393,
+  "accounted_system_time_sec": 234.98302744435762,
+  "total_round_wall_time_sec": 184.08146949857473,
+  "total_selection_wall_time_sec": 142.1766601987183,
+  "total_training_wall_time_sec": 12.484227899461985,
+  "total_flow_wall_time_sec": 0.0033598989248275757,
+  "total_aggregation_wall_time_sec": 29.135248700156808,
+  "total_evaluation_wall_time_sec": 0.2719312999397516,
+  "total_accounted_phase_wall_time_sec": 184.07142799720168,
+  "total_unattributed_wall_time_sec": 0.010041501373052597,
+  "mean_selection_wall_time_sec": 142.1766601987183,
+  "mean_training_wall_time_sec": 12.484227899461985,
+  "mean_round_wall_time_sec": 184.08146949857473,
+  "total_communication_volume": 7200.6944601599935,
+  "total_waiting_time": 269.8025189408369,
+  "total_edge_aggregation_time": 16.395236361599995,
+  "total_cloud_aggregation_time": 55.72457716000004,
+  "mean_effective_clients": 98.0,
+  "mean_global_update_clients": 83.0,
+  "mean_effective_edges": 10.0,
+  "max_privacy_risk": 0.58,
+  "min_remaining_epsilon": 0.0,
+  "max_feature_epsilon": 0.0,
+  "max_update_epsilon": 8.000000000001,
+  "larger_channel_epsilon": 8.000000000001,
+  "privacy_execution_audit": {
+    "accountant_scope": "recorded_dp_events_only",
+    "global_release_count": null,
+    "global_release_epsilon": null,
+    "uniform_selected_update_dp": false,
+    "end_to_end_dp_status": "not_established",
+    "end_to_end_epsilon": null,
+    "he_real_execution_rounds": 1,
+    "he_profiled_execution_rounds": 0,
+    "randomness_scope": "deterministic_experiment_seed",
+    "key_isolation_scope": "single_process_simulation",
+    "diagnostic_scope": "private_experiment_logs_not_public_dp_outputs"
+  },
+  "privacy_guarantee": "legacy_per_link_mechanisms",
+  "feasible_rate": 1.0,
+  "feasible_participation_ratio": 1.0,
+  "deadline_satisfaction_ratio": null,
+  "all_constraint_feasible_rate": 1.0,
+  "resource_feasible_rate": 1.0,
+  "memory_feasible_rate": 1.0,
+  "privacy_feasible_rate": 1.0,
+  "risk_feasible_rate": 0.94,
+  "time_satisfied_rate": 0.0,
+  "skip_rate": 0.0,
+  "mode_distribution": "LIC:83(0.830);LIE:5(0.050);LIIE:12(0.120)",
+  "update_mechanism_distribution": "dp:3(0.030);dp_he3:2(0.020);he3:1(0.010);none:94(0.940)",
+  "object_mechanism_distribution": "dp:3(0.016);dp_he3:2(0.011);he3:1(0.005);none:182(0.968)",
+  "output_dir": "out\\paper_v31_final\\fig1_main\\dirichlet_0p1\\2026-09-19_22-24-55_lenet5_dynamic_newtex202608\\dynamic_mode_fixed_privacy",
+  "status": "completed",
+  "target_rounds": 1,
+  "per_client_test_accuracy_mean": 0.1649430543677901,
+  "per_client_test_accuracy_min": 0.0,
+  "per_client_test_accuracy_max": 0.5,
+  "per_client_test_accuracy_std": 0.1315150456939609,
+  "per_client_test": [
+    {
+      "client_id": 0,
+      "test_accuracy": 0.2647058823529412
+    },
+    {
+      "client_id": 1,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 2,
+      "test_accuracy": 0.3076923076923077
+    },
+    {
+      "client_id": 3,
+      "test_accuracy": 0.3076923076923077
+    },
+    {
+      "client_id": 4,
+      "test_accuracy": 0.15789473684210525
+    },
+    {
+      "client_id": 5,
+      "test_accuracy": 0.2
+    },
+    {
+      "client_id": 6,
+      "test_accuracy": 0.2786885245901639
+    },
+    {
+      "client_id": 7,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 8,
+      "test_accuracy": 0.3125
+    },
+    {
+      "client_id": 9,
+      "test_accuracy": 0.06666666666666667
+    },
+    {
+      "client_id": 10,
+      "test_accuracy": 0.30434782608695654
+    },
+    {
+      "client_id": 11,
+      "test_accuracy": 0.375
+    },
+    {
+      "client_id": 12,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 13,
+      "test_accuracy": 0.1111111111111111
+    },
+    {
+      "client_id": 14,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 15,
+      "test_accuracy": 0.03225806451612903
+    },
+    {
+      "client_id": 16,
+      "test_accuracy": 0.12
+    },
+    {
+      "client_id": 17,
+      "test_accuracy": 0.18181818181818182
+    },
+    {
+      "client_id": 18,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 19,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 20,
+      "test_accuracy": 0.5
+    },
+    {
+      "client_id": 21,
+      "test_accuracy": 0.09090909090909091
+    },
+    {
+      "client_id": 22,
+      "test_accuracy": 0.23076923076923078
+    },
+    {
+      "client_id": 23,
+      "test_accuracy": 0.2857142857142857
+    },
+    {
+      "client_id": 24,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 25,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 26,
+      "test_accuracy": 0.08333333333333333
+    },
+    {
+      "client_id": 27,
+      "test_accuracy": 0.1794871794871795
+    },
+    {
+      "client_id": 28,
+      "test_accuracy": 0.4166666666666667
+    },
+    {
+      "client_id": 29,
+      "test_accuracy": 0.5
+    },
+    {
+      "client_id": 30,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 31,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 32,
+      "test_accuracy": 0.058823529411764705
+    },
+    {
+      "client_id": 33,
+      "test_accuracy": 0.09090909090909091
+    },
+    {
+      "client_id": 34,
+      "test_accuracy": 0.275
+    },
+    {
+      "client_id": 35,
+      "test_accuracy": 0.26666666666666666
+    },
+    {
+      "client_id": 36,
+      "test_accuracy": 0.2987012987012987
+    },
+    {
+      "client_id": 37,
+      "test_accuracy": 0.25
+    },
+    {
+      "client_id": 38,
+      "test_accuracy": 0.3695652173913043
+    },
+    {
+      "client_id": 39,
+      "test_accuracy": 0.075
+    },
+    {
+      "client_id": 40,
+      "test_accuracy": 0.19444444444444445
+    },
+    {
+      "client_id": 41,
+      "test_accuracy": 0.16666666666666666
+    },
+    {
+      "client_id": 42,
+      "test_accuracy": 0.375
+    },
+    {
+      "client_id": 43,
+      "test_accuracy": 0.3
+    },
+    {
+      "client_id": 44,
+      "test_accuracy": 0.3076923076923077
+    },
+    {
+      "client_id": 45,
+      "test_accuracy": 0.18181818181818182
+    },
+    {
+      "client_id": 46,
+      "test_accuracy": 0.15384615384615385
+    },
+    {
+      "client_id": 47,
+      "test_accuracy": 0.21052631578947367
+    },
+    {
+      "client_id": 48,
+      "test_accuracy": 0.125
+    },
+    {
+      "client_id": 49,
+      "test_accuracy": 0.16666666666666666
+    },
+    {
+      "client_id": 50,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 51,
+      "test_accuracy": 0.26666666666666666
+    },
+    {
+      "client_id": 52,
+      "test_accuracy": 0.38461538461538464
+    },
+    {
+      "client_id": 53,
+      "test_accuracy": 0.0425531914893617
+    },
+    {
+      "client_id": 54,
+      "test_accuracy": 0.058823529411764705
+    },
+    {
+      "client_id": 55,
+      "test_accuracy": 0.27586206896551724
+    },
+    {
+      "client_id": 56,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 57,
+      "test_accuracy": 0.10666666666666667
+    },
+    {
+      "client_id": 58,
+      "test_accuracy": 0.28
+    },
+    {
+      "client_id": 59,
+      "test_accuracy": 0.2857142857142857
+    },
+    {
+      "client_id": 60,
+      "test_accuracy": 0.3333333333333333
+    },
+    {
+      "client_id": 61,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 62,
+      "test_accuracy": 0.125
+    },
+    {
+      "client_id": 63,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 64,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 65,
+      "test_accuracy": 0.06451612903225806
+    },
+    {
+      "client_id": 66,
+      "test_accuracy": 0.05555555555555555
+    },
+    {
+      "client_id": 67,
+      "test_accuracy": 0.2
+    },
+    {
+      "client_id": 68,
+      "test_accuracy": 0.07142857142857142
+    },
+    {
+      "client_id": 69,
+      "test_accuracy": 0.14705882352941177
+    },
+    {
+      "client_id": 70,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 71,
+      "test_accuracy": 0.22727272727272727
+    },
+    {
+      "client_id": 72,
+      "test_accuracy": 0.19402985074626866
+    },
+    {
+      "client_id": 73,
+      "test_accuracy": 0.04411764705882353
+    },
+    {
+      "client_id": 74,
+      "test_accuracy": 0.09523809523809523
+    },
+    {
+      "client_id": 75,
+      "test_accuracy": 0.16666666666666666
+    },
+    {
+      "client_id": 76,
+      "test_accuracy": 0.25
+    },
+    {
+      "client_id": 77,
+      "test_accuracy": 0.3
+    },
+    {
+      "client_id": 78,
+      "test_accuracy": 0.18181818181818182
+    },
+    {
+      "client_id": 79,
+      "test_accuracy": 0.23529411764705882
+    },
+    {
+      "client_id": 80,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 81,
+      "test_accuracy": 0.16666666666666666
+    },
+    {
+      "client_id": 82,
+      "test_accuracy": 0.2
+    },
+    {
+      "client_id": 83,
+      "test_accuracy": 0.2727272727272727
+    },
+    {
+      "client_id": 84,
+      "test_accuracy": 0.19047619047619047
+    },
+    {
+      "client_id": 85,
+      "test_accuracy": 0.07142857142857142
+    },
+    {
+      "client_id": 86,
+      "test_accuracy": 0.022727272727272728
+    },
+    {
+      "client_id": 87,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 88,
+      "test_accuracy": 0.5
+    },
+    {
+      "client_id": 89,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 90,
+      "test_accuracy": 0.0
+    },
+    {
+      "client_id": 91,
+      "test_accuracy": 0.03636363636363636
+    },
+    {
+      "client_id": 92,
+      "test_accuracy": 0.047058823529411764
+    },
+    {
+      "client_id": 93,
+      "test_accuracy": 0.3333333333333333
+    },
+    {
+      "client_id": 94,
+      "test_accuracy": 0.23333333333333334
+    },
+    {
+      "client_id": 95,
+      "test_accuracy": 0.08695652173913043
+    },
+    {
+      "client_id": 96,
+      "test_accuracy": 0.25
+    },
+    {
+      "client_id": 97,
+      "test_accuracy": 0.22641509433962265
+    },
+    {
+      "client_id": 98,
+      "test_accuracy": 0.14285714285714285
+    },
+    {
+      "client_id": 99,
+      "test_accuracy": 0.14814814814814814
+    }
+  ],
+  "he_backend": "seal",
+  "he_execution": "real",
+  "he_available": true,
+  "he_status": "SEAL CKKS encrypted-vector validation passed (max error 1.795e-09).",
+  "real_he_available": true,
+  "real_he_rounds": 1,
+  "real_he_aggregated_clients": 3,
+  "he_complete_update_encryption": true,
+  "he_poly_modulus_degree": 8192,
+  "he_coeff_mod_bit_sizes": [
+    50,
+    40
+  ],
+  "he_scale_bits": 40,
+  "he_aggregation_calls": 3,
+  "he_encrypted_updates": 3,
+  "he_encrypted_parameter_values": 33544926,
+  "he_ciphertext_count": 8190,
+  "he_ciphertext_bytes": 1074405150,
+  "he_process_tasks": 0,
+  "he_process_fallbacks": 0,
+  "he_failures": 0,
+  "he_process_workers": 0,
+  "he_process_chunks_per_task": 0,
+  "he_shared_memory_bytes": 0,
+  "he_mapped_update_bytes": 0,
+  "he_wall_time_sec": 26.849267998710275,
+  "he_key_setup_time_sec": 0.04687130078673363,
+  "he_encryption_time_sec": 21.534642903134227,
+  "he_addition_time_sec": 2.014812860637903,
+  "he_decryption_time_sec": 2.503735601902008,
+  "he_worker_cpu_time_sec": 26.053191365674138,
+  "he_ciphertext_bytes_semantics": "seal_save_size_upper_bound",
+  "he_max_abs_error": 1.5274097911412387e-08,
+  "he_measured_expansion_ratio": 8.007210613611132,
+  "global_pareto_selection_rounds": 0,
+  "execution_revision": "paper_flow_v31_mode_specific_privacy",
+  "equal_optimizer_work_control": false,
+  "dp_accounting_mode": "rdp_auto",
+  "dp_delta": 1e-05,
+  "dp_feature_epsilon_target": 8.0,
+  "dp_update_epsilon_target": 8.0,
+  "dp_feature_noise_multiplier": 1.0,
+  "dp_update_noise_multiplier": 1.382240062317938,
+  "dp_feature_horizon_events": 0,
+  "dp_update_horizon_events": 4,
+  "dp_feature_enabled": false,
+  "trusted_edge_split_execution": false,
+  "tracks_returned_client_models": true,
+  "privacy_policy_scope": "per_link",
+  "protected_object": "cross_domain_model_update",
+  "privacy_mechanism_scope": "local_packet_or_secure_aggregate",
+  "mainline_fusion": false,
+  "global_release_count": 0,
+  "global_release_epsilon": 0.0,
+  "global_release_target_epsilon": null,
+  "global_release_sensitivity": null,
+  "global_release_noise_multiplier": null,
+  "global_release_noise_std": null,
+  "aggregate_dp_protocol": "distributed_noise_before_ckks_aggregation",
+  "aggregate_dp_release_rounds": 0,
+  "local_packet_dp_releases": 0,
+  "max_aggregate_dp_noise_std": 0.0,
+  "he_profiled_only": false,
+  "mean_update_dp_only_clients": 0.0,
+  "mean_update_he_only_clients": 0.0,
+  "mean_update_dp_he_clients": 0.0,
+  "mean_update_dp_coverage": 0.060240963855421686,
+  "mean_update_he_coverage": 0.03614457831325301,
+  "uniform_selected_update_dp": false,
+  "uniform_end_to_end_update_dp": null,
+  "all_cross_domain_updates_protected": false,
+  "torch_seed": 40,
+  "deterministic_torch": true,
+  "wall_time_sec": 185.4866419006139,
+  "end_to_end_wall_time_sec": 185.4866419006139,
+  "timing_scope": {
+    "end_to_end_wall_time_sec": "policy initialization through final summary preparation",
+    "cumulative_wall_time_sec": "policy initialization through each completed round",
+    "total_round_wall_time_sec": "sum of measured training rounds",
+    "total_logical_time": "modeled cloud-edge-end execution path",
+    "accounted_system_time_sec": "modeled execution path plus measured mode selection"
+  }
+}
