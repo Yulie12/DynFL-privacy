@@ -839,14 +839,19 @@ $C_u,\mathcal B_{\mathrm{clip},i}^{t}$ & Update clipping threshold and profiled 
 \label{sec:experiment}
 \subsection{Experimental Setup}
 \label{sec:exp_setup}
-We evaluate the proposed method with real model training supported by the system
-simulator. The cloud-edge-end system contains 100 end devices, 10 edge nodes,
-and one cloud node. The main comparison trains only the classification head of a pretrained ResNet 18 model on
-CIFAR 10 for 100 communication rounds under moderate edge label skew. Each round
-uses three local epochs per private stage and a learning rate of 0.01.
-LIEIIIC and LIIEIIIC use three stages; the other executable modes use one. Three runs use random seeds
-42, 43, and 44. Fashion MNIST with LeNet 5 provides a second dataset and model
-setting. The main parameters are listed in \tabref{tab:sim_params}.
+The formal CIFAR 10 protocol uses real model training together with the system
+simulator. Its current configuration, \texttt{paper\_flow\_v31\_mode\_specific\_privacy},
+contains 100 end devices, 10 edge nodes, and one cloud node and schedules 100
+communication rounds. The model is a pretrained ResNet 18 with only its
+classification head trained. Each private training stage uses three local epochs
+and a learning rate of 0.01. LIEIIIC and LIIEIIIC use three edge stages; the
+other executable modes use one. The configured formal seeds are 40, 42, and 44.
+The 100-round, three-seed configuration specifies the intended formal evaluation;
+numerical tables remain pending until runs under this execution revision are
+complete. Fashion MNIST with LeNet 5 is retained as a secondary evaluation target,
+but legacy outputs produced under earlier execution revisions are not mixed with
+the current formal results. The main parameters are listed in
+\tabref{tab:sim_params}.
 
 \begin{table*}[t]
 \centering
@@ -859,16 +864,16 @@ setting. The main parameters are listed in \tabref{tab:sim_params}.
 \textbf{Parameter} & \textbf{Value} & \textbf{Parameter} & \textbf{Value} \\
 \hline
 End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=100\) \\
-Training and test samples & 12000 and 2000 & Random seeds & 42, 43, and 44 \\
+Training and test samples & 12000 and 2000 & Random seeds & 40, 42, and 44 \\
 Client computation and memory factors & Independent $\mathcal U(0.5,2.0)$ & Edge computation factor & $\mathcal U(2/3,1.5)$ \\
 Logical link block reference & \(L_B=5\) & Independent stages in multilevel modes & \(E_B=3\) \\
-Fixed total DP target & \(\bar\epsilon_{\mathrm{upd}}=8.0\) & DP slack parameter & \(\delta_{\mathrm{upd}}=10^{-5}\) \\
+Lifetime update-DP target & \(\bar\epsilon_{\mathrm{upd}}=8.0\) & DP slack parameter & \(\delta_{\mathrm{upd}}=10^{-5}\) \\
 Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=0.02052\) MB & HE expansion factor & \(\alpha_{\mathrm{HE}}=8.04\) \\
 CKKS polynomial degree and scale & \(8192\) and \(2^{40}\) & CKKS coefficient modulus bits & \([50,40]\) \\
-CKKS reference profile for a 4 MB update & 32.14 MB and 0.90 s & CKKS key preparation & Measured per global release \\
+CKKS reference profile for a 4 MB update & 32.14 MB and 0.90 s & HE execution & Real SEAL when selected \\
 Base link rates & end to edge 5, end to cloud 2.2, edge to cloud 8 MB/s & Rate variation & sinusoidal amplitude 0.2 and uniform jitter 0.25 \\
 Aggregation fraction & $\rho_{\mathrm{buf}}=1.0$ & Strategy update period & $S_P=1$ \\
-Update clip norm (CIFAR 10 head) & $C_u=0.1$ & Auto calibrated noise multiplier & $\sigma_{\mathrm{upd}}=6.911$ \\
+Update clip norm (CIFAR 10 head) & $C_u=0.25$ & Dynamic DP multiplier & Lifetime-aware $\sigma_{i,h}^t$ \\
 Pareto archive, beam, and expansions & $K_{\mathrm P}=16$, $K_{\mathrm B}=4$, $I_{\max}=50$ & Cloud fusion penalty & $\xi=0.2$, $\varepsilon=0.05$ \\
 Training hardware & Intel i7 11700F, GTX 1660 Ti 6 GB, 31.8 GB RAM & Software & Python 3.10.9, PyTorch 2.5.1, torchvision 0.20.1, SEAL 4.0.0 \\
 \hline
@@ -933,13 +938,13 @@ execution, transmitted update construction, and aggregation.
 \hline
 \textbf{Mode} & \textbf{End execution} & \textbf{Edge execution} & \textbf{Cloud role} \\
 \hline
-LIE & Frozen stem through layer2 & Frozen downstream features; classifier training & Fixed DP/HE aggregate \\
-LIC & Basic end/cloud split template & Relay & Excluded under current trust domain \\
-LIIE & Frozen features; classifier training & Noisy packet aggregation & Fixed DP/HE aggregate \\
-LIIC & Frozen features; classifier training & Noisy packet aggregation & Fixed DP/HE aggregate \\
-LIEIIC & Frozen stem through layer2 & Frozen features; classifier training & Fixed DP/HE aggregate \\
-LIEIIIC & Frozen stem through layer2 & Three private classifier stages; one packet & Fixed DP/HE aggregate \\
-LIIEIIIC & Three private classifier stages & One noisy packet & Fixed DP/HE aggregate \\
+LIE & Frozen stem through layer2 & Downstream split execution and edge-side training & No Cloud update exposure \\
+LIIE & Local classifier training & Receives and aggregates local updates & No Cloud update exposure \\
+LIC & Frozen stem through layer2 & Relay only & Downstream split execution; no model-update upload \\
+LIIC & Local classifier training & Not on the update path & Receives protected client update \\
+LIEIIC & Frozen stem through layer2 & Downstream split execution and classifier training & Receives protected edge update \\
+LIEIIIC & Frozen stem through layer2 & Three split/edge stages followed by edge aggregation & Receives protected edge update \\
+LIIEIIIC & Three local/edge update stages & Aggregates staged local updates & Receives protected edge update \\
 \hline
 \end{tabularx}
 \end{table*}
@@ -968,23 +973,25 @@ links, and 8 MB/s for edge to cloud links. Reverse links use the same base
 rate. These values define a reproducible synthetic network scenario rather
 than a physical network measurement.
 
-The update noise multiplier is calibrated from the total privacy target for
-100 global releases, one per FL round, giving $\sigma_u=6.9112003$ for
-$(\epsilon,\delta)=(8,10^{-5})$. Three local epochs occur before each release;
-local epochs do not themselves consume additional release events. Each client
-starts from the previous released global model, clips its classifier contribution
-at $C_u=0.1$, and receives a distributed Gaussian noise share before encryption.
-Trusted edges combine these already-noisy contributions using the same public
-weights as the release accountant. Every formal round uses real SEAL, encrypts
-the complete trainable update, and releases only the authorized noisy aggregate.
-The ciphertext-only cloud worker is a separate process; the trusted custodian
-keeps the secret key. This is local process separation, not a physical deployment.
-All methods
-use the same data partition, optimizer, epochs per stage, and edge normalized
-aggregation rule in \equref{eq:edge_normalized_fedavg}. The main
-comparison uses three random seeds, 42, 43, and 44. Controlled studies use the same seeds, 42, 43, and 44,
-and change only the parameter or component under evaluation. The key ablation
-uses the three main-comparison seeds 42, 43, and 44.
+Privacy execution follows the mode-specific exposure contract in
+Section~\ref{sec:privacy_model}. A mode first determines its transmitted objects
+and links. Under the current paper profile, a Cloud-facing model-update exposure
+requires both client-level DP calibration and HE-protected aggregation, whereas
+edge-only execution does not acquire an artificial Cloud release. For a dynamic
+privacy candidate, the update multiplier is the minimum value feasible under the
+client's current ledger and the protected update events planned over the remaining
+training horizon. Consequently there is no single noise multiplier shared by all
+modes and rounds. The CIFAR 10 classifier update is clipped at $C_u=0.25$ before
+the applicable DP mechanism. When a selected candidate uses HE, the formal
+configuration requires real SEAL execution; DP and HE retain their distinct
+privacy-loss and confidentiality roles. Only DP events that are actually executed
+and released are charged to the corresponding client ledger.
+
+All four formal policies use the same data partition, optimizer, training work,
+resource process, and flow model. The configured main-comparison seeds are 40,
+42, and 44. Controlled studies should use the same seeds unless a study explicitly
+states otherwise, and results from older execution revisions are not combined
+with the current formal comparison.
 
 Every run stores the complete configuration, runtime environment, exact client
 partition, generated system profiles, model parameter partition, raw client
@@ -1007,43 +1014,37 @@ of generated ciphertext. Encryption, ciphertext addition, and decryption took
 \(9.17\times10^{-8}\). The profiled and encrypted executions produced the same
 test accuracy, and their global update norms differed by
 \(1.47\times10^{-9}\). These are historical full-model transport measurements, not validation results
-for the current classifier-only Method 2 integration. The 5130-coordinate payload
-requires a fresh CKKS cost calibration; old costs must not be presented as
-measured classifier-only system performance.
+for the current classifier-only, mode-specific privacy execution. The
+5130-coordinate payload requires a fresh CKKS cost calibration; old costs must
+not be presented as measured classifier-only system performance.
 % The numerical tables and figures below must be regenerated with execution
-% revision paper_flow_v30_mainline_fusion_method2_epochs before submission.
-\subsection{Compared Methods and Main Results}
-Ours performs joint Pareto search over the global client profile and selects a
-compromise between system latency and estimated convergence error cost. Individual Optimal
-uses the same feasible mode candidate set but selects the ideal point independently
-for each device without system coordination. Random samples from the same admissible
-mode set. These protected methods share the fixed global release contract. No Protection
-is reported only as a separately configured ablation/control run with the release gate
-disabled; it is not an admissible policy inside a formal mainline-fusion run.
+% revision paper_flow_v31_mode_specific_privacy before submission.
+\subsection{Compared Policies and Main Results}
+The formal comparison isolates the two adaptive axes of DynFL: collaboration
+mode and privacy calibration. \textsc{Fixed Mode + Fixed Privacy} restricts
+executed clients to the fixed LIIEIIIC collaboration mode and reuses each
+client's established protection profile. \textsc{Dynamic Mode + Fixed Privacy}
+allows collaboration modes to adapt while holding that privacy profile fixed.
+\textsc{Fixed Mode + Dynamic Privacy} keeps LIIEIIIC but recalibrates privacy
+from the evolving ledger and remaining horizon. \textsc{Full DynFL} makes both
+axes state dependent. Infeasible clients may produce \textsc{skip}; this is an
+execution/admission outcome and not an additional collaboration mode.
 
-Three fixed topology references place the framework beside established FL
-training structures. Fixed FedAvg uses local training followed by direct cloud
-aggregation through LIIC~\cite{fedavg}. Fixed HFL uses local training, edge aggregation, and
-cloud aggregation through LIIEIIIC~\cite{hfl}. Fixed SplitFed uses end and edge split
-training followed by cloud aggregation through LIEIIC~\cite{SFETEC}. These references use
-the same fixed global release contract and all remaining settings as Ours. They
-are common topology implementations in the shared execution engine rather than
-reproductions of every component in the cited systems.
+All four policies are evaluated through the same candidate legality checks,
+shared-resource flow model, system-level latency/error objectives, and actual
+execution/accounting path. Thus ``fixed privacy'' does not mean that privacy is
+disabled, and ``dynamic privacy'' does not introduce a separate privacy objective;
+it changes the state-dependent calibration used by otherwise legal exposures.
+The formal configuration also requires feasible execution, Edge/Cloud coverage,
+and real HE whenever a selected candidate requires HE.
 
-NSGA II uses the same feasible collaboration profiles and objective evaluator
-as Ours while replacing the bounded search with nondominated sorting, crowding
-selection, crossover, and mutation~\cite{deb2002nsga2}. It provides a standard
-multiobjective optimizer reference under the same training and privacy
-conditions.
-
-\tabref{tab:main_comparison} and \figref{fig:accuracy_convergence} present the
-three random seeds. The primary efficiency value is system time, which combines
-modeled workflow execution with measured decision time. The privacy column
-reports the accounted epsilon of the formal global aggregate release. The figure uses the common measured time
-system time interval determined by the shortest completed run and shows raw accuracy
-without temporal smoothing. Numerical values from execution revisions before
-\texttt{paper\_flow\_v30\_mainline\_fusion\_method2\_epochs} are not retained because they used different
-privacy, encrypted aggregation, feasible set, and timing semantics.
+\tabref{tab:main_comparison} and \figref{fig:accuracy_convergence} are reserved
+for the completed three-seed formal runs. The primary efficiency value is system
+time, which combines modeled workflow execution with measured decision time. The
+privacy column reports the realized update-level client privacy accounting under
+the executed protected events. Results produced by earlier fused/global-release
+execution revisions are not retained in this comparison because their privacy,
+aggregation, feasible-set, and timing semantics differ from the current protocol.
 
 \begin{table*}[t]
 \centering
@@ -1055,14 +1056,10 @@ privacy, encrypted aggregation, feasible set, and timing semantics.
 \hline
 \textbf{Method} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{$\epsilon_{\mathrm{upd}}$} \\
 \hline
-Ours & -- & -- & -- & -- & -- \\
-Individual Optimal & -- & -- & -- & -- & -- \\
-No Protection & -- & -- & -- & -- & -- \\
-Random & -- & -- & -- & -- & -- \\
-Fixed FedAvg & -- & -- & -- & -- & -- \\
-Fixed SplitFed & -- & -- & -- & -- & -- \\
-Fixed HFL & -- & -- & -- & -- & -- \\
-NSGA II & -- & -- & -- & -- & -- \\
+Fixed Mode + Fixed Privacy & -- & -- & -- & -- & -- \\
+Dynamic Mode + Fixed Privacy & -- & -- & -- & -- & -- \\
+Fixed Mode + Dynamic Privacy & -- & -- & -- & -- & -- \\
+Full DynFL & -- & -- & -- & -- & -- \\
 \hline
 \end{tabular}
 \end{adjustbox}
@@ -1071,10 +1068,10 @@ NSGA II & -- & -- & -- & -- & -- \\
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_resnet18_100r_wall_time_accuracy_v30.png}{
-\includegraphics[width=\columnwidth]{cifar10_resnet18_100r_wall_time_accuracy_v30.png}
+\IfFileExists{cifar10_resnet18_100r_wall_time_accuracy_v31.png}{
+\includegraphics[width=\columnwidth]{cifar10_resnet18_100r_wall_time_accuracy_v31.png}
 }{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 main experiment figure pending}}
+\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v31 main experiment figure pending}}
 }
 \caption{Raw test accuracy against system time on CIFAR 10 with ResNet 18. All curves use the common interval determined by the shortest completed run. The curves show the mean over three random seeds, the shaded regions show 95\% confidence intervals, and the inset enlarges the final quarter of the common interval.}
 \label{fig:accuracy_convergence}
@@ -1085,20 +1082,20 @@ NSGA II & -- & -- & -- & -- & -- \\
 
 The client decision logs expose how the selected workflow changes during
 training. \figref{fig:reconfiguration_behavior} reports the share of clients in
-each executable collaboration mode together with fixed global release protection coverage. The
-mode switch curve records the fraction of clients whose selected
-mode differs from the preceding round. These measurements distinguish dynamic
-workflow reconfiguration from a fixed topology with changing scalar
+each executable collaboration mode together with the realized protected-update
+exposure coverage. The mode switch curve records the fraction of clients whose
+selected mode differs from the preceding round. These measurements distinguish
+dynamic workflow reconfiguration from a fixed topology with changing scalar
 parameters.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_reconfiguration_trace_v30.png}{
-\includegraphics[width=\columnwidth]{cifar10_reconfiguration_trace_v30.png}
+\IfFileExists{cifar10_reconfiguration_trace_v31.png}{
+\includegraphics[width=\columnwidth]{cifar10_reconfiguration_trace_v31.png}
 }{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 reconfiguration figure pending}}
+\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v31 reconfiguration figure pending}}
 }
-\caption{Raw collaboration mode shares, fixed global release protection coverage, and client mode switch rate over communication rounds. The curves report the mean over three random seeds.}
+\caption{Raw collaboration mode shares, realized protected-update exposure coverage, and client mode switch rate over communication rounds. The curves report the mean over three random seeds.}
 \label{fig:reconfiguration_behavior}
 \end{figure}
 
@@ -1107,8 +1104,10 @@ parameters.
 
 Fashion MNIST with LeNet 5 evaluates the comparison in a different image
 domain and model scale. The experiment uses the same 100 clients, 10 edge
-nodes, 100 communication rounds, three random seeds (42, 43, and 44), privacy targets, and
-collaboration policies. The local learning rate is 0.15 and each round uses one
+nodes and a 100-round target. The secondary experiment must be regenerated under
+the current mode-specific privacy protocol before its numerical results are combined
+with the formal comparison; legacy seeds and outputs from the earlier execution
+revision are not treated as current results. The local learning rate is 0.15 and each round uses one
 local epoch. The split is placed between the convolutional encoder and the
 fully connected classifier.
 
@@ -1135,10 +1134,10 @@ NSGA II & -- & -- & -- \\
 
 \begin{figure}[t]
 \centering
-\IfFileExists{fmnist_lenet5_100r_wall_time_accuracy_v30.png}{
-\includegraphics[width=\columnwidth]{fmnist_lenet5_100r_wall_time_accuracy_v30.png}
+\IfFileExists{fmnist_lenet5_100r_wall_time_accuracy_v31.png}{
+\includegraphics[width=\columnwidth]{fmnist_lenet5_100r_wall_time_accuracy_v31.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 second dataset figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 second dataset figure pending}}
 }
 \caption{Raw Fashion MNIST test accuracy against system time with LeNet 5. The curves report the mean and 95\% confidence interval over three random seeds.}
 \label{fig:second_dataset}
@@ -1154,10 +1153,10 @@ each scale.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_decision_scalability_v30.png}{
-\includegraphics[width=\columnwidth]{cifar10_decision_scalability_v30.png}
+\IfFileExists{cifar10_decision_scalability_v31.png}{
+\includegraphics[width=\columnwidth]{cifar10_decision_scalability_v31.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 scale experiment figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 scale experiment figure pending}}
 }
 \caption{Measured decision time and system time under different client scales.}
 \label{fig:decision_scale}
@@ -1233,10 +1232,10 @@ utility while controlling search overhead.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_strategy_period_v30.png}{
-\includegraphics[width=\columnwidth]{cifar10_strategy_period_v30.png}
+\IfFileExists{cifar10_strategy_period_v31.png}{
+\includegraphics[width=\columnwidth]{cifar10_strategy_period_v31.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 strategy period figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 strategy period figure pending}}
 }
 \caption{Effect of the strategy update period on accuracy, decision time, and system time.}
 \label{fig:strategy_period}
@@ -1252,10 +1251,10 @@ privacy loss, final accuracy, and last 10 round accuracy.
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_privacy_budget_v30.png}{
-\includegraphics[width=\columnwidth]{cifar10_privacy_budget_v30.png}
+\IfFileExists{cifar10_privacy_budget_v31.png}{
+\includegraphics[width=\columnwidth]{cifar10_privacy_budget_v31.png}
 }{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v30 privacy budget figure pending}}
+\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 privacy budget figure pending}}
 }
 \caption{Accuracy and realized privacy loss under different total privacy targets.}
 \label{fig:privacy_budget}
@@ -1271,9 +1270,10 @@ selection. No Error Cost Estimate removes
 restricts every feasible client to the LIIEIIIC
 mode while retaining the same training and feasibility checks.
 
-The controlled comparison uses seeds 42, 43, and 44. The table reports the
-complete 100 round utility, communication, privacy, participation, and system
-time results. The figure shows raw accuracy within the common system time
+The controlled comparison is configured to use seeds 40, 42, and 44. The table
+is reserved for complete 100-round utility, communication, privacy,
+participation, and system-time results generated under the current execution
+revision. The figure shows raw accuracy within the common system time
 interval determined by the shortest completed ablation run.
 
 \begin{table*}[t]
@@ -1297,10 +1297,10 @@ Fixed LIIEIIIC & -- & -- & -- & -- & -- & -- \\
 
 \begin{figure}[t]
 \centering
-\IfFileExists{cifar10_ablation_wall_time_accuracy_v30.png}{
-\includegraphics[width=\columnwidth]{cifar10_ablation_wall_time_accuracy_v30.png}
+\IfFileExists{cifar10_ablation_wall_time_accuracy_v31.png}{
+\includegraphics[width=\columnwidth]{cifar10_ablation_wall_time_accuracy_v31.png}
 }{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v30 ablation figure pending}}
+\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v31 ablation figure pending}}
 }
 \caption{Raw test accuracy against system time for the complete method and three ablation variants. The curves use the common interval determined by the shortest completed run, and the inset enlarges the final quarter of that interval.}
 \label{fig:ablation}
@@ -1312,9 +1312,9 @@ This paper presented a dynamic cloud-edge-end collaboration reconfiguration
 framework for federated learning under resource and privacy constraints. The
 unified collaboration space represents execution placement, aggregation
 topology, transmitted objects, and return paths as the dynamic decision, while a
-fixed client-level DP plus HE contract protects every formal global release. The
-joint model evaluates latency, communication, fixed-protocol privacy noise, encrypted
-aggregation overhead, and estimated convergence error cost. The constrained multiobjective formulation is solved by bounded Pareto
+mode-specific exposure contract determines where DP and HE are required. The
+joint model evaluates latency, communication, candidate-specific DP distortion,
+encrypted aggregation overhead, and estimated convergence error cost. The constrained multiobjective formulation is solved by bounded Pareto
 search and ideal point Tchebycheff selection.
 
 The current framework uses profiled computation and link rates in its logical
@@ -1455,33 +1455,34 @@ Thus its persistent contribution is estimated by
 \(\mathcal R(h_i)/\rho_{\mathrm{PL}}\). Substituting
 \(\alpha=\eta_{\mathrm{lr}}L_B\), \equref{eq:app_total_variance}, and
 \equref{eq:app_bias_sum} gives the client terms \(B_i^t\) and \(V_i^t\) in
-\equref{eq:client_error_cost}. Update terms are multiplied by their numbers of
-formal releases. In the fused mainline the Gaussian release is applied once to the
-weighted aggregate with sensitivity from \equref{eq:fused_sensitivity}; there is no
-mode-selectable client-versus-edge DP mechanism. Weighting client clipping-bias terms
-by \(q_i^t\) and adding the common aggregate-noise variance gives
-\equref{eq:global_omega}.
+\equref{eq:client_error_cost}. Update terms are weighted by the protected update events induced by the
+candidate exposure. When a candidate contains a Cloud-facing update that requires
+DP, its variance contribution uses the lifetime-aware multiplier
+$\sigma_{i,h_i}^t$ determined from the current client ledger. Candidates without
+such an exposure do not acquire an artificial common release-noise term. Weighting
+the resulting client clipping-bias and variance terms by $q_i^t$, followed by the
+edge-group and Cloud-reaching terms defined in the main text, gives the
+system-level error proxy in \equref{eq:global_omega}.
 
 \section{CKKS Implementation and Security Scope}
 \label{app:he_model}
 The HE path uses the CKKS approximate arithmetic scheme~\cite{cheon2017ckks}.
-In the intended protocol, clients and edge nodes use the public key to encrypt
-an HE protected update. The cloud evaluator performs ciphertext addition,
-and a separate trusted coordinator holds the secret key and decrypts the
-aggregate. In the formal fused SEAL path, the Method 2 custodian authorizes a complete
-edge cohort, starts a ciphertext-only cloud worker, verifies its full ciphertext
-sum, and decrypts the already-noisy result once. A fresh key and custodian session
-are created for each global release; the persistent global release accountant
-tracks the FL horizon across checkpoints. The secret key is not sent to the
-cloud worker. The custodian is trusted and can bypass its own policy; the local
-process boundary is not an OS sandbox, threshold decryption, or an independently
-deployed cloud-edge system.
+HE is attached to the update exposures whose protection requirements demand
+confidential aggregation; it is not a mode-independent post-selection overlay.
+Under the current paper profile, Cloud-facing update exposures require both DP
+and HE. DP calibrates the privacy loss of the protected update event, while CKKS
+protects the corresponding contribution during encrypted aggregation. The formal
+configuration uses the SEAL backend with real HE execution and rejects a selected
+HE candidate if real HE is unavailable.
 
 The implementation uses polynomial modulus degree 8192, coefficient modulus bits
-$[50,40]$, scale $2^{40}$, and chunks of at most 4096 values. Every release logs
-ciphertext bytes, encrypted coordinate count, operation time, and maximum absolute
-error against the weighted noisy plaintext aggregate. Profiled plaintext execution
-is a legacy control and is rejected by the formal fused configuration.
+$[50,40]$, scale $2^{40}$, and chunks of at most 4096 values. The runtime records
+HE execution status and aggregation measurements for the selected protected
+paths. These measurements establish execution of the configured encrypted
+aggregation path; they do not by themselves establish threshold decryption,
+independent role isolation, or a uniform end-to-end DP guarantee for the final
+global model. Profiled/plaintext HE estimates remain diagnostic controls rather
+than substitutes for real HE in the formal configuration.
 
 \section*{Code and Data Availability}
 The supplementary artifact contains the implementation, versioned experiment
