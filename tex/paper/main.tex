@@ -566,6 +566,7 @@ T_i^{\mathrm{lupd}}(h_i,\pi_i)
 The expanded form is shown only for the representative path in \figref{fig:time}. For any selected mode \(h_i\), \(T_i^t(h_i,\pi_i)\) accumulates the terms on the complete link flow induced by that mode, including the model return required to prepare the device for the next round.
 
 \subsubsection{Exposure-Specific Privacy Protection and Lifetime Accounting}
+\label{sec:privacy_model}
 The privacy mechanism is assigned to the transmissions created by a candidate mode rather than to a mode label itself. For client $i$ in round $t$, let
 \begin{equation}
 \mathcal X_i^t(h)=\{(\lambda,b,N_\lambda(h))\}
@@ -1378,7 +1379,7 @@ which explains the factor \(\alpha^{-2}\) in
 \equref{eq:app_total_variance}. After admission, the client terms are
 combined using \(q_i^t(\mathbf x)\). The independent variance terms are
 therefore multiplied by \((q_i^t)^2\), as shown in
-\equref{eq:aggregated_update_variance}. Noise added after edge aggregation is
+\equref{eq:global_omega}. Noise added after edge aggregation is
 combined using the corresponding group weight \(q_g^t\).
 
 Let \(g^t=\nabla F(w^t)\), and condition on \(w^t\). By \(G\)-smoothness and
