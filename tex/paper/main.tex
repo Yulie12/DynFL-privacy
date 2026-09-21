@@ -1339,11 +1339,13 @@ clipping be
 e_i^t=e_{\mathrm{uclip},i}^t.
 \label{eq:app_total_bias}
 \end{equation}
-For consistency with the separable upper bound used during selection, we use
+For consistency with the separable upper bound used during selection, define
+$n_{i,\mathrm{upd}}^t=n_{i,c}^t+n_{i,e}^t$ as the candidate-specific protected
+update-DP event count appearing in Section~\ref{sec:cost_utility_model}. We use
 the conservative bound
 \begin{equation}
 \mathbb{E}[\|e_i^t\|_2^2\mid w^t]
-\le3\mathbb{I}_{\mathrm{upd}}^{i,t}
+\le3n_{i,\mathrm{upd}}^t
 \mathcal{B}_{\mathrm{clip},i}^t.
 \label{eq:app_combined_bias_bound}
 \end{equation}
@@ -1366,7 +1368,8 @@ where \(e_i^t\) is the deterministic bias in \equref{eq:app_total_bias} and
 V_i^t
 &=\mathbb{E}[\|s_i^t\|_2^2\mid w^t]\\
 &\le \sigma_{\mathrm{local}}^2
-+m_{u,i}^t\frac{\sigma_u^2\Delta_u^2d}{\alpha^2}.
++n_{i,\mathrm{upd}}^t
+\frac{(\sigma_{i,h_i}^t)^2(2C_u)^2d}{\alpha^2}.
 \end{aligned}
 \label{eq:app_total_variance}
 \end{equation}
@@ -1431,7 +1434,7 @@ Substituting \equref{eq:app_combined_bias_bound} into
 where
 \begin{equation}
 S_{\mathrm{bias},i}^t
-=\mathbb{I}_{\mathrm{upd}}^{i,t}\mathcal B_{\mathrm{clip},i}^t.
+=n_{i,\mathrm{upd}}^t\mathcal B_{\mathrm{clip},i}^t.
 \label{eq:app_bias_sum}
 \end{equation}
 Because \(G\alpha^2V_i^t/2\le G\alpha^2V_i^t\), we use the conservative residual
