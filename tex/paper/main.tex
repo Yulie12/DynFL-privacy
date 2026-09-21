@@ -735,166 +735,67 @@ The implementation resolves equal distances deterministically using system laten
 \section{Algorithm}
 \label{sec:algorithm}
 
-Each device first constructs \(\mathcal S_i\) by retaining the executable modes \(h_i\) that satisfy the resource constraints. The common release accountant is checked once for the prospective round; it is not a per-mode mechanism choice. A complete global profile selects one
-mode from every \(\mathcal S_i\) and is evaluated by
-\((T_{\mathrm{sys}}^t,\widehat\Omega_{\mathrm{sys}}^t)\).
+At each strategy update point, DynFL constructs candidates in the same order as the execution semantics. For client $i$, an executable mode $h_i$ first induces its transmission set $\mathcal X_i^t(h_i)$. The current exposure requirement then determines the legal protection map $\pi_i^t$. If the candidate contains a protected Cloud-facing update, its lifetime-aware multiplier $\sigma_{i,h_i}^t$ is obtained from \equref{eq:noise_calibration}; otherwise no update-DP event is charged for that candidate. Candidates that violate resource, protection, or lifetime privacy constraints are removed, producing $\mathcal F_i^t$. The flow evaluator subsequently determines whether a joint profile belongs to $\mathcal F_{\mathrm{sys}}^t$.
 
-For a small instance, the exact solver evaluates all
-\(M=\prod_{i\in\mathcal N}|\mathcal S_i|\) global profiles. Here,
-\(|\mathcal S_i|\) is the number of feasible candidates for device \(i\), and
-the product over all devices gives the total number of joint profiles. Sorting the
-resulting pairs by increasing latency and scanning the estimated cost gives
-the exact Pareto set. Applying \equref{eq:selection} then gives one
-ideal point Tchebycheff solution over the exact Pareto set. If one global evaluation costs
-\(C_{\mathrm{eval}}\), this procedure costs
-\(O(MC_{\mathrm{eval}}+M\log M)\). Its exponential value of \(M\) limits it
-to small scale validation.
+For a small instance, the exact solver evaluates all joint profiles in $\prod_i\mathcal F_i^t$ and retains the system-feasible ones. If $M=\prod_i|\mathcal F_i^t|$ profiles are enumerated and one global evaluation costs $C_{\mathrm{eval}}$, exact evaluation and Pareto filtering cost $O(MC_{\mathrm{eval}}+M\log M)$. This exponential dependence restricts exhaustive search to small-scale validation.
 
-For full scale selection, a bounded search initializes a profile archive and
-expands each retained profile by replacing one device decision at a time. A
-deterministic exploration queue containing at most \(K_{\mathrm B}\) evaluated
-intermediate profiles allows the search to pass through a temporarily
-dominated profile. The method maintains a bounded archive containing at most
-\(K_{\mathrm P}\) profiles that
-are non dominated among the evaluated candidates. Here,
-\(K_{\mathrm P}\ge 2\) is the prescribed maximum archive size and controls
-the tradeoff between Pareto front coverage and search complexity. Because only a subset of
-\(\mathcal X^t\) is explored, the resulting archive
-\(\widehat{\mathcal X}_{\mathrm P}^t\) approximates the exact Pareto set
-\(\mathcal X_{\mathrm P}^t\). The exact and approximate solvers use the same
-objective evaluation, normalization, and ideal point Tchebycheff selection.
-Algorithm~\ref{alg:selection} presents the bounded solver.
+For full-scale selection, the bounded search initializes a profile archive and expands each retained profile by replacing one client candidate at a time. A deterministic exploration queue containing at most $K_{\mathrm B}$ evaluated intermediate profiles allows the search to pass through a temporarily dominated profile. The method maintains at most $K_{\mathrm P}$ non-dominated evaluated profiles. Because only a subset of $\mathcal F_{\mathrm{sys}}^t$ is explored, the resulting archive $\widehat{\mathcal X}_{\mathrm P}^t$ approximates the exact Pareto set $\mathcal X_{\mathrm P}^t$. The exact and approximate solvers use the same system objectives, archive normalization, and ideal-point Tchebycheff rule.
 
-To describe the search cost, let
-\(K_{\mathrm{cand}}=\max_i|\mathcal S_i|\) be the largest number of
-candidates available to one device. From one retained profile, changing one
-device at a time generates at most \(N(K_{\mathrm{cand}}-1)\) neighboring
-profiles. Since the archive and exploration queue contain at most
-\(K_{\mathrm P}+K_{\mathrm B}\) profiles, one expansion evaluates at most
-\(L\le (K_{\mathrm P}+K_{\mathrm B})N(K_{\mathrm{cand}}-1)\) neighboring profiles. Evaluating
-them costs \(O(LC_{\mathrm{eval}})\), and sorting them for Pareto filtering
-costs \(O(L\log L)\). Therefore, at most \(I_{\max}\) expansions cost
-\(O(I_{\max}L(C_{\mathrm{eval}}+\log L))\). Direct evaluation of the two
-system objectives aggregates the terms of \(N\) devices, so
-\(C_{\mathrm{eval}}=O(N)\) in the worst case. The implementation caches each
-candidate flow and updates the weighted error terms and affected buffer groups
-incrementally for a one device replacement.
+Let $K_{\mathrm{cand}}=\max_i|\mathcal F_i^t|$. Replacing one client candidate in one retained profile generates at most $N(K_{\mathrm{cand}}-1)$ neighbors. With at most $K_{\mathrm P}+K_{\mathrm B}$ retained archive/queue profiles, one expansion considers at most $L\le (K_{\mathrm P}+K_{\mathrm B})N(K_{\mathrm{cand}}-1)$ neighbors. At most $I_{\max}$ expansions therefore cost $O(I_{\max}L(C_{\mathrm{eval}}+\log L))$. The implementation caches candidate flow information and incrementally updates affected aggregation groups when evaluating one-client replacements.
 
-The search is performed only at the strategy update points determined by
-\(S_P\). At other rounds, the previous profile is reused. The latency caused
-by changing collaborative modes is included in \(T_i^t\).
+The search is performed only at strategy update points determined by $S_P$. At other rounds, a previously selected profile may be reused only when it remains executable under the current state. Switching overhead is included in the evaluated flow latency. A non-admitted execution is reported as \textsc{skip}; it is not inserted into $\mathcal H$ as an additional collaboration mode.
 
-The fused mainline does not apply a DP-versus-HE substitution safeguard.
-Result DP is a mandatory release constraint and HE is the fixed confidentiality
-layer for the cloud aggregation path, so neither can be selected as a replacement
-for the other. The fixed release accountant is configured for the prospective
-round before selection, while its authoritative cohort and budget check is performed
-immediately before the global release. The common
-release-noise term is evaluated from the actual public aggregation weights via
-\equref{eq:fused_sensitivity}; because this protection contract is common to all
-feasible modes, it does not create an artificial mode-specific utility preference.
-Legacy packet-protection experiments may retain mechanism-specific diagnostics,
-but those controls are outside the formal fused candidate set.
-
-Because every executable mode sets the global-release requirement, the final
-protected release contains the complete public roster:
-\begin{equation}
-A_C^t(\mathbf x)=\mathcal N,\qquad r_C^t(\mathbf x)=1.
-\label{eq:edge_cloud_coverage}
-\end{equation}
-The general implementation retains the edge-coverage checker as a fail-closed assertion,
-but \equref{eq:edge_cloud_coverage} makes it automatically satisfied in the formal fused
-configuration.
-
-With full participation, the edge-normalized aggregation rule reduces to the public
-sample-proportional weight
-\begin{equation}
-q_i^t=\frac{n_i}{\sum_{k\in\mathcal N}n_k},\qquad
-\Delta w^t=\sum_{i\in\mathcal N}q_i^t\Delta w_i^t.
-\label{eq:edge_normalized_fedavg}
-\end{equation}
-The same public weights are used for clipping-sensitivity calibration in
-\equref{eq:fused_sensitivity}. Each noisy weighted contribution is encrypted before the
-untrusted cloud sums ciphertexts, and only the trusted custodian decrypts the already-noisy
-aggregate.
+DP and HE are enforced from the exposure requirement rather than from a common post-selection release overlay. Under the current paper profile, a Cloud-facing update requires both DP and HE: the DP multiplier is calibrated from the client's current ledger and remaining horizon, while HE protects the corresponding contribution during encrypted aggregation. Edge-only modes do not acquire an artificial Cloud release. After selection, only DP events that are actually executed and released are charged to the client ledger. Consequently, the next strategy update observes the privacy state produced by prior execution rather than a fixed global-release accountant.
 
 \begin{breakablealgorithm}
-\caption{Bounded Pareto Solver for Collaboration Reconfiguration}
+\caption{Bounded Pareto Solver with Exposure-Specific Protection}
 \label{alg:selection}
 \small
 \begin{algorithmic}[1]
-\REQUIRE Device set \(\mathcal N\), executable resource-feasible modes \(\mathcal H_i^{\mathrm{res}}\subseteq\mathcal H\), fixed global release RDP state \(R_{\mathrm{upd}}^t(\alpha)\), target \((\bar\epsilon_{\mathrm{upd}},\delta_{\mathrm{upd}})\), round system state, path latency and buffer models, \(K_{\mathrm P},K_{\mathrm B},I_{\max},S_P\), and \(\mathbf x^{t-1}\)
-\ENSURE Selected global collaboration profile \(\mathbf x^\star=\mathbf h_{\mathcal N}^\star\)
-\STATE \textbf{Preparation}
-\STATE Verify that the fixed release accountant is configured for the prospective round; the authoritative cohort/budget check is performed immediately before the global release.
-\STATE For every \(i\in\mathcal N\), construct \(\mathcal S_i=\{h_i\mid h_i\in\mathcal H_i^{\mathrm{res}}\}\).
-\STATE \(\displaystyle
-\mathcal X^t=\left\{\mathbf x\in\prod_{i\in\mathcal N}\mathcal S_i
-\mid \mathbf x\text{ satisfies \equref{eq:edge_cloud_coverage}}\right\},\quad
-\mathbf x=\mathbf h_{\mathcal N}.\)
-\IF{\(t\) is not a strategy update point and \(\mathbf x^{t-1}\in\mathcal X^t\)}
-    \RETURN \(\mathbf x^{t-1}\).
+\REQUIRE Device set $\mathcal N$, seven-mode set $\mathcal H$, per-client resource-feasible subsets $\mathcal H_i^{\mathrm{res}}$, current privacy ledgers $R_{i,\mathrm{upd}}^t(\alpha)$ and targets $(\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})$, round system state, exposure requirements, path/buffer models, $K_{\mathrm P},K_{\mathrm B},I_{\max},S_P$, and previous profile $\mathbf x^{t-1}$
+\ENSURE Selected executable profile $\mathbf x^\star$ or an execution-level \textsc{skip} outcome when no feasible execution is admitted
+\STATE \textbf{Candidate Construction}
+\FOR{each $i\in\mathcal N$}
+    \STATE Initialize $\mathcal F_i^t\leftarrow\emptyset$.
+    \FOR{each $h\in\mathcal H_i^{\mathrm{res}}$}
+        \STATE Construct the mode-induced transmission set $\mathcal X_i^t(h)$ and protected update subset $\mathcal D_i^t(h)$.
+        \STATE Enumerate protection maps $\pi$ that satisfy the exposure-specific plaintext and DP requirements.
+        \STATE Compute $n_{i,h}^{t,\mathrm{upd}}$ using \equref{eq:update_dp_event_count}.
+        \IF{$n_{i,h}^{t,\mathrm{upd}}>0$}
+            \STATE Set $\sigma_{i,h}^t\leftarrow\sigma_{\min}(R_{i,\mathrm{upd}}^t,n_{i,h}^{t,\mathrm{upd}}H_t,\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})$ using \equref{eq:noise_calibration}; discard the candidate if no feasible multiplier exists.
+        \ENDIF
+        \STATE Add every resource-, mechanism-, and privacy-feasible $x_i^t=(h,\pi,\sigma_{i,h}^t)$ to $\mathcal F_i^t$, omitting the last component when no protected update-DP event exists.
+    \ENDFOR
+\ENDFOR
+\STATE Let $\mathcal F_{\mathrm{sys}}^t\subseteq\prod_i\mathcal F_i^t$ denote profiles that satisfy the shared flow, buffer, aggregation, and admission constraints.
+\IF{$t$ is not a strategy update point and $\mathbf x^{t-1}\in\mathcal F_{\mathrm{sys}}^t$}
+    \RETURN $\mathbf x^{t-1}$.
 \ENDIF
-\begin{samepage}
-\STATE \textbf{Objective Evaluation}
-\STATE For every generated profile \(\mathbf x\), sort its path arrivals at
-each edge and cloud buffer and obtain \(A_i^t(\mathbf x)\) and
-\(T_{\mathrm{sys}}^t(\mathbf x)\).
-\end{samepage}
-\STATE Compute \(q_i^t(\mathbf x)\), \(r_C^t(\mathbf x)\), and
-\(\widehat\Omega_{\mathrm{sys}}^t(\mathbf x)\) from the admitted cloud
-updates using \equref{eq:effective_aggregation_weight} and
-\equref{eq:global_omega}.
-\STATE \textbf{Approximate Pareto Search}
-\STATE Construct \(\mathbf x_T\), \(\mathbf x_\Omega\), and three deterministic intermediate profiles from normalized local objective weights.
-\STATE Move any infeasible initial profile into \(\mathcal X^t\) by deterministic one device replacements.
-\STATE Retain the non dominated initial profiles as \(\mathcal A_0\) and set \(\mathcal B_0=\emptyset\).
-\FOR{\(r=1,\ldots,I_{\max}\)}
-    \STATE Generate all unvisited feasible profiles \(\mathcal V_r\subseteq\mathcal X^t\) that differ from a profile in \(\mathcal A_{r-1}\cup\mathcal B_{r-1}\) at one device.
-    \STATE Evaluate \((T_{\mathrm{sys}}^t,\widehat\Omega_{\mathrm{sys}}^t)\) for every \(\mathbf x\in\mathcal V_r\).
-    \STATE \(\displaystyle
-    \mathcal A_r=\bigl\{\mathbf x\in\mathcal A_{r-1}\cup\mathcal V_r\mid
-    \nexists\mathbf x'\in\mathcal A_{r-1}\cup\mathcal V_r,\ 
-    \mathbf x'\prec\mathbf x\bigr\}\).
-    \IF{\(|\mathcal A_r|>K_{\mathrm P}\)}
-        \STATE Retain both objective endpoints and \(K_{\mathrm P}-2\) approximately uniform profiles in latency order.
-    \ENDIF
-    \STATE Retain at most \(K_{\mathrm B}\) newly evaluated profiles outside \(\mathcal A_r\) with the smallest normalized ideal point distance as \(\mathcal B_r\).
-    \IF{\(\mathcal A_r=\mathcal A_{r-1}\) and \(\mathcal B_r=\emptyset\)}
+\STATE \textbf{Objective Evaluation and Approximate Pareto Search}
+\STATE For every generated feasible profile $\mathbf x$, evaluate its flow to obtain $T_{\mathrm{sys}}^t(\mathbf x)$ and compute $\widehat\Omega_{\mathrm{sys}}^t(\mathbf x)$ using \equref{eq:global_omega}.
+\STATE Construct deterministic latency-oriented, error-oriented, and intermediate initial profiles; retain their non-dominated subset as $\mathcal A_0$ and set $\mathcal B_0=\emptyset$.
+\FOR{$r=1,\ldots,I_{\max}$}
+    \STATE Generate unvisited system-feasible profiles $\mathcal V_r$ that differ from a profile in $\mathcal A_{r-1}\cup\mathcal B_{r-1}$ at one client candidate.
+    \STATE Evaluate $(T_{\mathrm{sys}}^t,\widehat\Omega_{\mathrm{sys}}^t)$ for every $\mathbf x\in\mathcal V_r$.
+    \STATE Retain the non-dominated profiles from $\mathcal A_{r-1}\cup\mathcal V_r$ as $\mathcal A_r$; if $|\mathcal A_r|>K_{\mathrm P}$, preserve both objective endpoints and approximately uniform profiles in latency order.
+    \STATE Retain at most $K_{\mathrm B}$ newly evaluated profiles outside $\mathcal A_r$ with the smallest normalized ideal-point distance as $\mathcal B_r$.
+    \IF{$\mathcal A_r=\mathcal A_{r-1}$ and $\mathcal B_r=\emptyset$}
         \STATE \textbf{break}
     \ENDIF
 \ENDFOR
-\STATE Set \(\widehat{\mathcal X}_{\mathrm P}^t\leftarrow\mathcal A_r\).
-\STATE \textbf{Ideal Point Tchebycheff Selection}
-\STATE Compute \(T_{\min}^t,T_{\max}^t,
-\widehat\Omega_{\min}^t,\widehat\Omega_{\max}^t\) over
-\(\widehat{\mathcal X}_{\mathrm P}^t\).
-\STATE \(\displaystyle
-\bar T^t(\mathbf x)=
-\frac{T_{\mathrm{sys}}^t(\mathbf x)-T_{\min}^t}
-{T_{\max}^t-T_{\min}^t+\varepsilon_n},\quad
-\bar\Omega^t(\mathbf x)=
-\frac{\widehat\Omega_{\mathrm{sys}}^t(\mathbf x)-
-\widehat\Omega_{\min}^t}
-{\widehat\Omega_{\max}^t-\widehat\Omega_{\min}^t+\varepsilon_n}\).
-\STATE Set \(\mathbf z^{r,t}\) to
-\([T_{\min}^t,\widehat\Omega_{\min}^t]^\top\), and apply the same normalization to obtain
-\((\bar z_T^{r,t},\bar z_\Omega^{r,t})\).
-\STATE \(\displaystyle
-D_\infty^t(\mathbf x)=\max\!\left\{
-|\bar T^t(\mathbf x)-\bar z_T^{r,t}|,
-|\bar\Omega^t(\mathbf x)-\bar z_\Omega^{r,t}|
-\right\}\).
-\STATE \(\displaystyle
-\mathbf x^\star\in
-\arg\min_{\mathbf x\in\widehat{\mathcal X}_{\mathrm P}^t}
-D_\infty^t(\mathbf x)\).
-\RETURN \(\mathbf x^\star\).
+\STATE Set $\widehat{\mathcal X}_{\mathrm P}^t\leftarrow\mathcal A_r$.
+\STATE \textbf{Ideal-Point Tchebycheff Selection}
+\STATE Compute $T_{\min}^t,T_{\max}^t,\widehat\Omega_{\min}^t,\widehat\Omega_{\max}^t$ over $\widehat{\mathcal X}_{\mathrm P}^t$ and normalize the two objectives as in \equref{eq:selection}.
+\STATE Select $\mathbf x^\star$ by the minimum $D_\infty^t$, breaking ties deterministically by system latency, then $\widehat\Omega_{\mathrm{sys}}^t$, then stable profile identity.
+\STATE \textbf{Execution and Accounting}
+\STATE Execute the selected mode-specific flows and their legal protection mechanisms; use real HE whenever the selected protected update requires HE.
+\STATE Aggregate the updates admitted by the realized edge/cloud flow and record any execution-level \textsc{skip} outcomes.
+\STATE Charge $R_{i,\mathrm{upd}}^{t+1}$ only for protected DP events that were actually executed and released; carry the resulting ledger state to the next round.
+\RETURN $\mathbf x^\star$.
 \end{algorithmic}
 \end{breakablealgorithm}
 
-The main symbols used in the collaboration reconfiguration model and solver are summarized in
-\tabref{tab:notations}.
+The main symbols used in the collaboration reconfiguration model and solver are summarized in \tabref{tab:notations}.
 
 \begin{table*}[t]
 \caption{Main Notation}
@@ -905,32 +806,31 @@ The main symbols used in the collaboration reconfiguration model and solver are 
 \hline\hline
 \textbf{Symbol} & \textbf{Meaning} \\
 \hline
-\(\mathcal{N}, N\) & End device set and number of end devices \\
-\(\mathcal{H}_{\mathrm{base}},\mathcal{H}, \mathcal{H}_i^{\mathrm{res}}\) & Abstract mode set, executable mode set, and resource feasible mode set of client \(i\) \\
-\(\Pi(h_i), \pi_i\) & Singleton fixed protection-map set induced by mode \(h_i\), and its unique element; not an optimization variable in the fused mainline \\
-\(\psi_{\lambda}(h_i,\pi_i)\) & Fixed trust/transport mechanism induced on link \(\lambda\); DP is applied at the common global release boundary rather than selected per link \\
-\(s_i=h_i,\mathcal{S}_i\) & One collaboration-mode decision of client \(i\), and the feasible mode candidate set \\
-\(L_B,E_B\) & Number of local link block loops and number of edge aggregation loops before cloud aggregation \\
-\(Q_{\mathrm{comp},i}, Q_{\mathrm{mem},i}\) & Local computation budget and memory upper bound of client \(i\) \\
-\(R_{i,\mathrm{upd}}^t(\alpha)\) & Client RDP state for update DP at order \(\alpha\) \\
-\((\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})\) & Fixed total privacy target for the update channel \\
-\(W_{i,L}^{\mathrm{comp}}, M_i^{\mathrm{mem}}\) & Computation workload and memory requirement of client \(i\) under a selected mode \\
-\(\chi(h_i),F_i\) & Mode dependent sample computation workload and fixed computing rate of client \(i\) \\
-\(\epsilon_{i,\mathrm{upd}}^{t,+}\) & Projected update epsilon after one formal global aggregate release \\
-\(T_i, T_{\mathrm{sys}}\) & Path level link flow latency of client \(i\), and system latency of one triggered aggregation event \\
-\(C_i^{\mathrm{sw},t}, S_P\) & Mode switching overhead in round \(t\), and strategy update period for limiting reconfiguration frequency \\
-\(K_{\mathrm P},K_{\mathrm B},I_{\max}\) & Pareto archive limit, deterministic exploration queue limit, and maximum search expansions \\
-\(S_j^t(\mathbf x),\lvert S_j^t(\mathbf x)\rvert\) & Set of client updates selected into edge aggregator \(j\)'s buffered aggregation under profile \(\mathbf x\), and the number of selected updates \\
-\(A_i^t(\mathbf x),A^t(\mathbf x)\) & Admitted clients in the buffer associated with client \(i\)'s path, and complete admitted client set under profile \(\mathbf x\) \\
-\(S_{\mathrm{agg}}^t\) & Privacy processed update payload size used in aggregation computation \\
-\(B_i^t,V_i^t,q_i^t\) & Client bias cost, variance cost, and effective cloud aggregation weight \\
-\(V_{\mathrm{DP}}^t,S_t\) & Common aggregate DP-noise error term and client-replacement sensitivity of the formal release \\
-\(\widehat{\Omega}_{\mathrm{sys}}^t\) & System level estimate of convergence error cost \\
-\(\Psi_C^t, r_C^t\) & Cloud fusion insufficiency penalty and cloud fusion ratio \\
-\(N_e,N_{e,A}^t\) & Full edge data mass and admitted cloud data mass \\
-\(\rho_{\mathrm{buf}},\rho_{\mathrm{PL}}\) & Buffered aggregation participation threshold and PL based convergence contraction factor \\
-\(\eta_{\mathrm{lr}},\sigma_{\mathrm{local}}^2\) & Learning rate and local stochastic gradient variance \\
-\(C_u,\Delta_u,\mathcal{B}_{\mathrm{clip},i}^{t}\) & Update clipping threshold, client replacement sensitivity, and clipping bias estimate \\
+$\mathcal N,N$ & End-device set and number of end devices \\
+$\mathcal H,\mathcal H_i^{\mathrm{res}}$ & Seven executable collaboration modes and the resource-feasible mode subset of client $i$ \\
+$\mathcal X_i^t(h),\mathcal D_i^t(h)$ & Mode-induced transmission set and its subset of update exposures requiring formal DP accounting \\
+$\pi_i^t$ & Exposure-specific protection map assigning legal transport/protection mechanisms to the transmissions of client $i$ \\
+$x_i^t,\mathcal F_i^t$ & Client candidate $(h_i^t,\pi_i^t,\sigma_{i,h_i}^t)$ when DP applies, and the client-feasible candidate set \\
+$\mathcal F_{\mathrm{sys}}^t$ & Joint profiles satisfying shared flow, buffer, aggregation, admission, and candidate-feasibility constraints \\
+$L_B,E_B$ & Number of local link-block loops and edge aggregation loops associated with a mode \\
+$Q_{\mathrm{comp},i},Q_{\mathrm{mem},i}$ & Local computation budget and memory upper bound of client $i$ \\
+$R_{i,\mathrm{upd}}^t(\alpha)$ & Client RDP ledger for protected update events at order $\alpha$ \\
+$(\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})$ & Lifetime privacy target for the protected update channel \\
+$n_{i,h}^{t,\mathrm{upd}},H_t,N_{i,h}^{t,\mathrm{plan}}$ & Protected update-event count of one candidate, remaining planning horizon, and planned remaining protected events \\
+$\sigma_{i,h}^t$ & Minimum lifetime-feasible update-DP noise multiplier for candidate mode $h$ under the current ledger \\
+$W_{i,L}^{\mathrm{comp}},M_i^{\mathrm{mem}}$ & Computation workload and memory requirement of client $i$ under a selected mode \\
+$\chi(h_i),F_i$ & Mode-dependent sample computation workload and computing rate of client $i$ \\
+$T_i,T_{\mathrm{sys}}$ & Client path-flow latency and system round duration produced by the joint flow evaluation \\
+$C_i^{\mathrm{sw},t},S_P$ & Mode-switching overhead in round $t$ and strategy update period \\
+$K_{\mathrm P},K_{\mathrm B},I_{\max}$ & Pareto archive limit, deterministic exploration-queue limit, and maximum search expansions \\
+$A_i^t(\mathbf x),A^t(\mathbf x)$ & Clients admitted by the buffer on client $i$'s path and the complete admitted set under profile $\mathbf x$ \\
+$B_i^t,V_i^t,q_i^t$ & Client bias cost, variance cost, and represented-sample aggregation weight used by the error proxy \\
+$V_{i,\mathrm{upd}}^t$ & Candidate-specific update-DP variance term induced by $\sigma_{i,h_i}^t$ \\
+$\widehat\Omega_{\mathrm{sys}}^t$ & System-level estimated convergence-error cost used for selection \\
+$\rho_C^t,\xi$ & Cloud-reaching represented-sample ratio and its insufficiency-penalty coefficient \\
+$\eta_{\mathrm{lr}},\sigma_{\mathrm{local}}^2$ & Learning rate and local stochastic-gradient variance \\
+$C_u,\mathcal B_{\mathrm{clip},i}^{t}$ & Update clipping threshold and profiled squared clipping-excess estimate \\
+\textsc{skip} & Execution/admission outcome when a candidate cannot be executed or admitted; not a collaboration mode \\
 \hline\hline
 \end{tabular}
 \end{table*}
