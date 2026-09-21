@@ -1,0 +1,204 @@
+diff --git a/experiments/audit_privacy_tiers.py b/experiments/audit_privacy_tiers.py
+deleted file mode 100644
+index b7c64bd..0000000
+--- a/experiments/audit_privacy_tiers.py
++++ /dev/null
+@@ -1,98 +0,0 @@
+-"""Audit whether update-DP noise tiers remain distinguishable to the selector.
+-
+-This is a diagnostic only.  It does not change candidate generation, privacy
+-accounting, Pareto objectives, or selection behavior.
+-"""
+-
+-from __future__ import annotations
+-
+-import random
+-from collections import defaultdict
+-
+-from dynfed.selection import (
+-    ExposurePrivacyRequirement,
+-    SelectionConfig,
+-    _dedupe_candidates,
+-    _local_omega_proxy,
+-    build_client_privacy_ledger,
+-    enumerate_candidates,
+-)
+-
+-
+-def _mechanism_key(candidate) -> tuple[tuple[str, str], ...]:
+-    return tuple(sorted((candidate.link_mechanisms or candidate.mechanisms).items()))
+-
+-
+-def main() -> None:
+-    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
+-    ledger = build_client_privacy_ledger(config)
+-    requirement = ExposurePrivacyRequirement(dp_required_links=frozenset({"L_C_upd"}))
+-    candidates = enumerate_candidates(
+-        config=config,
+-        client_id=0,
+-        edge_factor=1.0,
+-        compute_factor=1.0,
+-        samples=100,
+-        remaining_epsilon=ledger.remaining_budget,
+-        round_idx=0,
+-        rng=random.Random(4101),
+-        policy="ours",
+-        privacy_ledger=ledger,
+-        privacy_requirement=requirement,
+-    )
+-
+-    liic_dp = [
+-        candidate
+-        for candidate in candidates
+-        if candidate.mode == "LIIC" and candidate.update_dp_events > 0
+-    ]
+-    groups = defaultdict(list)
+-    for candidate in liic_dp:
+-        groups[_mechanism_key(candidate)].append(candidate)
+-
+-    if not groups:
+-        raise SystemExit("FAIL: no LIIC update-DP candidates were enumerated")
+-
+-    print("Step41 privacy-tier distinguishability audit")
+-    print(f"raw LIIC update-DP candidates: {len(liic_dp)}")
+-    print(f"after selector-style dedupe: {len(_dedupe_candidates(liic_dp))}")
+-
+-    saw_three_tiers = False
+-    saw_collapse = False
+-    saw_strict_omega_increase = False
+-    for mechanisms, group in sorted(groups.items()):
+-        ordered = sorted(group, key=lambda item: float(item.update_noise_multiplier))
+-        sigmas = [float(item.update_noise_multiplier) for item in ordered]
+-        omegas = [_local_omega_proxy(item, config=config) for item in ordered]
+-        times = [float(item.time) for item in ordered]
+-        deduped = _dedupe_candidates(ordered)
+-        print(f"mechanisms={dict(mechanisms)}")
+-        print(f"  sigmas={sigmas}")
+-        print(f"  local_omega={omegas}")
+-        print(f"  latency={times}")
+-        print(f"  raw={len(ordered)} deduped={len(deduped)}")
+-
+-        if len(ordered) == config.dp_tier_count:
+-            saw_three_tiers = True
+-        if len(ordered) > 1 and len(deduped) == 1:
+-            saw_collapse = True
+-        if len(omegas) > 1 and all(
+-            right > left for left, right in zip(omegas, omegas[1:])
+-        ):
+-            saw_strict_omega_increase = True
+-
+-    if not saw_three_tiers:
+-        raise SystemExit("FAIL: expected a three-tier LIIC update-DP family")
+-    if not saw_collapse:
+-        raise SystemExit("FAIL: selector-style dedupe did not collapse a tier family")
+-    if not saw_strict_omega_increase:
+-        raise SystemExit("FAIL: larger sigma did not strictly increase local Omega")
+-
+-    print("PASS: enumeration creates distinct sigma tiers")
+-    print("PASS: current selector-style dedupe collapses tiers with identical mode/mechanisms")
+-    print("PASS: larger sigma strictly increases current local Omega within the audited family")
+-    print("CONCLUSION: current objectives provide no observed latency/Omega advantage for larger tiers")
+-
+-
+-if __name__ == "__main__":
+-    main()
+diff --git a/experiments/audit_future_privacy_flexibility.py b/experiments/audit_future_privacy_flexibility.py
+deleted file mode 100644
+index 87ccb53..0000000
+--- a/experiments/audit_future_privacy_flexibility.py
++++ /dev/null
+@@ -1,94 +0,0 @@
+-"""Audit whether larger update-DP sigma tiers preserve future privacy flexibility.
+-
+-Diagnostic only: no selector, accounting, or training behavior is changed.
+-"""
+-from __future__ import annotations
+-
+-from dynfed.selection import (
+-    SelectionConfig,
+-    _mode_link_transmissions,
+-    build_client_privacy_ledger,
+-    paper_client_privacy_requirement,
+-)
+-from dynfed.training import MODE_SPECS
+-
+-
+-def _paper_required_update_events(mode: str, config: SelectionConfig) -> int:
+-    requirement = paper_client_privacy_requirement()
+-    spec = MODE_SPECS[mode]
+-    return sum(
+-        count
+-        for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
+-            mode, config.L_block_cycles, spec.E_edge_loops
+-        )
+-        if privacy_eligible
+-        and obj == "upd"
+-        and link_id in requirement.dp_required_links
+-    )
+-
+-
+-def main() -> None:
+-    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
+-    per_mode_events = {
+-        mode: _paper_required_update_events(mode, config)
+-        for mode in MODE_SPECS
+-    }
+-    max_events = max(per_mode_events.values(), default=0)
+-
+-    print("Step42 future privacy-flexibility audit")
+-    print(f"paper-required update-DP events per mode: {per_mode_events}")
+-    print(f"maximum protected update-DP events in one mode-round: {max_events}")
+-
+-    if max_events != 1:
+-        raise SystemExit(
+-            "FAIL: current paper mode family no longer has at most one required update-DP event per round"
+-        )
+-
+-    horizon = int(config.rounds)
+-    base_ledger = build_client_privacy_ledger(config)
+-    sigma_min = base_ledger.minimum_feasible_update_noise(max_events * horizon)
+-    tiers = [
+-        sigma_min * (float(config.dp_tier_gamma) ** tier)
+-        for tier in range(int(config.dp_tier_count))
+-    ]
+-
+-    future_events = max_events * (horizon - 1)
+-    future_sigma_floors: list[float] = []
+-    all_preserve_full_horizon = True
+-    for sigma in tiers:
+-        ledger = build_client_privacy_ledger(config)
+-        projection = ledger.add(0, max_events, update_noise_multiplier=sigma)
+-        future_sigma = ledger.minimum_feasible_update_noise(future_events)
+-        future_sigma_floors.append(future_sigma)
+-        preserves = ledger.update.can_add_events(sigma_min, future_events)
+-        all_preserve_full_horizon = all_preserve_full_horizon and preserves
+-        print(
+-            "tier "
+-            f"sigma={sigma:.10f}: epsilon_after_current={projection.update_epsilon_after:.10f}, "
+-            f"future_sigma_floor={future_sigma:.10f}, "
+-            f"remaining_{horizon - 1}_rounds_feasible_at_original_sigma_min={preserves}"
+-        )
+-
+-    if not all_preserve_full_horizon:
+-        raise SystemExit(
+-            "FAIL: sigma_min did not preserve the full remaining one-release-per-round horizon"
+-        )
+-    if not all(
+-        right < left
+-        for left, right in zip(future_sigma_floors, future_sigma_floors[1:])
+-    ):
+-        raise SystemExit(
+-            "FAIL: larger current sigma did not lower the future lifetime-aware sigma floor"
+-        )
+-
+-    print("PASS: every current tier preserves all paper-required future mode-round DP exposures")
+-    print("PASS: sigma_min already preserves one protected update release in every remaining round")
+-    print("PASS: larger current sigma lowers the future lifetime-aware sigma floor")
+-    print(
+-        "CONCLUSION: tiers do not expand future mode-feasibility coverage/horizon under the "
+-        "current paper exposure model; they only create intertemporal noise-allocation slack"
+-    )
+-
+-
+-if __name__ == "__main__":
+-    main()
