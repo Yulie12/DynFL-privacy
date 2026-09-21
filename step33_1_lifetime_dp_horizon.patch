@@ -1,0 +1,48 @@
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -751,7 +751,15 @@
+                 noise_tiers = (float(fixed_sigma),)
+             elif update_events > 0 and privacy_ledger is not None:
+                 try:
+-                    sigma_min = privacy_ledger.minimum_feasible_update_noise(update_events)
++                    # Reserve enough privacy budget for the same candidate-level
++                    # update-DP exposure through the remaining training horizon.
++                    # Calibrating only the next release makes the minimum sigma
++                    # consume the entire lifetime epsilon budget in one round.
++                    remaining_rounds = max(1, int(config.rounds) - int(round_idx))
++                    planned_update_events = int(update_events) * remaining_rounds
++                    sigma_min = privacy_ledger.minimum_feasible_update_noise(
++                        planned_update_events
++                    )
+                 except ValueError:
+                     continue
+                 noise_tiers = tuple(
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -1749,6 +1749,26 @@
+     assert all(c.feasible_privacy for c in dp)
+ 
+ 
++def test_candidate_sigma_minimum_reserves_remaining_lifetime_horizon() -> None:
++    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
++    ledger = build_client_privacy_ledger(config)
++    requirement = ExposurePrivacyRequirement(dp_required_links=frozenset({"L_C_upd"}))
++    candidates = enumerate_candidates(
++        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
++        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
++        rng=random.Random(102), policy="ours", privacy_ledger=ledger,
++        privacy_requirement=requirement,
++    )
++    dp = [c for c in candidates if c.mode == "LIIC" and c.update_dp_events == 1]
++    sigma_min = min(float(c.update_noise_multiplier) for c in dp)
++    projection = ledger.project(0, config.rounds, update_noise_multiplier=sigma_min)
++    assert projection.update_epsilon_after == pytest.approx(
++        ledger.update.budget, rel=1e-8, abs=1e-8
++    )
++    one_event = ledger.project(0, 1, update_noise_multiplier=sigma_min)
++    assert one_event.update_epsilon_after < ledger.update.budget
++
++
+ def test_remaining_budget_raises_next_round_sigma_minimum() -> None:
+     config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
+     ledger = build_client_privacy_ledger(config)

@@ -1,0 +1,106 @@
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -2296,51 +2296,6 @@
+             [item[0] for item in cloud_updates],
+             global_aggregation_weights,
+         )
+-        update_dp_release_count = (
+-            len(local_dp_pending_components)
+-            + len(edge_only_dp_release_records)
+-            + int(aggregate_dp_noise_share_count > 0)
+-        )
+-        update_dp_release = update_dp_release_count > 0
+-        update_dp_max_client_fraction = max(
+-            local_dp_packet_client_fractions
+-            + secure_aggregate_dp_client_fractions
+-            + ([1.0] if edge_only_dp_release_records else []),
+-            default=0.0,
+-        )
+-        update_dp_sensitivity = max(
+-            local_dp_packet_sensitivities
+-            + [aggregate_dp_sensitivity]
+-            + ([2.0 * train_config.dp_clip_norm] if edge_only_dp_release_records else []),
+-            default=0.0,
+-        )
+-        update_dp_noise_std = float(
+-            np.sqrt(
+-                sum(
+-                    (normalized_global_weights[index] * noise_std) ** 2
+-                    for index, noise_std, _seed in local_dp_pending_components
+-                )
+-                + aggregate_dp_noise_std ** 2
+-            )
+-        )
+-        local_dp_noise_norm = _state_difference_l2_norm(
+-            local_dp_noise_accumulator
+-        )
+-        aggregate_dp_noise_norm = _state_difference_l2_norm(
+-            aggregate_dp_noise_accumulator
+-        )
+-        if local_dp_noise_accumulator and aggregate_dp_noise_accumulator:
+-            update_dp_noise_norm = _state_difference_l2_norm(
+-                _add_state_differences(
+-                    local_dp_noise_accumulator,
+-                    aggregate_dp_noise_accumulator,
+-                )
+-            )
+-        else:
+-            update_dp_noise_norm = max(
+-                local_dp_noise_norm,
+-                aggregate_dp_noise_norm,
+-            )
+         cloud_edge_ratios = _cloud_edge_sample_ratios(
+             cloud_updates,
+             client_edges=client_edges,
+@@ -2411,6 +2366,51 @@
+                     for _client_id, _state_diff, _sample_count, candidate in prepared_updates
+                 )
+ 
++        update_dp_release_count = (
++            len(local_dp_pending_components)
++            + len(edge_only_dp_release_records)
++            + int(aggregate_dp_noise_share_count > 0)
++        )
++        update_dp_release = update_dp_release_count > 0
++        update_dp_max_client_fraction = max(
++            local_dp_packet_client_fractions
++            + secure_aggregate_dp_client_fractions
++            + ([1.0] if edge_only_dp_release_records else []),
++            default=0.0,
++        )
++        update_dp_sensitivity = max(
++            local_dp_packet_sensitivities
++            + [aggregate_dp_sensitivity]
++            + ([2.0 * train_config.dp_clip_norm] if edge_only_dp_release_records else []),
++            default=0.0,
++        )
++        update_dp_noise_std = float(
++            np.sqrt(
++                sum(
++                    (normalized_global_weights[index] * noise_std) ** 2
++                    for index, noise_std, _seed in local_dp_pending_components
++                )
++                + aggregate_dp_noise_std ** 2
++            )
++        )
++        local_dp_noise_norm = _state_difference_l2_norm(
++            local_dp_noise_accumulator
++        )
++        aggregate_dp_noise_norm = _state_difference_l2_norm(
++            aggregate_dp_noise_accumulator
++        )
++        if local_dp_noise_accumulator and aggregate_dp_noise_accumulator:
++            update_dp_noise_norm = _state_difference_l2_norm(
++                _add_state_differences(
++                    local_dp_noise_accumulator,
++                    aggregate_dp_noise_accumulator,
++                )
++            )
++        else:
++            update_dp_noise_norm = max(
++                local_dp_noise_norm,
++                aggregate_dp_noise_norm,
++            )
+         global_state_diffs: list[dict[str, dict[str, torch.Tensor]]] = []
+         global_candidates: list[Candidate | None] = []
+         global_he_mask: list[bool] = []

@@ -1,0 +1,17 @@
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -2263,6 +2263,8 @@
+             global_aggregation_weights,
+         )
++        edge_only_dp_release_records: list[dict[str, Any]] = []
++        edge_only_dp_noise_norms: list[float] = []
+         update_dp_release_count = (
+             len(local_dp_pending_components)
+             + len(edge_only_dp_release_records)
+@@ -2365,8 +2367,6 @@
+                 (client_id, state_diff, sample_count, candidate)
+             )
+ 
+-        edge_only_dp_release_records: list[dict[str, Any]] = []
+-        edge_only_dp_noise_norms: list[float] = []
+         edge_only_iter = () if effective_selection.mainline_fusion else edge_only_groups.values()

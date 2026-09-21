@@ -1,0 +1,22 @@
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index b65b6d5..de60c74 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -2239,6 +2239,8 @@ def _run_lenet5_policy(
+             noise_multiplier=aggregate_noise_multiplier,
+         )
+         cloud_signal_updates.clear()
++        edge_only_dp_release_records: list[dict[str, Any]] = []
++        edge_only_dp_noise_norms: list[float] = []
+         local_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
+         aggregate_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
+         update_dp_component_noise_norms: list[float] = []
+@@ -2368,8 +2370,6 @@ def _run_lenet5_policy(
+                 (client_id, state_diff, sample_count, candidate)
+             )
+ 
+-        edge_only_dp_release_records: list[dict[str, Any]] = []
+-        edge_only_dp_noise_norms: list[float] = []
+         edge_only_iter = () if effective_selection.mainline_fusion else edge_only_groups.values()
+         for updates in edge_only_iter:
+             prepared_updates: list[tuple[int, Any, int, Candidate | None]] = []

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,8 @@ from dynfed.fmnist_lenet5_dynamic import (
     _candidate_uses_secure_aggregate_update_dp,
     _distributed_aggregate_dp_parameters,
     _dp_update_release_parameters,
+    _candidate_edge_update_mechanism,
+    _protect_edge_only_client_update_dp,
     _should_apply_update_dp,
     _aggregate_returned_client_models,
     _state_difference_from_client_update,
@@ -74,6 +77,35 @@ from dynfed.split_learning import (
 )
 from dynfed.privacy import OBJECT_SIZES, PRIVACY_ALPHA
 from experiments.run_paper_config import build_command
+
+
+def test_edge_only_client_dp_is_applied_before_edge_aggregation() -> None:
+    from dynfed.fmnist_lenet5_dynamic import _protect_edge_only_client_update_dp
+
+    candidate = SimpleNamespace(
+        mode="LIIE",
+        link_mechanisms={"L_E_upd": "dp"},
+        update_noise_multiplier=1.0,
+    )
+    state_diff = {
+        "end": {"w": torch.tensor([10.0, 0.0])},
+        "edge": {"w": torch.tensor([0.0, 4.0])},
+    }
+
+    protected, audit = _protect_edge_only_client_update_dp(
+        state_diff,
+        candidate=candidate,
+        clip_norm=1.0,
+        fallback_noise_multiplier=1.0,
+        noise_seed=12345,
+    )
+
+    assert audit is not None
+    assert audit["sensitivity"] == pytest.approx(2.0)
+    assert audit["noise_std"] == pytest.approx(2.0)
+    assert audit["mechanism"] == "dp"
+    assert not torch.equal(protected["end"]["w"], state_diff["end"]["w"])
+    assert not torch.equal(protected["edge"]["w"], state_diff["edge"]["w"])
 
 
 def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
@@ -854,6 +886,22 @@ def test_update_packet_dp_uses_max_within_packet_client_fraction() -> None:
 
     assert np.isclose(sensitivity, 1.5)
     assert np.isclose(noise_std, 4.5)
+
+
+def test_tex_packet_clips_clients_before_weighted_packet_aggregation() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "dynfed" / "fmnist_lenet5_dynamic.py").read_text(encoding="utf-8")
+    start = source.index("            for edge_id, updates in edge_cloud_groups.items():")
+    end = source.index("                else:\n                    edge_state, _edge_used_he", start)
+    packet_path = source[start:end]
+
+    clip_pos = packet_path.index("clipped, _original_norm, clip_scale = clip_state_difference(")
+    aggregate_pos = packet_path.index("edge_update = _weighted_average_state_differences(")
+    fraction_pos = packet_path.index("max_client_fraction = max(")
+
+    assert clip_pos < aggregate_pos < fraction_pos
+    assert "if tex_packet:\n                            clipped = relative_update" not in packet_path
+    assert "max_client_fraction = 1.0" not in packet_path
 
 
 def test_distributed_aggregate_dp_shares_match_release_noise() -> None:
@@ -1747,6 +1795,26 @@ def test_dp_tiers_start_at_client_specific_minimum_feasible_noise() -> None:
     assert sigmas[1] == pytest.approx(sigmas[0] * 1.5, rel=1e-8)
     assert sigmas[2] == pytest.approx(sigmas[0] * 1.5**2, rel=1e-8)
     assert all(c.feasible_privacy for c in dp)
+
+
+def test_candidate_sigma_minimum_reserves_remaining_lifetime_horizon() -> None:
+    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
+    ledger = build_client_privacy_ledger(config)
+    requirement = ExposurePrivacyRequirement(dp_required_links=frozenset({"L_C_upd"}))
+    candidates = enumerate_candidates(
+        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
+        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
+        rng=random.Random(102), policy="ours", privacy_ledger=ledger,
+        privacy_requirement=requirement,
+    )
+    dp = [c for c in candidates if c.mode == "LIIC" and c.update_dp_events == 1]
+    sigma_min = min(float(c.update_noise_multiplier) for c in dp)
+    projection = ledger.project(0, config.rounds, update_noise_multiplier=sigma_min)
+    assert projection.update_epsilon_after == pytest.approx(
+        ledger.update.budget, rel=1e-8, abs=1e-8
+    )
+    one_event = ledger.project(0, 1, update_noise_multiplier=sigma_min)
+    assert one_event.update_epsilon_after < ledger.update.budget
 
 
 def test_remaining_budget_raises_next_round_sigma_minimum() -> None:

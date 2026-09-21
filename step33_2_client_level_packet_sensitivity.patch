@@ -1,0 +1,64 @@
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -2077,15 +2077,12 @@
+                             global_edge=global_edge,
+                             device=torch.device("cpu"),
+                         )
+-                        if tex_packet:
+-                            clipped = relative_update
+-                        else:
+-                            clipped, _original_norm, clip_scale = clip_state_difference(
+-                                relative_update, train_config.dp_clip_norm, torch.device("cpu"),
+-                            )
+-                            update_dp_clip_scales.append(clip_scale)
+-                            update_dp_preclip_norms.append(float(_original_norm))
+-                            update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
++                        clipped, _original_norm, clip_scale = clip_state_difference(
++                            relative_update, train_config.dp_clip_norm, torch.device("cpu"),
++                        )
++                        update_dp_clip_scales.append(clip_scale)
++                        update_dp_preclip_norms.append(float(_original_norm))
++                        update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+                         clipped_updates.append(clipped)
+                         clipped_counts.append(sample_count)
+                     edge_update = _weighted_average_state_differences(
+@@ -2097,14 +2094,6 @@
+                         (float(count) / group_total for count in clipped_counts),
+                         default=0.0,
+                     )
+-                    if tex_packet:
+-                        edge_update, _original_norm, clip_scale = clip_state_difference(
+-                            edge_update, train_config.dp_clip_norm, torch.device("cpu"),
+-                        )
+-                        update_dp_clip_scales.append(clip_scale)
+-                        update_dp_preclip_norms.append(float(_original_norm))
+-                        update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+-                        max_client_fraction = 1.0
+                     cloud_signal_updates.append(edge_update)
+                     cloud_index = len(cloud_updates)
+                     if local_packet_dp:
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -856,6 +856,22 @@
+     assert np.isclose(noise_std, 4.5)
+ 
+ 
++def test_tex_packet_clips_clients_before_weighted_packet_aggregation() -> None:
++    root = Path(__file__).resolve().parents[1]
++    source = (root / "dynfed" / "fmnist_lenet5_dynamic.py").read_text(encoding="utf-8")
++    start = source.index("            for edge_id, updates in edge_cloud_groups.items():")
++    end = source.index("                else:\n                    edge_state, _edge_used_he", start)
++    packet_path = source[start:end]
++
++    clip_pos = packet_path.index("clipped, _original_norm, clip_scale = clip_state_difference(")
++    aggregate_pos = packet_path.index("edge_update = _weighted_average_state_differences(")
++    fraction_pos = packet_path.index("max_client_fraction = max(")
++
++    assert clip_pos < aggregate_pos < fraction_pos
++    assert "if tex_packet:\n                            clipped = relative_update" not in packet_path
++    assert "max_client_fraction = 1.0" not in packet_path
++
++
+ def test_distributed_aggregate_dp_shares_match_release_noise() -> None:
+     normalized, max_weight, sensitivity, release_std, share_stds = (
+         _distributed_aggregate_dp_parameters(

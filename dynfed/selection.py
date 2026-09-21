@@ -751,7 +751,15 @@ def enumerate_candidates(
                 noise_tiers = (float(fixed_sigma),)
             elif update_events > 0 and privacy_ledger is not None:
                 try:
-                    sigma_min = privacy_ledger.minimum_feasible_update_noise(update_events)
+                    # Reserve enough privacy budget for the same candidate-level
+                    # update-DP exposure through the remaining training horizon.
+                    # Calibrating only the next release makes the minimum sigma
+                    # consume the entire lifetime epsilon budget in one round.
+                    remaining_rounds = max(1, int(config.rounds) - int(round_idx))
+                    planned_update_events = int(update_events) * remaining_rounds
+                    sigma_min = privacy_ledger.minimum_feasible_update_noise(
+                        planned_update_events
+                    )
                 except ValueError:
                     continue
                 noise_tiers = tuple(

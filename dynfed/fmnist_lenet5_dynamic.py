@@ -839,6 +839,49 @@ def _normalize_cifar_images(images: np.ndarray, dataset_name: str) -> np.ndarray
     return x.reshape(x.shape[0], -1).astype(np.float32)
 
 
+def _protect_edge_only_client_update_dp(
+    state_diff: dict[str, dict[str, torch.Tensor]],
+    *,
+    candidate: Candidate,
+    clip_norm: float,
+    fallback_noise_multiplier: float,
+    noise_seed: int,
+) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, float] | None]:
+    """Apply client-level DP to a local->edge model-update packet."""
+    mechanism = _candidate_edge_update_mechanism(candidate)
+    if not mechanism_uses_dp(mechanism):
+        return state_diff, None
+    clipped, original_norm, clip_scale = clip_state_difference(
+        state_diff, clip_norm, torch.device("cpu")
+    )
+    sigma = float(
+        candidate.update_noise_multiplier
+        if candidate.update_noise_multiplier is not None
+        else fallback_noise_multiplier
+    )
+    sensitivity, noise_std = _dp_update_release_parameters(
+        1.0, clip_norm=clip_norm, noise_multiplier=sigma
+    )
+    noise = gaussian_state_difference(
+        clipped,
+        noise_std,
+        np.random.default_rng(noise_seed),
+        torch.device("cpu"),
+    )
+    protected = _add_state_differences(clipped, noise)
+    audit = {
+        "mechanism": mechanism,
+        "sigma": sigma,
+        "sensitivity": sensitivity,
+        "noise_std": noise_std,
+        "noise_norm": _state_difference_l2_norm(noise),
+        "original_norm": float(original_norm),
+        "clip_scale": float(clip_scale),
+    }
+    del noise
+    return protected, audit
+
+
 def _run_lenet5_policy(
     *,
     policy: str,
@@ -2077,15 +2120,12 @@ def _run_lenet5_policy(
                             global_edge=global_edge,
                             device=torch.device("cpu"),
                         )
-                        if tex_packet:
-                            clipped = relative_update
-                        else:
-                            clipped, _original_norm, clip_scale = clip_state_difference(
-                                relative_update, train_config.dp_clip_norm, torch.device("cpu"),
-                            )
-                            update_dp_clip_scales.append(clip_scale)
-                            update_dp_preclip_norms.append(float(_original_norm))
-                            update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+                        clipped, _original_norm, clip_scale = clip_state_difference(
+                            relative_update, train_config.dp_clip_norm, torch.device("cpu"),
+                        )
+                        update_dp_clip_scales.append(clip_scale)
+                        update_dp_preclip_norms.append(float(_original_norm))
+                        update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
                         clipped_updates.append(clipped)
                         clipped_counts.append(sample_count)
                     edge_update = _weighted_average_state_differences(
@@ -2097,14 +2137,6 @@ def _run_lenet5_policy(
                         (float(count) / group_total for count in clipped_counts),
                         default=0.0,
                     )
-                    if tex_packet:
-                        edge_update, _original_norm, clip_scale = clip_state_difference(
-                            edge_update, train_config.dp_clip_norm, torch.device("cpu"),
-                        )
-                        update_dp_clip_scales.append(clip_scale)
-                        update_dp_preclip_norms.append(float(_original_norm))
-                        update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
-                        max_client_fraction = 1.0
                     cloud_signal_updates.append(edge_update)
                     cloud_index = len(cloud_updates)
                     if local_packet_dp:
@@ -2207,6 +2239,8 @@ def _run_lenet5_policy(
             noise_multiplier=aggregate_noise_multiplier,
         )
         cloud_signal_updates.clear()
+        edge_only_dp_release_records: list[dict[str, Any]] = []
+        edge_only_dp_noise_norms: list[float] = []
         local_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
         aggregate_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
         update_dp_component_noise_norms: list[float] = []
@@ -2277,17 +2311,92 @@ def _run_lenet5_policy(
             [item[0] for item in cloud_updates],
             global_aggregation_weights,
         )
-        update_dp_release_count = len(local_dp_pending_components) + int(
-            aggregate_dp_noise_share_count > 0
+        cloud_edge_ratios = _cloud_edge_sample_ratios(
+            cloud_updates,
+            client_edges=client_edges,
+            edge_total_samples=edge_total_samples,
+        )
+        edge_only_groups: dict[tuple[int, str], list[tuple[int, Any, int, Candidate | None]]] = {}
+        for client_id, state_diff, sample_count, candidate in admitted_updates:
+            if candidate is None or candidate.mode not in EDGE_ONLY_MODES:
+                continue
+            key = (int(client_by_id[client_id].edge_id), candidate.mode)
+            edge_only_groups.setdefault(key, []).append(
+                (client_id, state_diff, sample_count, candidate)
+            )
+
+        edge_only_iter = () if effective_selection.mainline_fusion else edge_only_groups.values()
+        for updates in edge_only_iter:
+            prepared_updates: list[tuple[int, Any, int, Candidate | None]] = []
+            for client_id, state_diff, sample_count, candidate in updates:
+                mechanism = _candidate_edge_update_mechanism(candidate)
+                protected_diff, audit = (
+                    _protect_edge_only_client_update_dp(
+                        state_diff,
+                        candidate=candidate,
+                        clip_norm=train_config.dp_clip_norm,
+                        fallback_noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
+                        noise_seed=_dp_noise_seed(selection.seed, round_idx, client_id, 20_000),
+                    )
+                    if candidate is not None
+                    else (state_diff, None)
+                )
+                if audit is not None:
+                    update_dp_clip_scales.append(audit["clip_scale"])
+                    update_dp_preclip_norms.append(audit["original_norm"])
+                    update_dp_clipped_clients += int(audit["clip_scale"] < 1.0 - 1e-12)
+                    edge_only_dp_noise_norms.append(audit["noise_norm"])
+                    edge_only_dp_release_records.append({
+                        "client_id": int(client_id),
+                        "edge_id": int(client_by_id[client_id].edge_id),
+                        "candidate": candidate,
+                        **audit,
+                    })
+                prepared_updates.append((client_id, protected_diff, sample_count, candidate))
+
+            returned_state, used_real_he = _aggregate_returned_client_models(
+                updates=prepared_updates,
+                client_model_states=client_model_states,
+                global_end=global_end,
+                global_edge=global_edge,
+                device=device,
+                model_name=model_name,
+                input_shape=input_shape,
+                num_classes=num_classes,
+                he_aggregation_size=train_config.he_aggregation_size,
+                he_backend=he_status.backend if execute_real_he else "none",
+                he_metrics=round_he_metrics,
+            )
+            shared_returned_state = _state_dict_to_device_nested(
+                returned_state,
+                torch.device("cpu"),
+            )
+            for client_id, _state_diff, _sample_count, _candidate in prepared_updates:
+                client_model_states[client_id] = shared_returned_state
+            if used_real_he:
+                round_real_he_used = True
+                round_real_he_clients += sum(
+                    candidate is not None
+                    and mechanism_uses_he(_candidate_edge_update_mechanism(candidate))
+                    for _client_id, _state_diff, _sample_count, candidate in prepared_updates
+                )
+
+        update_dp_release_count = (
+            len(local_dp_pending_components)
+            + len(edge_only_dp_release_records)
+            + int(aggregate_dp_noise_share_count > 0)
         )
         update_dp_release = update_dp_release_count > 0
         update_dp_max_client_fraction = max(
             local_dp_packet_client_fractions
-            + secure_aggregate_dp_client_fractions,
+            + secure_aggregate_dp_client_fractions
+            + ([1.0] if edge_only_dp_release_records else []),
             default=0.0,
         )
         update_dp_sensitivity = max(
-            local_dp_packet_sensitivities + [aggregate_dp_sensitivity],
+            local_dp_packet_sensitivities
+            + [aggregate_dp_sensitivity]
+            + ([2.0 * train_config.dp_clip_norm] if edge_only_dp_release_records else []),
             default=0.0,
         )
         update_dp_noise_std = float(
@@ -2317,49 +2426,6 @@ def _run_lenet5_policy(
                 local_dp_noise_norm,
                 aggregate_dp_noise_norm,
             )
-        cloud_edge_ratios = _cloud_edge_sample_ratios(
-            cloud_updates,
-            client_edges=client_edges,
-            edge_total_samples=edge_total_samples,
-        )
-        edge_only_groups: dict[tuple[int, str], list[tuple[int, Any, int, Candidate | None]]] = {}
-        for client_id, state_diff, sample_count, candidate in admitted_updates:
-            if candidate is None or candidate.mode not in EDGE_ONLY_MODES:
-                continue
-            key = (int(client_by_id[client_id].edge_id), candidate.mode)
-            edge_only_groups.setdefault(key, []).append(
-                (client_id, state_diff, sample_count, candidate)
-            )
-
-        edge_only_iter = () if effective_selection.mainline_fusion else edge_only_groups.values()
-        for updates in edge_only_iter:
-            returned_state, used_real_he = _aggregate_returned_client_models(
-                updates=updates,
-                client_model_states=client_model_states,
-                global_end=global_end,
-                global_edge=global_edge,
-                device=device,
-                model_name=model_name,
-                input_shape=input_shape,
-                num_classes=num_classes,
-                he_aggregation_size=train_config.he_aggregation_size,
-                he_backend=he_status.backend if execute_real_he else "none",
-                he_metrics=round_he_metrics,
-            )
-            shared_returned_state = _state_dict_to_device_nested(
-                returned_state,
-                torch.device("cpu"),
-            )
-            for client_id, _state_diff, _sample_count, _candidate in updates:
-                client_model_states[client_id] = shared_returned_state
-            if used_real_he:
-                round_real_he_used = True
-                round_real_he_clients += sum(
-                    candidate is not None
-                    and mechanism_uses_he(_candidate_edge_update_mechanism(candidate))
-                    for _client_id, _state_diff, _sample_count, candidate in updates
-                )
-
         global_state_diffs: list[dict[str, dict[str, torch.Tensor]]] = []
         global_candidates: list[Candidate | None] = []
         global_he_mask: list[bool] = []
@@ -2436,6 +2502,46 @@ def _run_lenet5_policy(
 
         packet_dp_indices = {index for index, _std, _seed in local_dp_pending_components}
         protection_releases = []
+        for release_offset, record in enumerate(edge_only_dp_release_records):
+            client_id = record["client_id"]
+            row = round_decision_rows_by_client[client_id]
+            selected_sigma = row.get("selected_update_noise_multiplier")
+            accounted_sigma = row.get("accounted_update_noise_multiplier")
+            sigma = float(record["sigma"])
+            protection_releases.append({
+                "round": round_idx,
+                "packet_index": len(cloud_updates) + release_offset,
+                "source": "local",
+                "destination": "edge",
+                "object": "model_update",
+                "client_ids": str(client_id),
+                "source_domain": record["edge_id"],
+                "mode": record["candidate"].mode,
+                "selected_update_noise_multipliers": (
+                    "" if selected_sigma is None else f"{float(selected_sigma):.17g}"
+                ),
+                "executed_update_noise_multiplier": sigma,
+                "accounted_update_noise_multipliers": (
+                    "" if accounted_sigma is None else f"{float(accounted_sigma):.17g}"
+                ),
+                "sigma_execution_accounting_consistent": (
+                    selected_sigma is not None
+                    and accounted_sigma is not None
+                    and abs(float(selected_sigma) - sigma) <= 1e-12
+                    and abs(float(accounted_sigma) - sigma) <= 1e-12
+                ),
+                "packet_protection_status": "dp_requested_and_observed",
+                "released_model_dp_status": "not_applicable_edge_upload",
+                "formal_dp_status": "packet_dp_observed",
+                "he_crypto_observed": bool(mechanism_uses_he(record["mechanism"]) and execute_real_he),
+                "he_execution": "real" if mechanism_uses_he(record["mechanism"]) and execute_real_he else "not_selected",
+                "dp_budget_ok": True,
+                "dp_event_observed": True,
+                "key_isolation_enforced": False,
+                "aggregate_only_decryption_enforced": False,
+                "mechanism": record["mechanism"],
+                "noise_location": "packet",
+            })
         for packet_index, (_diff, _samples, candidate, client_ids) in enumerate(cloud_updates):
             mechanism = _reported_release_mechanism(
                 candidate,
@@ -2680,7 +2786,14 @@ def _run_lenet5_policy(
                     update_dp_component_noise_norms,
                     default=0.0,
                 ),
-                "local_packet_dp_release_count": len(local_dp_pending_components),
+                "local_packet_dp_release_count": (
+                    len(local_dp_pending_components) + len(edge_only_dp_release_records)
+                ),
+                "edge_only_dp_release_count": len(edge_only_dp_release_records),
+                "edge_only_dp_noise_norm": (
+                    float(np.sqrt(np.sum(np.square(edge_only_dp_noise_norms))))
+                    if edge_only_dp_noise_norms else 0.0
+                ),
                 "local_packet_dp_released_noise_norm": local_dp_noise_norm,
                 "aggregate_dp_release": int(aggregate_dp_noise_share_count > 0),
                 "aggregate_dp_protocol": (
