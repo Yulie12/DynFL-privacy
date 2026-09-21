@@ -1779,8 +1779,8 @@ def test_paper_search_defaults_are_explicit() -> None:
     assert PRIVACY_ALPHA["he3"] == 8.04
 
 
-def test_dp_tiers_start_at_client_specific_minimum_feasible_noise() -> None:
-    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
+def test_dynamic_privacy_uses_only_client_specific_minimum_feasible_noise() -> None:
+    config = SelectionConfig(rounds=20)
     ledger = build_client_privacy_ledger(config)
     requirement = ExposurePrivacyRequirement(dp_required_links=frozenset({"L_C_upd"}))
     candidates = enumerate_candidates(
@@ -1790,15 +1790,14 @@ def test_dp_tiers_start_at_client_specific_minimum_feasible_noise() -> None:
         privacy_requirement=requirement,
     )
     dp = [c for c in candidates if c.mode == "LIIC" and c.update_dp_events > 0]
-    sigmas = sorted({round(float(c.update_noise_multiplier), 10) for c in dp})
-    assert len(sigmas) == 3
-    assert sigmas[1] == pytest.approx(sigmas[0] * 1.5, rel=1e-8)
-    assert sigmas[2] == pytest.approx(sigmas[0] * 1.5**2, rel=1e-8)
+    sigmas = {round(float(c.update_noise_multiplier), 10) for c in dp}
+    assert len(sigmas) == 1
+    sigma_min = ledger.minimum_feasible_update_noise(config.rounds)
+    assert next(iter(sigmas)) == pytest.approx(sigma_min, rel=1e-8)
     assert all(c.feasible_privacy for c in dp)
 
-
 def test_candidate_sigma_minimum_reserves_remaining_lifetime_horizon() -> None:
-    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
+    config = SelectionConfig(rounds=20)
     ledger = build_client_privacy_ledger(config)
     requirement = ExposurePrivacyRequirement(dp_required_links=frozenset({"L_C_upd"}))
     candidates = enumerate_candidates(
@@ -1818,7 +1817,7 @@ def test_candidate_sigma_minimum_reserves_remaining_lifetime_horizon() -> None:
 
 
 def test_remaining_budget_raises_next_round_sigma_minimum() -> None:
-    config = SelectionConfig(rounds=20, dp_tier_gamma=1.5, dp_tier_count=3)
+    config = SelectionConfig(rounds=20)
     ledger = build_client_privacy_ledger(config)
     first = ledger.minimum_feasible_update_noise(1)
     ledger.add(0, 1, update_noise_multiplier=first * 1.5)
@@ -1959,7 +1958,6 @@ def test_fixed_privacy_profile_locks_mechanism_and_dp_strength() -> None:
     config = SelectionConfig(
         rounds=20,
         update_mechanism_options=("dp", "he3", "dp_he3"),
-        dp_tier_count=3,
     )
     ledger = build_client_privacy_ledger(config)
     requirement = ExposurePrivacyRequirement(

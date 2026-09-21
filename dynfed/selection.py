@@ -115,8 +115,6 @@ class SelectionConfig:
     dp_update_epsilon_budget: float | None = None
     dp_feature_noise_multiplier: float | None = None
     dp_update_noise_multiplier: float | None = None
-    dp_tier_gamma: float = 1.5
-    dp_tier_count: int = 3
     client_heterogeneity: float = 2.0
     edge_heterogeneity: float = 1.5
     # Q86/Q87: optional staged Normal -> Constrained -> Normal resource scenario.
@@ -189,10 +187,6 @@ class SelectionConfig:
     mainline_fusion: bool = False
 
     def __post_init__(self) -> None:
-        if self.dp_tier_gamma < 1.0:
-            raise ValueError("dp_tier_gamma must be >= 1")
-        if self.dp_tier_count < 1:
-            raise ValueError("dp_tier_count must be >= 1")
         seen_fast_clients: set[int] = set()
         for client_id, deadline in self.fast_client_deadlines:
             if int(client_id) < 0:
@@ -762,10 +756,12 @@ def enumerate_candidates(
                     )
                 except ValueError:
                     continue
-                noise_tiers = tuple(
-                    sigma_min * (float(config.dp_tier_gamma) ** tier)
-                    for tier in range(int(config.dp_tier_count))
-                )
+                # Step44: lifetime-aware calibration already reserves the
+                # remaining candidate-level DP exposure horizon.  Enumerate
+                # only that minimum feasible sigma; larger multiplicative
+                # tiers add current distortion without expanding the current
+                # paper model's future privacy-feasible mode coverage.
+                noise_tiers = (float(sigma_min),)
             else:
                 noise_tiers = (
                     float(resolved_privacy_parameters(config)["update_noise_multiplier"]),
