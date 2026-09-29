@@ -1,5 +1,11 @@
 \documentclass[5p,times]{elsarticle}
 
+% YTT
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+\usepackage{xcolor}
+
+
 \usepackage{amsmath,amsfonts,amssymb}
 \usepackage{algorithm}
 \usepackage{algorithmic}
@@ -95,27 +101,19 @@
             country={China}}
 
 \begin{abstract}
-Hierarchical federated learning reduces direct cloud communication, but a fixed
-training workflow cannot accommodate heterogeneous devices and time-varying
-cloud-edge-end conditions. This paper studies dynamic collaboration
-reconfiguration for federated learning, where the execution and aggregation path
-is selected from seven cloud-edge-end collaboration modes according to the
-current system state. A mode first determines the transmitted objects and their
-communication paths; privacy protection is then assigned according to the
-resulting exposure rather than imposed through a common release topology.
-For cloud-facing model-update exposures, the framework combines homomorphic
-encryption for confidential aggregation with client-level differential privacy,
-whose noise multiplier is calibrated from the client's current privacy-accounting
-state over the remaining training horizon. Feasible global profiles are evaluated
-by system latency and an estimated convergence-error cost, filtered by Pareto
-dominance, and selected with an ideal-point Tchebycheff criterion. Experiments on
-CIFAR-10 with ResNet-18 and Fashion-MNIST with LeNet-5 examine the effects of
-dynamic collaboration and dynamic privacy calibration under heterogeneous
-resource and data conditions.
+Hierarchical federated learning reduces direct cloud communication, but a fixed training workflow cannot accommodate heterogeneous devices or changing cloud-edge-end conditions.
+ This paper studies dynamic collaboration reconfiguration for federated learning. 
+ The execution and aggregation path is selected from seven cloud-edge-end collaboration modes according to the current system state.
+ A mode first determines the objects to transmit and their communication paths. Privacy protection is then assigned according to the resulting risk.
+The noise multiplier is calibrated per client according to its accumulated privacy loss and the number of remaining training rounds, so that the privacy budget is consumed appropriately across the whole training process.
+Feasible global profiles are evaluated based on system latency and DP
+perturbation cost. They are then filtered by Pareto dominance and selected
+using the Chebyshev ideal point criterion. 
+Experiments on CIFAR-10 with ResNet-18 and on Fashion-MNIST with LeNet-5 examine the effects of dynamic collaboration and dynamic privacy calibration under heterogeneous resource and data conditions.
 \end{abstract}
 
-\begin{keyword}
-Internet of Things \sep hierarchical federated learning \sep cloud-edge-end collaboration \sep collaboration reconfiguration \sep differential privacy \sep device heterogeneity \sep resource constraints
+\begin{keyword} 
+Internet of Things \sep hierarchical federated learning \sep cloud-edge-end collaboration \sep dynamic collaboration reconfiguration \sep differential privacy \sep device heterogeneity \sep dynamic privacy calibration
 \end{keyword}
 
 \end{frontmatter}
@@ -126,63 +124,55 @@ without transferring their raw data to a central server~\cite{fedavg}. In AIoT
 systems, however, participating devices differ substantially in computation,
 memory, communication quality, and local data distribution. Cloud-edge-end
 hierarchical federated learning (HFL) introduces edge servers between end devices
-and the cloud, reducing long-distance communication and providing additional
-computation and aggregation capacity~\cite{hfl}.
+and the cloud, reducing communication over long distances and providing additional computation and aggregation capacity~\cite{hfl}.
 
-Two forms of heterogeneity make a fixed HFL procedure difficult to use across all
-clients and rounds. First, non-IID data can cause local updates to drift in
-different directions and can degrade simple weighted aggregation~\cite{fedavgm,fedprox}.
-Second, system capabilities are heterogeneous: a weak end device may be unable to
-execute the same model block or meet the same deadline as a stronger device,
+Two forms of heterogeneity make a fixed cloud-edge-end collaboration procedure
+difficult to use across all clients and rounds. First, non-IID data can cause
+local updates to drift in different directions and can degrade simple weighted
+aggregation~\cite{fedavgm,fedprox}.
+Second, system capabilities are heterogeneous. A weak end device may be unable
+to handle the same workload or meet the same deadline as a stronger device,
 whereas an edge or cloud server can undertake more computation~\cite{wang2019adaptivefl}.
-A collaboration path that is suitable for one client or one round may therefore
-be inefficient or infeasible for another.
+A mode that suits one client in one round may be inefficient or infeasible
+for the same client in another round, or for another client.
 
-Existing HFL studies address personalization, resource allocation, wireless
-scheduling, heterogeneous-model collaboration, and split execution from different
-perspectives~\cite{Personalizedhfl,JSJX202502007,wang2019adaptivefl,dinh2021wirelessfl,BSBODP,mazloomi2025multiserver,SFETEC}.
-Most of these methods nevertheless optimize a particular training procedure or a
-fixed hierarchy. In a cloud-edge-end system, the collaboration procedure itself
-is also a decision: computation can remain local, be split with an edge or the
-cloud, terminate at an edge aggregator, or continue from an edge to the cloud.
-These alternatives expose different transmitted objects and incur different
-latency and aggregation costs.
+Existing work on HFL and cloud-edge-end collaboration has covered personalization,
+resource allocation, wireless scheduling, heterogeneous models, and split
+training~\cite{Personalizedhfl,JSJX202502007,dinh2021wirelessfl,BSBODP,mazloomi2025multiserver,SFETEC}.
+However, most of these methods optimize a training workflow under a fixed
+hierarchy~\cite{wang2019adaptivefl}. In a cloud-edge-end system, a fixed hierarchy
+mismatches the actual condition of each round. A weak device may be assigned a
+task it cannot finish, while a strong edge server may sit idle.
 
-Privacy protection is coupled to this collaboration decision. Differential
-privacy (DP) controls the influence of a protected client contribution through
-clipping and randomization, while homomorphic encryption (HE) protects the
-confidentiality of encrypted contributions during aggregation. The two mechanisms
-serve different purposes and should not be treated as interchangeable privacy
-scores. Moreover, a collaboration mode does not carry one fixed privacy cost by
-itself. It first determines which objects cross which links; the resulting
-exposures determine which protection requirements apply. For the formal setting
-studied in this paper, lifetime DP accounting is applied to protected
-cloud-facing model-update releases, while HE is used where encrypted update
-aggregation is required. Raw training samples remain at the end devices.
+The collaboration mode determines what privacy protection is needed. Some updates are visible to the cloud and may reveal client information. Others are aggregated in encrypted form and must stay hidden from the aggregator. No single privacy mechanism fits all modes. We therefore use differential privacy (DP)~\textcolor{red}{[ref needed]}
+for updates visible to the cloud, homomorphic encryption (HE)~\textcolor{red}{[ref needed]}
+for encrypted aggregation, and keep raw training samples on end devices.
 
-The resulting problem couples system efficiency, learning quality, and privacy
-feasibility. Changing a collaboration mode changes computation placement,
-communication paths, aggregation timing, and the update exposures that may
-require protection. DP noise in turn affects the estimated convergence-error
-cost, while the accumulated privacy-accounting state constrains future protected
+This coupling creates a problem that involves system efficiency, learning
+quality, and privacy. Changing the collaboration mode affects where computation is executed, how updates travel, when aggregation happens, and which updates are visible to which party. These choices interact. DP noise directly affects the perturbation cost of protected model
+updates, while the remaining privacy budget limits future protected
 releases. Figure~\ref{fig:balance} illustrates this interaction.
 \begin{figure}[!t]
 \centering
 \includegraphics[width=0.78\columnwidth]{balance.png}
-\caption{Coupled tradeoff among privacy protection, training utility, and efficiency.}
+\caption{Tradeoff among privacy, utility, and efficiency.}
 \label{fig:balance}
 \end{figure}
 
-This paper studies round-wise reconfiguration of cloud-edge-end federated
-learning under heterogeneous resources and evolving privacy state. At each
-selection round, the system evaluates feasible collaboration and protection
-profiles under the current conditions rather than enforcing one collaboration
-workflow for all clients. The main contributions are summarized as follows.
+This paper studies reconfiguration of cloud-edge-end federated learning at each
+selection round under heterogeneous resources and evolving privacy state. For
+each client, the system evaluates feasible collaboration and protection profiles
+under current conditions rather than using one fixed workflow for all clients.
+The main contributions are as follows.
 \begin{itemize}
-    \item We formulate cloud-edge-end collaboration as a seven-mode execution space that includes edge-only, direct-cloud, and edge-to-cloud training and aggregation paths. The selected mode determines the actual communication and aggregation topology of the client in that round.
-    \item We model privacy from the resulting exposure. Mode-specific transmissions determine the protection requirements; cloud-facing update releases use distinct DP and HE roles, and dynamic DP uses a state-dependent, lifetime-aware minimum feasible noise calibration rather than discrete multiplicative noise tiers.
-    \item We jointly model system latency and estimated convergence-error cost for a global collaboration profile. Candidate-specific DP distortion enters the error-cost estimate, while resource and privacy requirements define hard feasibility conditions.
-    \item We solve the resulting two-objective reconfiguration problem with a bounded non-dominated Pareto archive and an ideal-point Tchebycheff criterion normalized over the current archive. The experimental design separately evaluates fixed and dynamic collaboration and privacy policies.
+    \item We define an execution space with seven cloud-edge-end collaboration modes,
+    including edge only, direct cloud, and edge to cloud training and aggregation
+    paths. Each client selects its own mode in each round, and the mode determines
+    its actual communication and aggregation topology.
+    \item We cast the selection as a multiobjective optimization that balances
+    system latency and DP perturbation under resource and privacy constraints. Experiments under
+    heterogeneous resource and data conditions show that dynamic collaboration and
+    dynamic privacy calibration outperform fixed policies.
 \end{itemize}
 
 \section{Related Work}
@@ -194,648 +184,788 @@ Personalized HFL further mitigates performance degradation under non-IID data th
 These methods show that HFL can improve training from resource scheduling, communication control, and data heterogeneity adaptation.
 However, when end device resources differ across computation, memory, and communication capabilities, using the same training flow for all clients can still cause straggler blocking in conventional synchronous aggregation and prevent weak devices from participating effectively.
 This paper jointly considers end device computation constraints, memory constraints, communication overhead, and model split positions during collaboration reconfiguration.
-Dynamic selection itself may also introduce reconfiguration overhead. Recent multi job FL studies explicitly model switching cost in client selection and reduce it through block wise selection, where the selected client subset is kept unchanged across multiple rounds~\cite{CHEN2026112204,10757319}. This observation motivates the use of a strategy update period in our framework. Collaborative modes are re evaluated only at update points, which limits unnecessary mode reconfiguration while preserving adaptability to resource and link changes.
+Dynamic selection improves flexibility, but reevaluating every round may incur
+excessive switching cost. Recent FL studies reduce this cost by keeping the
+selected client set unchanged over several rounds~\cite{CHEN2026112204,10757319}.
+Our framework introduces a strategy selection period parameter to control
+switching cost.
 
 \subsection{Cloud-Edge-End Collaborative Federated Learning}
-HFL is a representative form of cloud-edge-end collaborative FL, in which end devices, edge nodes, and the cloud jointly execute computation, aggregation, and communication tasks.
-As model size and system heterogeneity increase, fixed full end device training followed by edge aggregation becomes less suitable for resource limited IoT devices.
-FedAgg~\cite{BSBODP} uses bridge samples and online distillation to enable models of different scales at the end, edge, and cloud layers to collaborate.
-SFETEC~\cite{SFETEC} introduces split federated learning into Thing Edge Cloud environments and partitions model computation across layers to reduce end device computation load.
-Cloud-edge-end task offloading studies also combine FL, privacy protection, and task efficiency~\cite{dong2026privacyoffloading}.
-These studies show the value of collaboration among the three layers, but they usually assume a fixed collaboration structure.
-In contrast, this paper studies how each device should select a collaborative mode under given resource and privacy conditions.
-The need to balance reconfiguration gain and reconfiguration cost is also consistent with edge computing task migration studies. In mobile edge computing, migration can reduce service delay when users move away from the original edge server, but it also consumes backhaul transmission and reconfiguration resources~\cite{ZHANG2019111}. Load aware task migration further models migration cost as a combination of communication, queuing, and computation costs, and notes that migration cost can be related to physical distance between edge nodes~\cite{ZHU2024303}. These studies suggest that dynamic cloud-edge-end collaboration should account for both the benefit of changing execution paths and the overhead caused by such changes.
+
+HFL is a representative form of cloud-edge-end collaborative FL, in which end
+devices, edge nodes, and the cloud jointly execute computation, aggregation, and
+communication tasks.
+As model size and system heterogeneity increase, a fixed scheme where end
+devices train the full model and the edge aggregates the updates becomes less
+suitable for IoT devices with limited resources.
+FedAgg~\cite{BSBODP} uses bridge samples and online distillation to enable
+models of different scales at the end, edge, and cloud layers to collaborate.
+SFETEC~\cite{SFETEC} introduces split federated learning into Thing Edge Cloud
+environments and partitions model computation across layers to reduce the
+computation load of end devices.
+Cloud-edge-end task offloading studies also combine FL, privacy protection, and
+task efficiency~\cite{dong2026privacyoffloading}.
+These studies show the value of collaboration among the three layers, but they
+usually assume a fixed collaboration structure.
+In contrast, this paper studies how each device should select a collaborative
+mode under given resource and privacy conditions.
+
+The need to balance reconfiguration gain and reconfiguration cost is also
+consistent with edge computing task migration studies. In mobile edge computing,
+migration can reduce service delay when users move away from the original edge
+server, but it also consumes backhaul transmission and reconfiguration
+resources~\cite{ZHANG2019111}. Task migration that accounts for load further
+models migration cost as a combination of communication, queuing, and
+computation costs, and notes that migration cost can be related to the physical
+distance between edge nodes~\cite{ZHU2024303}. These studies suggest that
+dynamic cloud-edge-end collaboration should account for both the benefit of
+changing execution paths and the overhead caused by such changes.
 
 \subsection{Privacy Preserving HFL}
-Model parameters, gradients, and intermediate representations in federated training may leak information about private data.
-Differential privacy (DP), homomorphic encryption (HE), and secure aggregation are therefore widely used in FL.
-For HFL, group local DP provides personalized privacy through sampling, randomized response, and shuffling~\cite{GLDP}.
-Adaptive DP FL improves convergence and model utility through dynamic privacy budget allocation, adaptive clipping, and client selection~\cite{xu2025adpfl}.
-Other privacy preserving HFL studies combine client level DP, secure aggregation, and CKKS style HE for data space scenarios~\cite{PPHFL}. Related fog FL studies combine hierarchical aggregation, personalization, and DP for IoT intrusion detection~\cite{islam2025pphffl}.
-These studies mainly focus on the security guarantee, budget allocation, and accuracy degradation of a particular privacy mechanism.
-The joint modeling of privacy induced communication cost, computation latency,
-estimated convergence error cost, and cloud-edge-end collaboration reconfiguration remains
-insufficiently studied.
+Model parameters, gradients, and intermediate representations in federated
+training may leak information about private data.
+Differential privacy (DP), homomorphic encryption (HE), and secure aggregation
+are therefore widely used in FL.
+For HFL, group local DP provides personalized privacy through sampling,
+randomized response, and shuffling~\cite{GLDP}.
+Adaptive DP FL improves convergence and model utility through dynamic privacy
+budget allocation, adaptive clipping, and client selection~\cite{xu2025adpfl}.
+Other HFL studies with privacy protection combine per client differential
+privacy, secure aggregation, and HE based on CKKS for data sharing
+scenarios~\cite{PPHFL}.
+Related fog FL studies combine hierarchical aggregation, personalization, and DP
+for IoT intrusion detection~\cite{islam2025pphffl}.
+These studies mainly focus on the security guarantee, budget allocation, or
+accuracy degradation of a particular privacy mechanism.
+The joint modeling of privacy-induced communication overhead, computation
+latency, DP perturbation, and cloud-edge-end collaboration reconfiguration
+has not been sufficiently studied.
 
-\begin{table*}[t]
-\centering
-\caption{Representative Capability Comparison}
-\label{tab:capability_comparison}
-\small
-\setlength{\tabcolsep}{4pt}
-\begin{tabularx}{\textwidth}{@{}lXXXXX@{}}
-\hline
-\textbf{Method category} & \textbf{Execution placement} & \textbf{Aggregation topology} & \textbf{Transmitted objects} & \textbf{Privacy mechanisms} & \textbf{Joint reconfiguration} \\
-\hline
-Conventional HFL~\cite{hfl} & Fixed & Fixed hierarchy & Model update & Not a decision & No \\
-Resource aware FL~\cite{wang2019adaptivefl,dinh2021wirelessfl} & Fixed & Fixed & Model update & Not a decision & No \\
-Split cloud-edge-end FL~\cite{SFETEC} & Fixed split & Fixed & Feature, gradient, update & Not a decision & No \\
-Privacy preserving HFL~\cite{GLDP,PPHFL} & Fixed & Fixed & Mechanism specific & DP or HE in a fixed workflow & No \\
-Proposed framework & Adaptive & Adaptive & Feature, gradient, update & Joint DP and HE decision & Yes \\
-\hline
-\end{tabularx}
-\end{table*}
-
-The added capability is the joint reconfiguration of a complete federated
-learning workflow. Existing categories optimize selected resources, training
-steps, or privacy parameters within a prescribed collaboration structure. The
-proposed collaboration space instead makes complete workflows with different
-execution locations, aggregation paths, transmitted objects, and privacy
-mechanisms comparable under one feasible decision model.
-
+This paper jointly reconfigures the complete federated learning workflow.
+Existing categories optimize selected resources, training steps, or privacy
+parameters within a prescribed collaboration structure. The proposed
+collaboration space makes complete workflows with different execution
+locations, aggregation paths, transmitted objects, and privacy mechanisms
+comparable under one feasible decision model.
 \section{Model Construction}
 \label{sec:model}
-\subsection{Cloud-Edge-End Collaborative Link Modeling}
+\subsection{Collaborative Mode and Transmission Modeling}
 \label{sec:link_model}
-We consider a three-tier federated learning system composed of end devices,
-edge nodes, and one cloud node. Let \(\mathcal N\) denote the set of end devices.
-At round \(t\), an admitted device \(i\) executes one collaboration mode
-\(h_i^t\) from
+
+The proposed system is a cloud-edge-end collaborative federated learning architecture with end devices, edge nodes, and one cloud node. Let \(N\) be the number of end devices. Each admitted client \(i\) can execute its own mode \(h_i^t\) in communication round \(t\). This mode specifies the execution, communication, and aggregation path within the cloud-edge-end federated learning process.
+
+\textbf{Collaboration interfaces.}
+As shown in Fig.~\ref{fig:collaboration_graph}, we define three collaboration
+interfaces based on where communication occurs across tiers in the training process. Interface I supports split training, where the Local tier exchanges
+intermediate information with the Edge or Cloud tier during training.
+Interface II submits a model update to the Edge or Cloud for aggregation
+after a training stage. Interface III submits an aggregated Edge update to
+the Cloud after Edge aggregation.
+\begin{figure}[t]
+    \centering
+    \begin{tikzpicture}[
+        x=1cm,
+        y=1cm,
+        >={Stealth[length=1.8mm,width=1.3mm]},
+        tier/.style={
+            draw,
+            rectangle,
+            line width=0.65pt,
+            minimum width=1.65cm,
+            minimum height=0.60cm,
+            inner sep=2pt,
+            align=center,
+            font=\small
+        },
+        pathI/.style={<->,line width=0.70pt},
+        pathII/.style={->,line width=0.70pt},
+        pathIII/.style={
+            ->,
+            dashed,
+            dash pattern=on 3pt off 2pt,
+            line width=0.80pt
+        },
+        ilab/.style={
+            fill=white,
+            inner sep=1pt,
+            font=\small\bfseries
+        }
+    ]
+
+    % Tiers
+    \node[tier] (L) at (-2.55,0) {Local (\(L\))};
+    \node[tier] (E) at ( 2.55,0) {Edge (\(E\))};
+    \node[tier] (C) at ( 0,3.15) {Cloud (\(C\))};
+
+    % ---------------------------------------------------------
+    % Local -- Edge
+    % ---------------------------------------------------------
+    \draw[pathI]
+        ([yshift=1.7mm]L.east)
+        .. controls (-1.25,0.38) and (1.25,0.38) ..
+        node[midway, above=0.5mm, ilab] {I}
+        ([yshift=1.7mm]E.west);
+
+    \draw[pathII]
+        ([yshift=-1.7mm]L.east)
+        .. controls (-1.25,-0.38) and (1.25,-0.38) ..
+        node[midway, below=0.5mm, ilab] {II}
+        ([yshift=-1.7mm]E.west);
+
+    % ---------------------------------------------------------
+    % Local -- Cloud
+    % ---------------------------------------------------------
+    \draw[pathI]
+        ([xshift=-3.0mm]L.north)
+        to[bend left=5]
+        node[pos=0.50, left=0.8mm, ilab] {I}
+        ([yshift=1.5mm]C.west);
+
+    \draw[pathII]
+        ([xshift=3.0mm]L.north)
+        to[bend right=5]
+        node[pos=0.50, right=0.8mm, ilab] {II}
+        ([yshift=-1.5mm]C.west);
+
+    % ---------------------------------------------------------
+    % Edge -- Cloud
+    % ---------------------------------------------------------
+    \draw[pathII]
+        ([xshift=3.0mm]E.north)
+        to[bend right=5]
+        node[pos=0.51, right=0.8mm, ilab] {II}
+        ([yshift=1.5mm]C.east);
+
+    \draw[pathIII]
+        ([xshift=-3.0mm]E.north)
+        to[bend left=5]
+        node[pos=0.49, left=0.8mm, ilab] {III}
+        ([yshift=-1.5mm]C.east);
+
+    % ---------------------------------------------------------
+    % Interface meanings
+    % ---------------------------------------------------------
+    \node[
+        align=left,
+        font=\scriptsize,
+        anchor=north
+    ] at (0,-0.75) {
+        \textbf{I}: Split interaction
+        \qquad
+        \textbf{II}: Update submission
+        \qquad
+        \textbf{III}: After Edge aggregation
+    };
+
+    \end{tikzpicture}
+
+    \vspace{-0.15cm}
+    \caption{Collaboration interfaces and their physical positions in the
+    cloud-edge-end architecture.}
+    \label{fig:collaboration_graph}
+\end{figure}
+Following these interfaces, we define seven client level collaboration modes:
 \begin{equation}
-\mathcal H=\{\mathrm{LIE},\mathrm{LIIE},\mathrm{LIC},\mathrm{LIIC},
+\mathcal H=
+\{\mathrm{LIE},\mathrm{LIIE},\mathrm{LIC},\mathrm{LIIC},
 \mathrm{LIEIIC},\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
 \label{eq:seven_modes}
 \end{equation}
-All seven modes are executable candidates. A mode specifies where computation is
-performed, which objects are transmitted between the end, edge, and cloud
-layers, where aggregation occurs, and how the resulting model state is returned.
-Thus, the mode determines the physical information flow before a privacy
-mechanism is assigned.
+For example, LIE (\(L\)-I-\(E\)) splits the model between the Local and
+Edge tiers for split training. LIEIIC further submits the resulting Edge update to the Cloud through Interface II.
+LIEIIIC (\(L\)-I-\(E\)-III-\(C\)) extends LIE with repeated Edge
+aggregation stages before forwarding the Edge update to the Cloud.
 
-Given global model \(M^t\), a split mode may induce model blocks executed at the
-end, edge, and cloud, denoted by \(M_L^{h_i}\), \(M_E^{h_i}\), and
-\(M_C^{h_i}\), respectively. A local-update mode instead completes the local
-training step before transmitting an update to its aggregation layer. Raw
-training samples remain on the end device in every mode.
+Given the current model state \(M^t\), split modes execute the corresponding
+model blocks across tiers, denoted by \(M_L^{h_i}\), \(M_E^{h_i}\), and
+\(M_C^{h_i}\) when present. Local update modes instead complete the training
+stage at the end device before submitting a model update to the next
+aggregation tier. Raw training samples remain on the end device in every mode.
 
-\begin{definition}[Mode-induced transmission set]
-For device \(i\), round \(t\), and mode \(h\), let
+\subsubsection{Collaborative Link Blocks and Mode Flows}
+A collaborative link block represents the basic training unit performed by a
+client within one collaboration stage. We consider two types of blocks.
+A split training block \(S_{Lr}(L_B)\), \(r\in\{E,C\}\), performs \(L_B\) training steps jointly between the Local tier and tier \(r\) through split interaction. A local training block \(T_L(L_B)\) performs \(L_B\) training steps at the Local tier and produces a model update for subsequent aggregation. Thus \(L_B\) denotes the number of training steps within one collaborative link block.
+
+A collaborative link flow describes how the training blocks, update
+transmissions, and aggregation stages are connected under a collaboration
+mode. Let \(A_E\) and \(A_C\) denote aggregation at the Edge and Cloud,
+respectively. For hierarchical modes, \(E_B\) denotes the number of repeated
+Edge stages before the Edge update is submitted to the Cloud.
+
+With these definitions, the seven mode flows are
 \begin{equation}
-\mathcal X_i^t(h)=\{(u,v,b,n):\text{mode }h\text{ sends object }b
-\text{ from }u\text{ to }v\text{ }n\text{ times}\},
+\begin{aligned}
+\mathrm{LIE}:~~&
+S_{LE}(L_B) \rightarrow A_E,\\
+\mathrm{LIIE}:~~&
+T_L(L_B) \xrightarrow{L\to E:\mathrm{upd}} A_E,\\
+\mathrm{LIC}:~~&
+S_{LC}(L_B) \rightarrow A_C,\\
+\mathrm{LIIC}:~~&
+T_L(L_B) \xrightarrow{L\to C:\mathrm{upd}} A_C,\\
+\mathrm{LIEIIC}:~~&
+S_{LE}(L_B)
+\xrightarrow{E\to C:\mathrm{upd}} A_C,\\
+\mathrm{LIEIIIC}:~~&
+\bigl[S_{LE}(L_B)\rightarrow A_E\bigr]^{E_B}
+\xrightarrow{E\to C:\mathrm{upd}} A_C,\\
+\mathrm{LIIEIIIC}:~~&
+\bigl[
+T_L(L_B)
+\xrightarrow{L\to E:\mathrm{upd}} A_E
+\bigr]^{E_B}
+\xrightarrow{E\to C:\mathrm{upd}} A_C .
+\end{aligned}
+\label{eq:mode_flows}
 \end{equation}
-where \(u,v\in\{L,E,C\}\) and
-\(b\in\{\mathrm{emb},\mathrm{logits},\mathrm{grad},\mathrm{emb\_grad},\mathrm{upd}\}\).
-The set records the communication/exposure topology used by the cost and
-protection models. Model-return transmissions are included in the physical flow
-but do not by themselves create a DP release.
-\end{definition}
+Figure~\ref{fig:eecblockflow} illustrates the execution structure of the seven collaboration modes, with each subfigure showing one mode.
+Orange links represent collaborative link block execution, with each block containing \(L_B\) training steps.
+Green links represent execution at the Edge stage in hierarchical modes. This execution is repeated \(E_B\) times before the resulting Edge update is forwarded to the Cloud.
+Black self loops represent the final aggregation at the corresponding aggregation node. Black arrows represent update forwarding and model return paths among end devices, Edge nodes, and the Cloud. These flows determine the structure of the directed payload transmissions \(\mathcal X_i^t(h)\) presented below.
 
-The seven modes have the following physical meanings. LIE performs split
-training between the end and edge and terminates its aggregation path at the
-edge. LIIE trains locally and submits an update to the edge. LIC performs split
-training directly between the end and cloud. LIIC trains locally and submits an
-update directly to the cloud. LIEIIC performs end-edge split training and then
-submits the edge-side update to the cloud. LIEIIIC repeats the end-edge split
-stage before the edge update is submitted to the cloud, while LIIEIIIC repeats
-the local-update/edge stage before the edge update is submitted to the cloud.
-In the current implementation, the two repeated-stage modes use
-\(E_B=3\) edge-stage loops.
-
-\begin{table*}[t]
-\centering
-\caption{Cloud-Edge-End Collaboration Modes}
-\label{tab:collaboration_modes}
-\small
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{llll}
-\hline
-\textbf{Mode} & \textbf{Primary training path} & \textbf{Aggregation path} & \textbf{Cloud-facing update exposure} \\
-\hline
-LIE & End--Edge split & Edge & No \\
-LIIE & Local training & Edge & No \\
-LIC & End--Cloud split & Cloud & No model-update upload \\
-LIIC & Local training & Cloud & \(L\!\rightarrow\!C:\mathrm{upd}\) \\
-LIEIIC & End--Edge split & Edge then Cloud & \(E\!\rightarrow\!C:\mathrm{upd}\) \\
-LIEIIIC & Repeated End--Edge split & Edge then Cloud & \(E\!\rightarrow\!C:\mathrm{upd}\) \\
-LIIEIIIC & Repeated local/Edge stage & Edge then Cloud & \(E\!\rightarrow\!C:\mathrm{upd}\) \\
-\hline
-\end{tabular}
-\end{table*}
-
-For compatibility with the link-level latency model, define the transmission
-indicator
-\begin{equation}
-\mathbf I_b^h(u,v)=
-\begin{cases}
-1,&\text{if }\mathcal X_i^t(h)\text{ contains a transmission of }b\text{ from }u\text{ to }v,\\
-0,&\text{otherwise}.
-\end{cases}
-\end{equation}
-The indicator states only whether the physical transmission exists; it does not
-assign one fixed privacy mechanism to the mode.
-
-After \(\mathcal X_i^t(h)\) is known, the privacy requirement determines the
-protection map \(\pi_i^t\). In the formal paper profile, lifetime DP accounting is
-update-level: cloud-facing update links that require formal protection are
-\(L\!\rightarrow\!C:\mathrm{upd}\) and \(E\!\rightarrow\!C:\mathrm{upd}\).
-These protected update exposures require DP calibration and encrypted
-aggregation, whereas feature/gradient transmissions are not counted as formal
-lifetime DP events in the current implementation. DP and HE therefore have
-distinct roles: DP controls privacy loss of the calibrated update release, while
-HE protects update confidentiality during the required encrypted aggregation.
-The detailed calibration and accounting rules are introduced in the privacy
-subsection.
-
-The link graphs in \figref{fig:eecblockflow} illustrate the seven physical mode
-templates. Unlike a common release overlay, these paths are executed according
-to the selected mode itself; an edge-only mode remains edge-only, while a
-cloud-reaching mode follows its corresponding direct or edge-to-cloud path.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{eecblockflow.png}
-\caption{Cloud-edge-end collaborative link graphs of the seven collaborative modes.}
+\caption{Execution structures of the seven collaboration modes in the cloud-edge-end architecture.}
 \label{fig:eecblockflow}
 \end{figure*}
 
-\subsection{Joint Cost and Utility Modeling}
-\label{sec:cost_utility_model}
-After the link topology is determined, a mode determines the transmissions that are physically exposed in the current round. The protection map is then generated from those exposures and the client privacy requirement. Thus, mode generation precedes mechanism assignment, while the resulting mode--protection candidate is evaluated jointly.
-The selected mode must satisfy the computation and memory limits of the end device, and every protected exposure must satisfy its mechanism and lifetime privacy constraints. The joint candidate profile then determines the system-level latency and estimated convergence-error cost.
-The modeling below is organized in five parts: end-side resource feasibility, path-level latency, buffered aggregation cost, exposure-specific privacy feasibility, and convergence-error cost estimation.
-
-\subsubsection{End Side Resource Feasibility}
-Let \(n_i\) be the number of local samples processed by device \(i\) in one round, and let \(L_B\) be the number of local link block iterations.
-Under mode \(h_i\), \(\chi(h_i)\) denotes the profiled computation workload required by the end layer to process one sample.
-The subscript \(L\) denotes the local end device layer.
-The single round local computation workload is
-\(W_{i,L}^{\mathrm{comp}}(h_i)=L_Bn_i\chi(h_i)\).
-
-The value of \(\chi(h_i)\) depends on the model blocks assigned to the end device and is obtained through offline profiling.
-When detailed operator level profiling is unavailable, it is approximated as
-\(\chi(h_i)\approx\kappa_cm_i(h_i)\), where \(m_i(h_i)\) is the parameter
-scale assigned to device \(i\), and \(\kappa_c\) is a calibrated conversion
-coefficient.
-This provides a lightweight complexity estimate for candidate mode screening and is in line with resource aware FL latency models~\cite{zhou2023joint}.
-
-Let \(F_i\) denote the effective computing rate of device \(i\). The end side
-computation latency is
-\(T_{i,L}^{\mathrm{comp}}(h_i)=W_{i,L}^{\mathrm{comp}}(h_i)/F_i\).
-This follows the common wireless FL latency model, where local computation time depends on local iterations, local data size, per sample computation workload, and device computing rate.
-Given the maximum allowable computation time \(\tau_i^{\max}\), the
-computation budget is \(Q_{\mathrm{comp},i}=F_i\tau_i^{\max}\).
-
-The memory requirement under mode \(h_i\) is
-\(M_i^{\mathrm{mem}}(h_i)=s_{\mathrm{state}}m_i(h_i)+a_i(h_i)\).
-This model follows the common separation between parameter related model states and residual training memory~\cite{3433701.3433727}.
-Here, \(s_{\mathrm{state}}\) is the profiled per parameter model state memory coefficient, covering parameters, gradients, optimizer states such as Adam momentum and variance, and other persistent training states such as mixed precision parameter copies.
-The term \(a_i(h_i)\) denotes residual memory that is not captured by the parameter scale, including activations and temporary training buffers.
-
-Let \(Q_{\mathrm{mem},i}\) denote the available memory of device \(i\).
-The resource feasible mode set is
+\subsubsection{Mode Induced Transmission and Protection}
+\begin{definition}[Transmission set induced by a mode]
+For device \(i\), round \(t\), and collaboration mode \(h\), define
 \begin{equation}
-    \mathcal{H}_i^{\mathrm{res}}=
-    \{h_i\in\mathcal{H}\mid
-    W_{i,L}^{\mathrm{comp}}(h_i)\le Q_{\mathrm{comp},i},
-    M_i^{\mathrm{mem}}(h_i)\le Q_{\mathrm{mem},i}\}.
-\label{eq:resource_feasible}
-\end{equation}
-
-\subsubsection{Path Level Latency}
-We first define the general link and path latency terms. A representative complete path is then illustrated in \figref{fig:time}.
-Let \(R^t=(R_{u,v}^t)_{u,v\in\mathcal{V}}\) be the cloud-edge-end link rate matrix in round \(t\).
-The communication model is link specific. For an end edge pair \((i,j)\), the rate \(R_{i,j}^{t}\) and the base latency \(T_{i,j}^{0}\) may differ from those of other device edge pairs. These parameters capture heterogeneous physical distance, wireless channel quality, interference, and congestion. Therefore, two end devices connected to the same edge server can have different communication latencies, and the same device connected to different edge servers can also experience different communication latencies~\cite{ZHANG2019111,ZHU2024303}.
-For an interaction link \(\lambda=(u,v,b)\), its raw transmission size is \(S_{\lambda}^t(h_i)\).
-Let \(\psi_{\lambda}(h_i,\pi_i)\) denote the actual protection/transport mechanism on link \(\lambda\) under mode \(h_i\). The map \(\pi_i\) is generated only after the mode-specific transmissions and their protection requirements are known. It uses \(\mathrm{none}\) for links that do not require protection, including model-return links in the current paper profile.
-\begin{equation}
-\psi_{\lambda}(h_i,\pi_i)=
-\begin{cases}
-\pi_i(\lambda), & \lambda\in\mathcal{E}_{\mathrm{priv}}^{h_i},\\
-\mathrm{none}, & \lambda\notin\mathcal{E}_{\mathrm{priv}}^{h_i}.
-\end{cases}
-\end{equation}
-Thus, a model return link uses \(\mathrm{none}\) even when its object type is
-\(\mathrm{upd}\). The effective transmission size is
-\(\widetilde{S}_{\lambda}^t(h_i,\pi_i)=
-\alpha(\psi_{\lambda}(h_i,\pi_i))S_{\lambda}^t(h_i)\), where
-\(\alpha(\cdot)\) is the communication inflation factor induced by the
-fixed induced protection mechanism.
-For \(\mathrm{none}\), \(\alpha(\mathrm{none})=1\).
-For DP, \(\alpha(\mathrm{DP})\approx 1\). For HE, ciphertext encoding and packing increase the transmitted payload, so \(\alpha(\mathrm{HE})>1\)~\cite{PPHFL}.
-In practice, \(\alpha(\mathrm{HE})\) can be obtained by offline profiling as the ratio between the serialized ciphertext payload size and the original plaintext tensor size.
-The communication latency is
-\begin{equation}
-T_{\lambda}^{\mathrm{link},t}(h_i,\pi_i)
+\mathcal X_i^t(h)
 =
-\frac{\widetilde{S}_{\lambda}^t(h_i,\pi_i)}
-{R_{\lambda}^{t}}
-+D_{\lambda}^{0}+T_{\lambda}^{\mathrm{priv},t}(\psi_{\lambda}(h_i,\pi_i)),
-\label{eq:comm_latency}
+\left\{
+(u,v,b,n)
+\;\middle|\;
+(u,v,b)\text{ occurs }n\text{ times under }h
+\right\}.
+\label{eq:transmission_set}
 \end{equation}
-where \(R_{\lambda}^{t}=R_{u,v}^{t}\) for \(\lambda=(u,v,b)\), \(D_{\lambda}^{0}\) is the fixed base delay, and \(T_{\lambda}^{\mathrm{priv},t}\) is the link endpoint privacy processing latency. For \(\mathrm{none}\), \(T_{\lambda}^{\mathrm{priv},t}(\mathrm{none})=0\). Round level network fluctuation is represented by the time varying link rate \(R_{u,v}^{t}\).
+Here \(u,v\in\{L,E,C\}\), \(b\in\mathcal B\), and \(n\) is the multiplicity of the directed transmission in one complete mode flow.
+The payload set is
+\begin{equation*}
+\mathcal B=
+\{\mathrm{emb},\mathrm{logits},\mathrm{grad},
+\mathrm{emb\_grad},\mathrm{upd}\}.
+\end{equation*}
+The five payload types have the following meanings.
+\(\mathrm{emb}\) is the intermediate representation produced by the local model block.
+\(\mathrm{logits}\) is the prediction output returned by the remote model block.
+\(\mathrm{grad}\) is the loss gradient with respect to the returned logits.
+\(\mathrm{emb\_grad}\) is the gradient with respect to the transmitted embedding.
+\(\mathrm{upd}\) is a model update used for aggregation or model state synchronization.
+Thus \(\mathcal X_i^t(h)\) describes the physical communication events induced by mode \(h\).
+\end{definition}
+The transmission set \(\mathcal X_i^t(h)\) identifies the directed payload transmissions to which the protection requirements are applied. For each such transmission, define the protection map
+\[
+\pi_i^{t,h}(u,v,b)
+\in
+\{\mathrm{none},\mathrm{HE},\mathrm{DP},\mathrm{HE{+}DP}\},
+\]
+where \(\mathrm{none}\) denotes plaintext transmission, while \(\mathrm{HE}\), \(\mathrm{DP}\), and \(\mathrm{HE{+}DP}\) denote homomorphic encryption, differential privacy, and their combination, respectively. The value of \(\pi_i^{t,h}(u,v,b)\) is determined by the protection requirement associated with the corresponding transmission. Thus \(\pi_i^{t,h}\) is induced by the candidate mode \(h\) and its transmission requirements rather than being an independent decision variable.
 
-Using this link level term, the path level link flow latency of end device \(i\), denoted by \(T_i^t(h_i,\pi_i)\), is decomposed into execution, communication, waiting, aggregation, and switching components.
+Among these transmissions, those assigned a mechanism that uses DP generate formal privacy accounting events. These events are defined in the next subsection.
 
-The transmission indicator matrices build the communication part of the link
-flow as \(\mathcal{E}_{\mathrm{flow}}^{h_i}=
-\{\lambda=(u,v,b)\mid b\in\mathcal{B},\
-\mathbf{I}_{b}^{h_i}(u,v)=1\}\).
-Thus, nonzero entries in \(\mathbf{I}_{b}^{h_i}\) identify the communication links induced by mode \(h_i\).
-The subset \(\mathcal{E}_{\mathrm{priv}}^{h_i}\) contains the links in \(\mathcal{E}_{\mathrm{flow}}^{h_i}\) that require privacy protection.
-Let \(N_{\lambda}(h_i)\) be the number of times link \(\lambda\) is executed in one complete link flow.
-For a link executed inside a local link block, \(N_{\lambda}(h_i)=L_B\).
-If the local link block is nested inside an edge aggregation loop, the count becomes \(N_{\lambda}(h_i)=L_BE_B\).
-For links executed once per edge aggregation loop, \(N_{\lambda}(h_i)=E_B\).
-For final aggregation upload and model return links outside repeated loops, \(N_{\lambda}(h_i)=1\).
-The path level latency is decomposed as
-\begin{equation}
-\begin{aligned}
-T_i^t(h_i,\pi_i)
-&=T_i^{\mathrm{exec},t}(h_i)
-+\sum_{\lambda\in\mathcal{E}_{\mathrm{flow}}^{h_i}}
-N_{\lambda}(h_i)T_{\lambda}^{\mathrm{link},t}(h_i,\pi_i)\\
-&\quad +T_i^{\mathrm{wait},t}(h_i)
-+T_i^{\mathrm{agg},t}(h_i,\pi_i)
-+T_i^{\mathrm{sw},t}.
-\end{aligned}
-\label{eq:latency_model}
-\end{equation}
-Here, \(T_i^{\mathrm{exec},t}\) denotes only the computation latency of the submodels executed at the end, edge, and cloud layers.
-It is coupled with the selected link flow through \(h_i\), but it does not include cross layer transmission delay. That delay is accounted for separately by the summation of \(T_{\lambda}^{\mathrm{link},t}\) over \(\mathcal{E}_{\mathrm{flow}}^{h_i}\).
-\(T_i^{\mathrm{wait},t}\) denotes the waiting latency before upper layer aggregation is triggered, and \(T_i^{\mathrm{agg},t}\) denotes the aggregation latency assigned to the link flow.
-Changing the collaborative mode may require execution path rescheduling and model state movement, similar to task migration and switching cost modeling in edge computing and wireless FL~\cite{ZHANG2019111,ZHU2024303,CHEN2026112204,10757319,li2026latency}.
-The term \(T_i^{\mathrm{sw},t}\) denotes this mode reconfiguration latency in round \(t\), and we model it as
-\begin{equation}
-T_i^{\mathrm{sw},t}
-=\eta_h \mathbb{I}(h_i^t\neq h_i^{t-1})
-+\eta_p
-\frac{\|\mathbf{p}(h_i^t)-\mathbf{p}(h_i^{t-1})\|_1}{2},
-\label{eq:switching_cost}
-\end{equation}
-where \(\eta_h\ge 0\) is the fixed time cost incurred when the selected collaborative mode changes, similar to the unit switching cost used in dynamic FL client selection~\cite{CHEN2026112204}.
-\(\eta_p\ge 0\) is the maximum variable time cost associated with model state placement change, motivated by edge service migration models where migration cost is proportional to the migrated service state size~\cite{li2026latency}.
-Both coefficients are configurable or profile based system parameters.
-To quantify the placement-change term in \(T_i^{\mathrm{sw},t}\), we define the normalized model state placement vector of mode \(h\) as
-\begin{equation}
-\mathbf{p}(h)=
-\frac{1}{Z_h}
-\left[
-\lvert M_L^h\rvert,
-\lvert M_E^h\rvert,
-\lvert M_C^h\rvert
-\right],
-\label{eq:model_placement_vector}
-\end{equation}
-where \(Z_h=\lvert M_L^h\rvert+\lvert M_E^h\rvert+\lvert M_C^h\rvert\). \(M_L^h\), \(M_E^h\), and \(M_C^h\) are the model state portions placed at the end, edge, and cloud layers under mode \(h\), respectively, and \(\lvert\cdot\rvert\) denotes profiled model state size. This normalization gives \(\mathbf{1}^{\top}\mathbf{p}(h)=1\), so \(\|\mathbf{p}(h_i^t)-\mathbf{p}(h_i^{t-1})\|_1/2\in[0,1]\). The normalized distance estimates the fraction of model state whose placement changes between two consecutive selected modes.
-
-\subsubsection{Buffered Aggregation Cost}
-This subsection specifies the waiting and aggregation terms used in the path latency model under buffered aggregation.
-To mitigate synchronization blocking caused by slow devices, aggregation is
-triggered after the required number of updates has arrived.
-For edge aggregator \(j\), let \(N_j\) be the number of associated end devices and \(\rho_{\mathrm{buf}}\in(0,1]\) be the buffered aggregation participation threshold.
-The number of clients needed to trigger aggregation is \(K_j=\lceil\rho_{\mathrm{buf}} N_j\rceil\).
-Let \(T_i^{\mathrm{lupd}}\) be the time needed for device \(i\) to complete the collaborative update process before upload.
-Let \(T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)\) denote the communication latency of the update upload from device \(i\) to edge aggregator \(j\), obtained from \(T_{\lambda}^{\mathrm{link},t}\) for the corresponding link \(\lambda=(i,j,\mathrm{upd})\).
-The arrival time at edge \(j\) is
-\(x_{i,j}^t=T_i^{\mathrm{lupd}}(h_i,\pi_i)+
-T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)\).
-Sorting arrival times as \(x_{(1),j}^t\le\cdots\le x_{(N_j),j}^t\), let
-\(S_j^t(\mathbf x)=\{i_{(1)},\ldots,i_{(K_j)}\}\) be the first \(K_j\) arrived clients
-selected into the buffered aggregation. The edge aggregation starts at
-\(X_j^t(\mathbf x)=x_{(K_j),j}^t=\max_{i\in S_j^t(\mathbf x)}x_{i,j}^t\), and client \(i\) waits
-\(W_{i,j}^{\mathrm{agg},t}=\max(0,X_j^t(\mathbf x)-x_{i,j}^t)\).
-If multiple updates arrive exactly at the trigger time \(X_j^t(\mathbf x)=x_{(K_j),j}^t\), all tied updates are admitted, so \(\lvert S_j^t(\mathbf x)\rvert\) may exceed \(K_j\).
-The edge aggregation time is
-\(T_j^{\mathrm{agg},t}=\beta_j\sum_{i\in S_j^t(\mathbf x)}
-\widetilde{S}_{i,j}^{\mathrm{upd},t}+T_j^{\mathrm{fix}}\), where \(\beta_j\)
-is the aggregation processing coefficient of edge aggregator \(j\). For the
-update upload link \(\lambda=(i,j,\mathrm{upd})\),
-\(\widetilde{S}_{i,j}^{\mathrm{upd},t}=\widetilde{S}_{\lambda}^t(h_i,\pi_i)\),
-i.e., the effective payload size of client \(i\)'s update received by edge
-aggregator \(j\) after the selected protection mechanism is applied. The
-coefficient \(\beta_j\) can be obtained by offline profiling with varying
-update counts and payload sizes, and \(T_j^{\mathrm{fix}}\) denotes the fixed
-aggregation overhead. Protection processing, including HE encryption/decryption overhead on protected update paths, is accounted for in the
-link endpoint term \(T_{\lambda}^{\mathrm{priv},t}\).
-
-The same construction is applied to every aggregation group induced by a
-complete candidate profile
-\(\mathbf x=\mathbf h_{\mathcal N}\). The protection map is generated from each selected mode and its exposure requirements. Clients are grouped by their
-selected aggregation endpoint and compatible link flow. Each edge buffer
-admits its earliest required arrivals. An admitted edge aggregate that reaches
-the cloud then becomes a cloud arrival, and the cloud buffer applies the same
-rule to its incoming client or edge objects. Let \(A_i^t(\mathbf x)\) denote
-the source clients admitted to the buffer associated with client \(i\)'s
-selected path under profile \(\mathbf x\), and let
-\(A^t(\mathbf x)=\bigcup_i A_i^t(\mathbf x)\) be the complete admitted client
-set. The system latency \(T_{\mathrm{sys}}^t(\mathbf x)\) is the latest
-completion time of the triggered terminal aggregation and model return events.
-The link rates, resource state, topology, and previous profile are fixed during
-one evaluation, while \(\mathbf x\) determines the path choices and arrival
-times. Therefore, every candidate profile produces its own
-\(A_i^t(\mathbf x)\) and \(T_{\mathrm{sys}}^t(\mathbf x)\). When
-\(\rho_{\mathrm{buf}}=1\), every active buffer waits for all its members and
-the same procedure reduces to full admission.
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{time.png}
-\caption{Path level link flow latency decomposition for an end device in cloud-edge-end collaborative FL.}
-\label{fig:time}
-\end{figure}
-
-Fig.~\ref{fig:time} illustrates how the general latency decomposition in \equref{eq:latency_model} is instantiated in a representative complete end-edge-cloud link flow.
-The directional communication terms in the figure, such as \(T_{i,j}^{\mathrm{comm},t}\), \(T_{j\rightarrow c}^{\mathrm{comm},t}\), \(T_{c\rightarrow j}^{\mathrm{comm},t}\), and \(T_{j\rightarrow i}^{\mathrm{comm},t}\), are shorthand instances of \(T_{\lambda}^{\mathrm{link},t}\) for the corresponding directed links and transmitted objects.
-Marker \textcircled{1} denotes the local model training time of the end device, corresponding to \(T_i^{\mathrm{lupd}}(h_i,\pi_i)\).
-Marker \textcircled{2} denotes the communication time for uploading the transmission object of the selected link flow to the associated edge server, corresponding to \(T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)\). The transmission object is determined by \(b\in\mathcal{B}\).
-Marker \textcircled{3} denotes the waiting time after the upload is completed and before the edge server starts aggregation, corresponding to \(W_{i,j}^{\mathrm{agg},t}\).
-Marker \textcircled{4} denotes the arrival time \(x_{i,j}^{t}\) at the edge server.
-Marker \textcircled{5} denotes the start time \(X_j^{t}(\mathbf x)\) of local edge aggregation, which is determined by the latest arrival among the selected buffered aggregation set \(S_j^t(\mathbf x)\).
-Marker \textcircled{6} denotes the edge aggregation time, corresponding to \(T_j^{\mathrm{agg},t}\).
-Marker \textcircled{7} denotes the communication time for uploading the edge aggregated model to the cloud server, corresponding to \(T_{j\rightarrow c}^{\mathrm{comm},t}\).
-Marker \textcircled{8} denotes the waiting time after the edge server completes uploading and before the cloud server starts global aggregation, corresponding to \(W_{j,c}^{\mathrm{agg},t}\).
-Marker \textcircled{9} denotes the cloud global aggregation and model return stage, including the cloud aggregation time \(T_c^{\mathrm{agg},t}\) and the cloud to edge download time \(T_{c\rightarrow j}^{\mathrm{comm},t}\).
-Marker \textcircled{10} denotes the communication time for returning the updated global model from the edge server to the end device, corresponding to \(T_{j\rightarrow i}^{\mathrm{comm},t}\).
-
-For this representative path, \(T_i^t(h_i,\pi_i)\) can be expanded as
-\begin{equation}
-\begin{aligned}
-T_i^t(h_i,\pi_i)
-=&\;
-T_i^{\mathrm{lupd}}(h_i,\pi_i)
-+T_{i,j}^{\mathrm{comm},t}(h_i,\pi_i)
-+W_{i,j}^{\mathrm{agg},t}
-+T_j^{\mathrm{agg},t}\\
-&+T_{j\rightarrow c}^{\mathrm{comm},t}
-+W_{j,c}^{\mathrm{agg},t}
-+T_c^{\mathrm{agg},t}
-+T_{c\rightarrow j}^{\mathrm{comm},t}
-+T_{j\rightarrow i}^{\mathrm{comm},t}.
-\end{aligned}
-\label{eq:path_total_latency}
-\end{equation}
-The expanded form is shown only for the representative path in \figref{fig:time}. For any selected mode \(h_i\), \(T_i^t(h_i,\pi_i)\) accumulates the terms on the complete link flow induced by that mode, including the model return required to prepare the device for the next round.
-
-\subsubsection{Exposure-Specific Privacy Protection and Lifetime Accounting}
+\subsection{Lifetime Privacy Accounting}
 \label{sec:privacy_model}
-The privacy mechanism is assigned to the transmissions created by a candidate mode rather than to a mode label itself. For client $i$ in round $t$, let
-\begin{equation}
-\mathcal X_i^t(h)=\{(\lambda,b,N_\lambda(h))\}
-\label{eq:mode_exposure_set}
-\end{equation}
-denote the mode-specific transmission set, where $\lambda$ is a directed link, $b\in\mathcal B$ is the transmitted object, and $N_\lambda(h)$ is its execution count. A client requirement specifies which members of $\mathcal X_i^t(h)$ forbid plaintext transmission and which require DP. The protection map $\pi_i^t$ is legal only when every exposed link satisfies these requirements.
 
-The current paper profile protects model updates exposed to the Cloud. In particular, the update links $L\!\rightarrow\!C$ and $E\!\rightarrow\!C$ require both confidentiality and DP. Therefore, their legal protection uses HE for encrypted aggregation and DP for calibrated randomization. Feature and gradient transmissions are allowed in plaintext in the current profile and do not enter the formal lifetime DP accountant. Returned models are also not treated as new DP events. This separation is important: HE protects the confidentiality of protected update contributions during aggregation, whereas DP controls the privacy loss of a calibrated release. One mechanism does not substitute for the other.
-
-Let $\mathcal D_i^t(h)\subseteq\mathcal X_i^t(h)$ denote the update exposures that require DP, and let
+The privacy cost of a collaboration mode depends on the update
+transmissions that use DP protection. For candidate mode \(h_i\), we define
 \begin{equation}
-n_{i,h}^{t,\mathrm{upd}}
-=\sum_{x\in\mathcal D_i^t(h)}N_x(h)
-\label{eq:update_dp_event_count}
+\begin{aligned}
+\mathcal D_i^t(h)
+=
+\bigl\{
+&(u,v,b,n)\in\mathcal X_i^t(h)
+\;\bigm|\;
+b=\mathrm{upd},\\
+&\pi_i^{t,h}(u,v,b)
+\in\{\mathrm{DP},\mathrm{HE{+}DP}\}
+\bigr\}.
+\end{aligned}
+\label{eq:dp_exposures}
 \end{equation}
-be the number of protected update events generated by one execution of candidate mode $h$. For the current paper profile, modes without a Cloud-facing update have $n_{i,h}^{t,\mathrm{upd}}=0$, while a Cloud-facing update path contributes the corresponding protected event count.
+Thus, \(\mathcal D_i^t(h)\) contains the DP protected update
+transmissions of device \(i\) under mode \(h\).
 
-We maintain a client-level RDP ledger $R_{i,\mathrm{upd}}^t(\alpha)$ for the protected update events. For a Gaussian event with noise multiplier $\sigma$, the accountant adds
+For each client, we use R\'enyi differential privacy (RDP)
+accounting~\cite{mironov2017renyi,wang2019subsampled} to accumulate the
+privacy cost of these events across training rounds. Let
+\(\mathcal A\) denote the set of R\'enyi orders used by the accountant.
+For a Gaussian DP event with noise multiplier \(\sigma\), its RDP cost at
+order \(\alpha\in\mathcal A\) is
 \begin{equation}
-\Delta R_{\mathrm{upd}}(\alpha;\sigma)=\frac{\alpha}{2\sigma^2},
-\label{eq:privacy_budget}
+\rho(\alpha,\sigma)
+=
+\frac{\alpha}{2\sigma^2}.
+\label{eq:rdp_event_cost}
 \end{equation}
-and converts the accumulated RDP state to $(\epsilon,\delta_{\mathrm{upd}})$ through
+A larger noise multiplier therefore results in a smaller RDP cost for the
+released update.
+
+Let \(\Phi_i^t(\alpha)\) denote the accumulated RDP cost of device \(i\)
+at the beginning of round \(t\). If \(m_i^t\) DP events are released in
+round \(t\), with noise multipliers
+\(\sigma_{i,1}^t,\ldots,\sigma_{i,m_i^t}^t\), the privacy state is updated
+by
 \begin{equation}
-\epsilon_{i,\mathrm{upd}}^t
-=\min_{\alpha>1}\left[
-R_{i,\mathrm{upd}}^t(\alpha)
-+\frac{\log(1/\delta_{\mathrm{upd}})}{\alpha-1}
+\Phi_i^{t+1}(\alpha)
+=
+\Phi_i^t(\alpha)
++
+\sum_{k=1}^{m_i^t}
+\rho(\alpha,\sigma_{i,k}^t).
+\label{eq:rdp_update}
+\end{equation}
+Hence, privacy loss is accumulated only from DP events that are actually
+released.
+
+For a given \(\delta\), the accumulated RDP state is converted to the
+corresponding privacy loss as
+\begin{equation}
+\epsilon_i^t
+=
+\min_{\alpha\in\mathcal A}
+\left[
+\Phi_i^t(\alpha)
++
+\frac{\log(1/\delta)}{\alpha-1}
 \right].
 \label{eq:rdp_to_dp}
 \end{equation}
-The lifetime target is $\epsilon_{i,\mathrm{upd}}^t\le\bar\epsilon_{i,\mathrm{upd}}$.
-
-Dynamic privacy is implemented by state-dependent lifetime-aware calibration. At round $t$, define the remaining planning horizon as
+The privacy requirement over the complete training process is
 \begin{equation}
-H_t=\max\{1,R-t\},
-\label{eq:remaining_privacy_horizon}
+\epsilon_i^t
+\le
+\bar{\epsilon}.
+\label{eq:lifetime_privacy_constraint}
 \end{equation}
-where $R$ is the configured number of training rounds under the implementation's round indexing. A candidate with $n_{i,h}^{t,\mathrm{upd}}>0$ reserves
+
+The required noise level depends on how many DP events a candidate mode
+may generate during the remaining training rounds. For candidate mode
+\(h\), the number of DP events generated in one round is
+\begin{equation}
+n_{i,h}^{t,\mathrm{DP}}
+=
+\sum_{(u,v,b,n)\in\mathcal D_i^t(h)} n.
+\label{eq:dp_events_per_round}
+\end{equation}
+There are \(R-t+1\) rounds remaining, including the current round.
+Using the current candidate mode to determine the number of DP events per
+round, the number considered for the remaining training process is
 \begin{equation}
 N_{i,h}^{t,\mathrm{plan}}
-=n_{i,h}^{t,\mathrm{upd}}H_t
+=
+n_{i,h}^{t,\mathrm{DP}}(R-t+1).
 \label{eq:planned_update_events}
 \end{equation}
-protected update events. Its noise multiplier is the minimum value that keeps these planned events feasible under the current ledger,
+
+When \(n_{i,h}^{t,\mathrm{DP}}>0\), the noise multiplier
+\(\sigma_{i,h_i}^t\) is numerically selected using the current RDP state
+\(\{\Phi_i^t(\alpha)\}_{\alpha\in\mathcal A}\), the planned number of DP
+events \(N_{i,h}^{t,\mathrm{plan}}\), and the privacy target
+\((\bar{\epsilon},\delta)\). The selected value must keep the accumulated
+privacy loss in \eqref{eq:rdp_to_dp} within
+\(\bar{\epsilon}\) after accounting for the planned DP events. If no such
+value can be found, the candidate mode does not satisfy the privacy
+constraint. When \(n_{i,h}^{t,\mathrm{DP}}=0\), the mode generates no DP
+event and requires no noise calibration.
+
+For a hierarchical Edge group \(g\), the Edge update is released to the Cloud as a single packet with DP protection. The noise
+multiplier used for this packet is derived from the calibrated client
+multipliers of the participating devices as
 \begin{equation}
-\sigma_{i,h}^t
-=\sigma_{\min}\!\left(
-R_{i,\mathrm{upd}}^t,
-N_{i,h}^{t,\mathrm{plan}},
-\bar\epsilon_{i,\mathrm{upd}},
-\delta_{\mathrm{upd}}
-\right).
-\label{eq:noise_calibration}
-\end{equation}
-Thus the current dynamic candidate contains one lifetime-aware feasible noise value rather than several multiplicative noise tiers. If no such value exists, the candidate is privacy-infeasible. The ledger is updated from the DP events that are actually executed and released, so the next round is calibrated from the resulting privacy state.
-
-This accounting establishes exposure-specific, update-level client DP for the protected events represented by the ledger. It does not establish DP for all feature or gradient transmissions, and it does not by itself establish a uniform end-to-end DP guarantee for the final global model under arbitrary adaptive protocol behavior.
-
-\subsubsection{Estimation of Convergence Error Cost}
-The selector does not use future test loss, which is unavailable at decision time. Instead, it evaluates a convergence-error proxy whose local components include stochastic training variation, clipping distortion, and the DP distortion generated by the candidate-specific update noise multiplier.
-
-For a candidate $x_i^t=(h_i^t,\pi_i^t)$, let $n_{i,c}^t$ and $n_{i,e}^t$ denote the protected update-DP event counts attributed to client-side and edge-side update aggregation, respectively. Let $C_u$ be the update clipping norm, $d$ the update dimension, $\eta_{\mathrm{lr}}$ the learning rate, and $L_B$ the local-cycle count. The update-noise variance term used by the selector has the form
-\begin{equation}
-V_{i,\mathrm{upd}}^t
+\sigma_g^t
 =
-\frac{(\sigma_{i,h_i}^t)^2(2C_u)^2d}
-{\eta_{\mathrm{lr}}^2L_B^2}.
-\label{eq:update_dp_noise_cost}
+\max_{i\in\mathcal G_g}
+\sigma_{i,h_i}^t .
+\label{eq:edge_group_noise_multiplier}
 \end{equation}
-Hence a larger candidate-specific $\sigma_{i,h_i}^t$ produces a larger current-round distortion term. With $\mathcal B_{\mathrm{clip},i}^t$ denoting the profiled squared clipping excess in the same gradient-unit scale, the implementation groups the local proxy into client and edge bias/variance components,
-\begin{equation}
-\begin{aligned}
-B_{i,c}^t&=\frac{3}{2\mu}\,n_{i,c}^t\mathcal B_{\mathrm{clip},i}^t,
-&V_{i,c}^t&=\frac{G\eta_{\mathrm{lr}}L_B}{\mu}
-\left(\sigma_{\mathrm{local}}^2+n_{i,c}^tV_{i,\mathrm{upd}}^t\right),\\
-B_{i,e}^t&=\frac{3}{2\mu}\,n_{i,e}^t\mathcal B_{\mathrm{clip},i}^t,
-&V_{i,e}^t&=\frac{G\eta_{\mathrm{lr}}L_B}{\mu}
- n_{i,e}^tV_{i,\mathrm{upd}}^t.
-\end{aligned}
-\label{eq:client_error_cost}
-\end{equation}
-Here $G$ is the smoothness parameter and $\mu$ is the PL parameter used by the proxy. The current paper profile has no formal feature-DP events, so feature-DP distortion does not contribute to these terms.
+Thus \(\sigma_g^t\) is derived from the client multipliers in the group.
 
-For a complete profile $\mathbf x$, the evaluator combines client components with represented-sample weights and combines compatible edge-aggregation components at the group level. Writing $q_i^t(\mathbf x)$ for a normalized represented-sample weight and $q_g^t(\mathbf x)$ for the corresponding edge-group weight, the system proxy can be summarized as
+After a mode is selected and executed, only the DP events generated in
+that round are added to \(\Phi_i^t(\alpha)\) according to
+\eqref{eq:rdp_update}. The updated privacy state is then used to evaluate
+the candidate modes in the next round.
+\subsection{Joint Cost and Utility Modeling}
+\label{sec:cost_utility_model}
+Given the link topology, each mode induces its transmissions and the corresponding protection. Its privacy feasibility is determined by the lifetime accounting in Sec.~\ref{sec:privacy_model}. Each mode is then evaluated by resource feasibility, path latency, and DP perturbation cost.
+\subsubsection{End Side Resource Feasibility}
+
+Each collaboration mode must satisfy the computation and memory capacities
+of the end device. Let \(W_{i,L}^{\mathrm{comp}}(h_i)\) and
+\(M_{i,L}^{\mathrm{mem}}(h_i)\) denote the profiled computation and memory
+requirements of device \(i\) under mode \(h_i\), respectively, and let
+\(Q_{\mathrm{comp},i}\) and \(Q_{\mathrm{mem},i}\) denote the corresponding
+available resource capacities. The resource-feasible mode set is
 \begin{equation}
-\begin{aligned}
-\widehat\Omega_{\mathrm{sys}}^t(\mathbf x)
-={}&\sum_i\left[
-q_i^t B_{i,c}^t+(q_i^t)^2V_{i,c}^t
-\right]\\
-&+\sum_{g\in\mathcal G_E^t(\mathbf x)}\left[
-q_g^t B_{g,e}^t+(q_g^t)^2V_{g,e}^t
+\mathcal{H}_i^{\mathrm{res}}
+=
+\left\{
+h_i\in\mathcal{H}
+\;\middle|\;
+W_{i,L}^{\mathrm{comp}}(h_i)\le Q_{\mathrm{comp},i},
+\;
+M_{i,L}^{\mathrm{mem}}(h_i)\le Q_{\mathrm{mem},i}
+\right\}.
+\label{eq:resource_feasible}
+\end{equation}
+
+\subsubsection{Path and Round Latency on a Common Timeline}
+
+We construct a common timeline for the selected collaboration modes to determine their aggregation arrivals and the resulting round latency.
+
+\textbf{Transmission latency.}
+For a transmission of payload \(b\) from tier \(u\) to tier \(v\), let \(S_{u,v,b}^t(h_i)\) denote its raw payload size. Let \(B_{i,u,v}^t\) denote the transmission rate of device \(i\) over \(u\!\to\!v\) in round \(t\), and let \(D_{u,v}^{0}\) denote the fixed base delay. Under the protection mechanism \(\pi_i^{t,h_i}(u,v,b)\) defined above, the transmission latency is
+\begin{equation}
+T_{u,v,b}^{\mathrm{link},t}(h_i)
+=
+\frac{
+\alpha\!\left(\pi_i^{t,h_i}(u,v,b)\right)
+S_{u,v,b}^t(h_i)}
+{B_{i,u,v}^t}
++
+D_{u,v}^{0}
++
+T_{u,v,b}^{\mathrm{priv},t}
+\!\left(\pi_i^{t,h_i}(u,v,b)\right),
+\label{eq:comm_latency}
+\end{equation}
+where \(\alpha(\cdot)\) is the payload expansion factor caused by the protection mechanism and \(T_{u,v,b}^{\mathrm{priv},t}(\cdot)\) is the corresponding protection processing latency. For an unprotected transmission, \(\alpha(\mathrm{none})=1\) and \(T_{u,v,b}^{\mathrm{priv},t}(\mathrm{none})=0\).
+
+\textbf{Execution latency.}
+Let \(\tau_{i,L}^t(h_i)\) and \(\tau_{i,E}^t(h_i)\) denote the Local and Edge execution times within one training step under mode \(h_i\). For split training between Local and Edge, the \(L_B\) training steps are pipelined across the two tiers, giving
+\begin{equation}
+T_i^{\mathrm{stage},t}(h_i)
+=
+L_B\max\!\left\{
+\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
+\right\}
++
+\min\!\left\{
+\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
+\right\}.
+\label{eq:execution_latency}
+\end{equation}
+For local training, \(T_i^{\mathrm{stage},t}(h_i)=L_B\tau_{i,L}^t(h_i)\). Hierarchical modes repeat the corresponding Edge stage \(E_B\) times.
+
+\textbf{Reconfiguration latency.}
+Changing the collaboration mode may require model reconfiguration across tiers. The resulting delay is
+\begin{equation}
+T_i^{\mathrm{sw},t}
+=
+\eta_h \mathbb{I}(h_i^t\neq h_i^{t-1})
++
+\eta_p
+\frac{
+\|\mathbf{p}(h_i^t)-\mathbf{p}(h_i^{t-1})\|_1
+}{2},
+\label{eq:switching_cost}
+\end{equation}
+where \(\eta_h\) and \(\eta_p\) are the coefficients for the mode change cost and the placement change cost, respectively~\cite{CHEN2026112204,li2026latency}. The normalized model placement is
+\begin{equation}
+\mathbf{p}(h_i^t)
+=
+\frac{
+\left[
+\lvert M_L^{h_i}\rvert,
+\lvert M_E^{h_i}\rvert,
+\lvert M_C^{h_i}\rvert
 \right]
-+\frac{\xi}{\rho_C^t(\mathbf x)+\varepsilon_C}.
+}{
+\lvert M_L^{h_i}\rvert+
+\lvert M_E^{h_i}\rvert+
+\lvert M_C^{h_i}\rvert
+}.
+\label{eq:model_placement_vector}
+\end{equation}
+
+\textbf{Path arrival and aggregation.}
+For a given candidate mode \(h_i\), its mode flow specifies the execution stages and payload transmissions leading to the corresponding aggregation point. The execution and transmission latencies defined above, together with the reconfiguration delay \(T_i^{\mathrm{sw},t}\), are advanced in their order of occurrence along the mode flow. We use \(a_{i,E}^t\) and \(a_{i,C}^t\) to denote the arrival times of the update from device \(i\) at the Edge and Cloud, respectively, whenever the corresponding aggregation point is present in the selected mode.
+
+Once a candidate mode profile \(\mathbf h^t=(h_1^t,\ldots,h_N^t)\) is specified, these arrivals are placed on the common timeline. For an Edge aggregation group \(g\), let \(\mathcal G_g\) denote the devices participating in this group. Since aggregation waits for all required updates, the Edge aggregation completion time is
+\begin{equation}
+f_{g,E}^t
+=
+\max_{i\in\mathcal G_g} a_{i,E}^t
++
+T_{g,E}^{\mathrm{agg},t},
+\label{eq:edge_agg_finish}
+\end{equation}
+where \(T_{g,E}^{\mathrm{agg},t}\) is the Edge aggregation duration. Updates arriving earlier remain buffered until aggregation starts.
+
+If the selected mode continues to the Cloud, the Edge aggregation result is transmitted to the Cloud after \(f_{g,E}^t\). Let \(a_{g,C}^t\) denote the arrival time of this aggregated update at the Cloud, computed by adding the Edge to Cloud transmission latency to \(f_{g,E}^t\). Modes that send updates directly to the Cloud independently produce the client arrivals \(a_{i,C}^t\). The Cloud aggregation therefore waits for the required arrivals from both sources, and its completion time is
+\begin{equation}
+f_C^t
+=
+\max\left\{
+\max_i a_{i,C}^t,\,
+\max_g a_{g,C}^t
+\right\}
++
+T_C^{\mathrm{agg},t},
+\label{eq:cloud_agg_finish}
+\end{equation}
+where the two maxima are taken over the direct Cloud clients and the Edge
+groups participating in the current Cloud aggregation, respectively.
+
+Return transmissions, when required by the selected mode, further advance
+the corresponding aggregation completion times. As illustrated in
+Fig.~\ref{fig:time}, the execution, transmission, aggregation, and return
+events of the selected mode profile are placed on the common timeline.
+The latest completion time on this timeline is denoted by
+\(T_{\mathrm{sys}}(\mathbf h^t)\), which represents the system round
+latency.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{common_timeline.png}
+\caption{Representative common timeline for mixed collaboration modes in cloud-edge-end federated learning.}
+\label{fig:time}
+\end{figure*}
+\subsubsection{DP Perturbation Cost}
+\label{sec:learning_cost}
+
+The selector evaluates a candidate mode profile using quantities available at selection time. The DP perturbation cost measures the distortion that DP introduces into the model update packets released to the Cloud.
+
+For a client update released directly to the Cloud, let \(C_u\) be the update clipping norm. Under replacement adjacency, the sensitivity bound is \(\Delta_u=2C_u\), where the factor two accounts for the maximum change between two clipped updates. For an update vector of dimension \(d_{\mathrm{upd}}\), the Gaussian perturbation associated with client \(i\) under mode \(h_i^t\) has expected squared magnitude \(d_{\mathrm{upd}}(\sigma_{i,h_i}^t\Delta_u)^2\), where \(\sigma_{i,h_i}^t\) is the noise multiplier calibrated from the lifetime privacy state.
+
+For a hierarchical Edge group \(g\), the participating client updates are first clipped and aggregated at the Edge. The aggregation weight of client \(i\) within Edge group \(g\) is \(w_{i\mid g}=n_i/(\sum_{j\in\mathcal G_g}n_j)\). The sensitivity of the resulting Edge update is bounded by the largest client contribution in the group, \(\Delta_g^t=2C_u\max_{i\in\mathcal G_g}w_{i\mid g}\). This Edge update is then released to the Cloud as a single packet with DP protection, and its noise multiplier is \(\sigma_g^t\), as defined in \eqref{eq:edge_group_noise_multiplier}.
+
+For a complete mode profile \(\mathbf h^t=(h_1^t,\ldots,h_N^t)\), let \(N_C(\mathbf h^t)\) denote the total number of represented training samples participating in the current Cloud aggregation. The Cloud aggregation weight of a directly released client update is \(n_i/N_C(\mathbf h^t)\), and the corresponding weight of an Edge update from group \(g\) is \(\sum_{i\in\mathcal G_g}n_i/N_C(\mathbf h^t)\). The DP perturbation cost of a complete mode profile is then
+\begin{equation}
+\begin{aligned}
+J_{\mathrm{DP}}(\mathbf h^t)
+=
+d_{\mathrm{upd}}
+\Bigg[
+&
+\sum_{\text{direct }i\to C}
+\left(
+\frac{n_i}
+{N_C^t(\mathbf h^t)}
+\sigma_{i,h_i}^t
+\Delta_u
+\right)^2
+\\
+&+
+\sum_{\text{Edge group }g\to C}
+\left(
+\frac{\sum_{i\in\mathcal G_g} n_i}
+{N_C^t(\mathbf h^t)}
+\sigma_g^t
+\Delta_g^t
+\right)^2
+\Bigg].
 \end{aligned}
-\label{eq:global_omega}
+\label{eq:dp_perturbation_cost}
 \end{equation}
-The last term penalizes insufficient Cloud-reaching represented sample mass, where $\rho_C^t(\mathbf x)$ is the Cloud fusion ratio. The exact weights and edge groups are induced by the evaluated profile and its admitted aggregation flow. Equation~\eqref{eq:global_omega} is a selection-time proxy rather than a claim that it equals the realized training loss.
-
-Most importantly, the DP contribution in $\widehat\Omega_{\mathrm{sys}}^t$ is not a common global-release constant. It depends on the candidate through its protected update exposure count and its lifetime-aware $\sigma_{i,h_i}^t$. Privacy budget itself is not introduced as a third Pareto objective: it constrains feasibility through the ledger and affects learning cost through the calibrated DP distortion.
-
-\subsection{Global Multi-Objective Collaborative Optimization}
+The first sum runs over clients whose protected updates are released directly to the Cloud, and the second over Edge groups whose aggregated updates are released to the Cloud.
+\subsection{Global Multiobjective Collaborative Optimization}
 \label{sec:global_optimization}
-A client candidate is written as
-\begin{equation}
-x_i^t=(h_i^t,\pi_i^t,\sigma_{i,h_i}^t),
-\label{eq:client_candidate}
-\end{equation}
-where the last component is present when the candidate contains a protected update-DP exposure. Candidate generation is hierarchical: the mode first determines $\mathcal X_i^t(h_i)$, the exposure requirements determine the legal protection map $\pi_i^t$, and the current privacy ledger determines the lifetime-aware noise calibration. These components are then evaluated jointly rather than selecting privacy independently after the mode decision.
 
-Let $\mathcal F_i^t$ contain the candidates that satisfy the end-device resource constraints in \eqref{eq:resource_feasible}, the exposure-specific mechanism requirements, and the lifetime privacy constraint. A complete profile is $\mathbf x=(x_1^t,\ldots,x_N^t)$. The flow evaluator applies the shared edge/cloud aggregation and admission rules to a profile, so the system-feasible set is a subset of the Cartesian product,
+For each client, the decision variable is the collaboration mode
+\(h_i^t\in\mathcal F_i^t\), where
+\(\mathcal F_i^t\subseteq\mathcal H_i^{\mathrm{res}}\subseteq\mathcal H\)
+contains the modes that satisfy the end device resource constraints in
+\eqref{eq:resource_feasible}, the mechanism requirements of each exposure,
+and the lifetime privacy constraint. For each evaluated mode, \(\mathcal X_i^t(h_i)\) is induced first. The exposure requirements then determine the protection map \(\pi_i^{t,h_i}\), and the current privacy ledger determines the noise multiplier \(\sigma_{i,h_i}^t\) when a protected update needs DP. Thus \(\pi_i^{t,h_i}\) and \(\sigma_{i,h_i}^t\) follow from the candidate mode.
+
+A complete mixed mode profile is \(\mathbf h^t=(h_1^t,\ldots,h_N^t)\). The flow evaluator applies the shared Edge and Cloud aggregation and admission rules to a complete profile, so the system feasible set is a subset of the Cartesian product,
 \begin{equation}
-\mathcal F_{\mathrm{sys}}^t\subseteq\prod_{i=1}^{N}\mathcal F_i^t.
+\mathcal F_{\mathrm{sys}}^t
+\subseteq
+\prod_{i=1}^{N}\mathcal F_i^t.
 \label{eq:global_feasible_set}
 \end{equation}
-An execution that is not admitted is reported as \textsc{skip}; \textsc{skip} is an execution outcome and is not an eighth collaboration mode.
+An execution that is not admitted is reported as \textsc{skip}.
 
-For every feasible profile, the flow model produces the round duration $T_{\mathrm{sys}}^t(\mathbf x)$ rather than a simple sum of per-client latencies. The same profile produces $\widehat\Omega_{\mathrm{sys}}^t(\mathbf x)$ through \eqref{eq:global_omega}. The current selector therefore solves the two-objective problem
+For every feasible profile, the flow model produces the round duration \(T_{\mathrm{sys}}(\mathbf h^t)\), while the DP release model produces the perturbation cost \(J_{\mathrm{DP}}(\mathbf h^t)\) through \eqref{eq:dp_perturbation_cost}. The selector therefore minimizes the following two objective functions.
 \begin{equation}
-\underset{\mathbf{x}\in\mathcal F_{\mathrm{sys}}^t}{\operatorname{minimize}}\quad
-\mathbf f^t(\mathbf{x})=
+\underset{\mathbf h^t\in\mathcal F_{\mathrm{sys}}^t}
+{\operatorname{minimize}}
+\quad
+\mathbf f(\mathbf h^t)
+=
 \begin{bmatrix}
-T_{\mathrm{sys}}^t(\mathbf{x})\\
-\widehat{\Omega}_{\mathrm{sys}}^t(\mathbf{x})
+T_{\mathrm{sys}}(\mathbf h^t)\\
+J_{\mathrm{DP}}(\mathbf h^t)
 \end{bmatrix}.
 \label{eq:global_multiobjective}
 \end{equation}
-Privacy reserve, HE cost, and communication volume are not separate Pareto objectives in the current implementation. HE and communication processing affect the path latency, while DP calibration affects feasibility and the error-cost proxy.
 
-The non-dominated decision set is
+Latency and DP perturbation are the two objectives in the current implementation. HE and communication processing contribute to the path latency, while DP calibration determines privacy feasibility and the resulting perturbation cost.
+
+The nondominated decision set is
 \begin{equation}
-\mathcal X_{\mathrm P}^t
-=\{\mathbf{x}\in\mathcal F_{\mathrm{sys}}^t\mid
-\nexists\mathbf{x}'\in\mathcal F_{\mathrm{sys}}^t,
-\ \mathbf{x}'\prec\mathbf{x}\},
+\mathcal H_{\mathrm P}^t
+=
+\left\{
+\mathbf h^t\in\mathcal F_{\mathrm{sys}}^t
+\;\middle|\;
+\nexists\,\mathbf h^{\prime t}\in\mathcal F_{\mathrm{sys}}^t
+\text{ such that }
+\mathbf h^{\prime t}\prec\mathbf h^t
+\right\},
 \label{eq:pareto_front}
 \end{equation}
-where $\prec$ denotes Pareto dominance with respect to the two objectives in \eqref{eq:global_multiobjective}. In the bounded solver, the maintained non-dominated archive approximates this set.
+where \(\prec\) denotes Pareto dominance with respect to the two objectives in \eqref{eq:global_multiobjective}. In the bounded solver, the maintained nondominated archive approximates this set.
 
-The Tchebycheff stage normalizes over the current non-dominated archive. Let $T_{\min}^t,T_{\max}^t$ and $\widehat\Omega_{\min}^t,\widehat\Omega_{\max}^t$ be the minimum and maximum objective values observed in that archive. These are normalization extrema, not physical latency or resource bounds. The normalized objectives are
+The Tchebycheff stage normalizes the two objectives over the current nondominated archive. Let \(T_{\min}^t,T_{\max}^t\) and \(J_{\min}^t,J_{\max}^t\) denote the minimum and maximum values of the latency and DP perturbation objectives observed in that archive. These values define the normalization range within the current archive. The normalized objectives are
 \begin{equation}
-\begin{aligned}
-\bar T^t(\mathbf{x})&=
-\frac{T_{\mathrm{sys}}^t(\mathbf{x})-T_{\min}^t}
-{T_{\max}^t-T_{\min}^t+\varepsilon_n},\\
-\bar\Omega^t(\mathbf{x})&=
-\frac{\widehat\Omega_{\mathrm{sys}}^t(\mathbf{x})-\widehat\Omega_{\min}^t}
-{\widehat\Omega_{\max}^t-\widehat\Omega_{\min}^t+\varepsilon_n}.
-\end{aligned}
+\bar T(\mathbf h^t)
+=
+\frac{
+T_{\mathrm{sys}}(\mathbf h^t)-T_{\min}^t
+}{
+T_{\max}^t-T_{\min}^t+\gamma_n
+},
+\qquad
+\bar J(\mathbf h^t)
+=
+\frac{
+J_{\mathrm{DP}}(\mathbf h^t)-J_{\min}^t
+}{
+J_{\max}^t-J_{\min}^t+\gamma_n
+}.
 \label{eq:pareto_normalization}
 \end{equation}
+
 The normalized ideal point is the origin. The selected profile minimizes the largest normalized deviation,
 \begin{equation}
 \begin{aligned}
-D_\infty^t(\mathbf{x})
-&=\max\{\lvert\bar T^t(\mathbf{x})\rvert,
-\lvert\bar\Omega^t(\mathbf{x})\rvert\},\\
-\mathbf{x}^\star
-&\in\arg\min_{\mathbf{x}\in\mathcal X_{\mathrm P}^t}
-D_\infty^t(\mathbf{x}).
+D_\infty(\mathbf h^t)
+&=
+\max\left\{
+\left|\bar T(\mathbf h^t)\right|,
+\left|\bar J(\mathbf h^t)\right|
+\right\},
+\\
+\mathbf h^{t\star}
+&\in
+\arg\min_{\mathbf h^t\in\mathcal H_{\mathrm P}^t}
+D_\infty(\mathbf h^t).
 \end{aligned}
 \label{eq:selection}
 \end{equation}
-The implementation resolves equal distances deterministically using system latency, then $\widehat\Omega_{\mathrm{sys}}^t$, followed by a stable profile identity. Real test accuracy is used only for experimental evaluation and is not available to the selector.
 
+The implementation resolves equal distances deterministically using system latency, then \(J_{\mathrm{DP}}(\mathbf h^t)\), followed by a stable profile identity. Real test accuracy is reserved for experimental evaluation.
 \section{Algorithm}
 \label{sec:algorithm}
 
-At each strategy update point, DynFL constructs candidates in the same order as the execution semantics. For client $i$, an executable mode $h_i$ first induces its transmission set $\mathcal X_i^t(h_i)$. The current exposure requirement then determines the legal protection map $\pi_i^t$. If the candidate contains a protected Cloud-facing update, its lifetime-aware multiplier $\sigma_{i,h_i}^t$ is obtained from \equref{eq:noise_calibration}; otherwise no update-DP event is charged for that candidate. Candidates that violate resource, protection, or lifetime privacy constraints are removed, producing $\mathcal F_i^t$. The flow evaluator subsequently determines whether a joint profile belongs to $\mathcal F_{\mathrm{sys}}^t$.
-
-For a small instance, the exact solver evaluates all joint profiles in $\prod_i\mathcal F_i^t$ and retains the system-feasible ones. If $M=\prod_i|\mathcal F_i^t|$ profiles are enumerated and one global evaluation costs $C_{\mathrm{eval}}$, exact evaluation and Pareto filtering cost $O(MC_{\mathrm{eval}}+M\log M)$. This exponential dependence restricts exhaustive search to small-scale validation.
-
-For full-scale selection, the bounded search initializes a profile archive and expands each retained profile by replacing one client candidate at a time. A deterministic exploration queue containing at most $K_{\mathrm B}$ evaluated intermediate profiles allows the search to pass through a temporarily dominated profile. The method maintains at most $K_{\mathrm P}$ non-dominated evaluated profiles. Because only a subset of $\mathcal F_{\mathrm{sys}}^t$ is explored, the resulting archive $\widehat{\mathcal X}_{\mathrm P}^t$ approximates the exact Pareto set $\mathcal X_{\mathrm P}^t$. The exact and approximate solvers use the same system objectives, archive normalization, and ideal-point Tchebycheff rule.
-
-Let $K_{\mathrm{cand}}=\max_i|\mathcal F_i^t|$. Replacing one client candidate in one retained profile generates at most $N(K_{\mathrm{cand}}-1)$ neighbors. With at most $K_{\mathrm P}+K_{\mathrm B}$ retained archive/queue profiles, one expansion considers at most $L\le (K_{\mathrm P}+K_{\mathrm B})N(K_{\mathrm{cand}}-1)$ neighbors. At most $I_{\max}$ expansions therefore cost $O(I_{\max}L(C_{\mathrm{eval}}+\log L))$. The implementation caches candidate flow information and incrementally updates affected aggregation groups when evaluating one-client replacements.
-
-The search is performed only at strategy update points determined by $S_P$. At other rounds, a previously selected profile may be reused only when it remains executable under the current state. Switching overhead is included in the evaluated flow latency. A non-admitted execution is reported as \textsc{skip}; it is not inserted into $\mathcal H$ as an additional collaboration mode.
-
-DP and HE are enforced from the exposure requirement rather than from a common post-selection release overlay. Under the current paper profile, a Cloud-facing update requires both DP and HE: the DP multiplier is calibrated from the client's current ledger and remaining horizon, while HE protects the corresponding contribution during encrypted aggregation. Edge-only modes do not acquire an artificial Cloud release. After selection, only DP events that are actually executed and released are charged to the client ledger. Consequently, the next strategy update observes the privacy state produced by prior execution rather than a fixed global-release accountant.
+The proposed selection procedure operates at strategy update points. At
+rounds that are not update points, the previously selected profile is reused
+when \(\mathbf h^{t-1}\in\mathcal F_{\mathrm{sys}}^t\).
 
 \begin{breakablealgorithm}
-\caption{Bounded Pareto Solver with Exposure-Specific Protection}
+\caption{Bounded Pareto Profile Selection with Exposure Specific Protection}
 \label{alg:selection}
 \small
 \begin{algorithmic}[1]
-\REQUIRE Device set $\mathcal N$, seven-mode set $\mathcal H$, per-client resource-feasible subsets $\mathcal H_i^{\mathrm{res}}$, current privacy ledgers $R_{i,\mathrm{upd}}^t(\alpha)$ and targets $(\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})$, round system state, exposure requirements, path/buffer models, $K_{\mathrm P},K_{\mathrm B},I_{\max},S_P$, and previous profile $\mathbf x^{t-1}$
-\ENSURE Selected executable profile $\mathbf x^\star$ or an execution-level \textsc{skip} outcome when no feasible execution is admitted
+
+\REQUIRE
+\(N,\{\mathcal H_i^{\mathrm{res}}\}_{i=1}^{N},
+\{\Phi_i^t(\alpha)\}_{i=1}^{N},
+(\bar\epsilon,\delta)\), system state, \(S_P\),
+\(K_{\mathrm P},K_{\mathrm B},I_{\max},\mathbf h^{t-1}\)
+
+\ENSURE
+\(\mathbf h^{t\star}\), or \textsc{skip}
+
+\STATE \textbf{Reuse}
+
+\IF{\(t\notin S_P\) and \(\mathbf h^{t-1}\in\mathcal F_{\mathrm{sys}}^t\)}
+    \STATE Execute \(\mathbf h^{t-1}\) with its protection mechanisms
+    \STATE Update \(\Phi_i^{t+1}(\alpha)\) using \eqref{eq:rdp_update} for
+    executed and released DP events only
+    \RETURN \(\mathbf h^{t-1}\)
+\ENDIF
+
 \STATE \textbf{Candidate Construction}
-\FOR{each $i\in\mathcal N$}
-    \STATE Initialize $\mathcal F_i^t\leftarrow\emptyset$.
-    \FOR{each $h\in\mathcal H_i^{\mathrm{res}}$}
-        \STATE Construct the mode-induced transmission set $\mathcal X_i^t(h)$ and protected update subset $\mathcal D_i^t(h)$.
-        \STATE Enumerate protection maps $\pi$ that satisfy the exposure-specific plaintext and DP requirements.
-        \STATE Compute $n_{i,h}^{t,\mathrm{upd}}$ using \equref{eq:update_dp_event_count}.
-        \IF{$n_{i,h}^{t,\mathrm{upd}}>0$}
-            \STATE Set $\sigma_{i,h}^t\leftarrow\sigma_{\min}(R_{i,\mathrm{upd}}^t,n_{i,h}^{t,\mathrm{upd}}H_t,\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})$ using \equref{eq:noise_calibration}; discard the candidate if no feasible multiplier exists.
+
+\FOR{\(i=1,\ldots,N\)}
+    \STATE \(\mathcal F_i^t\leftarrow\emptyset\)
+    \FOR{each \(h_i\in\mathcal H_i^{\mathrm{res}}\)}
+        \STATE Construct \(\mathcal X_i^t(h_i)\) and derive
+        \(\pi_i^{t,h_i}\), \(\mathcal D_i^t(h_i)\) by
+        \eqref{eq:transmission_set}--\eqref{eq:dp_exposures}
+        \STATE Compute \(n_{i,h_i}^{t,\mathrm{DP}}\) and
+        \(N_{i,h_i}^{t,\mathrm{plan}}\) by
+        \eqref{eq:dp_events_per_round}--\eqref{eq:planned_update_events}
+        \IF{\(n_{i,h_i}^{t,\mathrm{DP}}>0\)}
+            \STATE Calibrate \(\sigma_{i,h_i}^t\) under
+            \((\bar\epsilon,\delta)\)
+            \IF{no feasible \(\sigma_{i,h_i}^t\) exists}
+                \STATE \textbf{continue}
+            \ENDIF
         \ENDIF
-        \STATE Add every resource-, mechanism-, and privacy-feasible $x_i^t=(h,\pi,\sigma_{i,h}^t)$ to $\mathcal F_i^t$, omitting the last component when no protected update-DP event exists.
+        \STATE Add \(h_i\) to \(\mathcal F_i^t\)
     \ENDFOR
 \ENDFOR
-\STATE Let $\mathcal F_{\mathrm{sys}}^t\subseteq\prod_i\mathcal F_i^t$ denote profiles that satisfy the shared flow, buffer, aggregation, and admission constraints.
-\IF{$t$ is not a strategy update point and $\mathbf x^{t-1}\in\mathcal F_{\mathrm{sys}}^t$}
-    \RETURN $\mathbf x^{t-1}$.
+
+\STATE \textbf{Pareto Search}
+
+\STATE Construct
+\(\mathcal F_{\mathrm{sys}}^t\subseteq\prod_{i=1}^{N}\mathcal F_i^t\)
+using the shared flow, buffer, aggregation, and admission constraints
+\STATE Generate a bounded initial candidate set from
+\(\mathcal F_{\mathrm{sys}}^t\)
+
+\IF{\(\mathcal F_{\mathrm{sys}}^t=\emptyset\)}
+    \RETURN \textsc{skip}
 \ENDIF
-\STATE \textbf{Objective Evaluation and Approximate Pareto Search}
-\STATE For every generated feasible profile $\mathbf x$, evaluate its flow to obtain $T_{\mathrm{sys}}^t(\mathbf x)$ and compute $\widehat\Omega_{\mathrm{sys}}^t(\mathbf x)$ using \equref{eq:global_omega}.
-\STATE Construct deterministic latency-oriented, error-oriented, and intermediate initial profiles; retain their non-dominated subset as $\mathcal A_0$ and set $\mathcal B_0=\emptyset$.
-\FOR{$r=1,\ldots,I_{\max}$}
-    \STATE Generate unvisited system-feasible profiles $\mathcal V_r$ that differ from a profile in $\mathcal A_{r-1}\cup\mathcal B_{r-1}$ at one client candidate.
-    \STATE Evaluate $(T_{\mathrm{sys}}^t,\widehat\Omega_{\mathrm{sys}}^t)$ for every $\mathbf x\in\mathcal V_r$.
-    \STATE Retain the non-dominated profiles from $\mathcal A_{r-1}\cup\mathcal V_r$ as $\mathcal A_r$; if $|\mathcal A_r|>K_{\mathrm P}$, preserve both objective endpoints and approximately uniform profiles in latency order.
-    \STATE Retain at most $K_{\mathrm B}$ newly evaluated profiles outside $\mathcal A_r$ with the smallest normalized ideal-point distance as $\mathcal B_r$.
-    \IF{$\mathcal A_r=\mathcal A_{r-1}$ and $\mathcal B_r=\emptyset$}
+
+\STATE Evaluate the initial candidate profiles using
+\(T_{\mathrm{sys}}(\mathbf h^t)\) and \(J_{\mathrm{DP}}(\mathbf h^t)\)
+
+\STATE Initialize archive \(\mathcal A\) with the nondominated initial
+profiles and queue \(\mathcal B\)
+
+\FOR{\(r=1,\ldots,I_{\max}\)}
+    \STATE Generate unvisited single client replacements from
+    \(\mathcal A\cup\mathcal B\)
+    \STATE Retain only profiles in \(\mathcal F_{\mathrm{sys}}^t\)
+    \STATE Evaluate \(T_{\mathrm{sys}}(\mathbf h^t)\) and
+    \(J_{\mathrm{DP}}(\mathbf h^t)\) for the retained profiles
+    \STATE Update \(\mathcal A\), keeping at most \(K_{\mathrm P}\)
+    nondominated profiles
+    \STATE Update \(\mathcal B\), keeping at most \(K_{\mathrm B}\)
+    exploratory profiles
+    \IF{neither \(\mathcal A\) nor \(\mathcal B\) is updated}
         \STATE \textbf{break}
     \ENDIF
 \ENDFOR
-\STATE Set $\widehat{\mathcal X}_{\mathrm P}^t\leftarrow\mathcal A_r$.
-\STATE \textbf{Ideal-Point Tchebycheff Selection}
-\STATE Compute $T_{\min}^t,T_{\max}^t,\widehat\Omega_{\min}^t,\widehat\Omega_{\max}^t$ over $\widehat{\mathcal X}_{\mathrm P}^t$ and normalize the two objectives as in \equref{eq:selection}.
-\STATE Select $\mathbf x^\star$ by the minimum $D_\infty^t$, breaking ties deterministically by system latency, then $\widehat\Omega_{\mathrm{sys}}^t$, then stable profile identity.
+
+\STATE Set \(\widehat{\mathcal H}_{\mathrm P}^t\leftarrow\mathcal A\)
+
+\STATE \textbf{Profile Selection}
+
+\STATE Normalize the two objectives over
+\(\widehat{\mathcal H}_{\mathrm P}^t\) by
+\eqref{eq:pareto_normalization}
+
+\STATE Select
+\[
+\mathbf h^{t\star}\in
+\arg\min_{\mathbf h^t\in\widehat{\mathcal H}_{\mathrm P}^t}
+D_\infty(\mathbf h^t)
+\]
+with the specified deterministic tie breaking rule
+
 \STATE \textbf{Execution and Accounting}
-\STATE Execute the selected mode-specific flows and their legal protection mechanisms; use real HE whenever the selected protected update requires HE.
-\STATE Aggregate the updates admitted by the realized edge/cloud flow and record any execution-level \textsc{skip} outcomes.
-\STATE Charge $R_{i,\mathrm{upd}}^{t+1}$ only for protected DP events that were actually executed and released; carry the resulting ledger state to the next round.
-\RETURN $\mathbf x^\star$.
+
+\STATE Execute \(\mathbf h^{t\star}\) and its protection mechanisms
+
+\STATE Update \(\Phi_i^{t+1}(\alpha)\) using \eqref{eq:rdp_update} for
+executed and released DP events only
+
+\RETURN \(\mathbf h^{t\star}\)
+
 \end{algorithmic}
 \end{breakablealgorithm}
-
-The main symbols used in the collaboration reconfiguration model and solver are summarized in \tabref{tab:notations}.
-
-\begin{table*}[t]
-\caption{Main Notation}
-\label{tab:notations}
-\centering
-\footnotesize
-\begin{tabular}{p{0.25\textwidth}p{0.69\textwidth}}
-\hline\hline
-\textbf{Symbol} & \textbf{Meaning} \\
-\hline
-$\mathcal N,N$ & End-device set and number of end devices \\
-$\mathcal H,\mathcal H_i^{\mathrm{res}}$ & Seven executable collaboration modes and the resource-feasible mode subset of client $i$ \\
-$\mathcal X_i^t(h),\mathcal D_i^t(h)$ & Mode-induced transmission set and its subset of update exposures requiring formal DP accounting \\
-$\pi_i^t$ & Exposure-specific protection map assigning legal transport/protection mechanisms to the transmissions of client $i$ \\
-$x_i^t,\mathcal F_i^t$ & Client candidate $(h_i^t,\pi_i^t,\sigma_{i,h_i}^t)$ when DP applies, and the client-feasible candidate set \\
-$\mathcal F_{\mathrm{sys}}^t$ & Joint profiles satisfying shared flow, buffer, aggregation, admission, and candidate-feasibility constraints \\
-$L_B,E_B$ & Number of local link-block loops and edge aggregation loops associated with a mode \\
-$Q_{\mathrm{comp},i},Q_{\mathrm{mem},i}$ & Local computation budget and memory upper bound of client $i$ \\
-$R_{i,\mathrm{upd}}^t(\alpha)$ & Client RDP ledger for protected update events at order $\alpha$ \\
-$(\bar\epsilon_{i,\mathrm{upd}},\delta_{\mathrm{upd}})$ & Lifetime privacy target for the protected update channel \\
-$n_{i,h}^{t,\mathrm{upd}},H_t,N_{i,h}^{t,\mathrm{plan}}$ & Protected update-event count of one candidate, remaining planning horizon, and planned remaining protected events \\
-$\sigma_{i,h}^t$ & Minimum lifetime-feasible update-DP noise multiplier for candidate mode $h$ under the current ledger \\
-$W_{i,L}^{\mathrm{comp}},M_i^{\mathrm{mem}}$ & Computation workload and memory requirement of client $i$ under a selected mode \\
-$\chi(h_i),F_i$ & Mode-dependent sample computation workload and computing rate of client $i$ \\
-$T_i,T_{\mathrm{sys}}$ & Client path-flow latency and system round duration produced by the joint flow evaluation \\
-$C_i^{\mathrm{sw},t},S_P$ & Mode-switching overhead in round $t$ and strategy update period \\
-$K_{\mathrm P},K_{\mathrm B},I_{\max}$ & Pareto archive limit, deterministic exploration-queue limit, and maximum search expansions \\
-$A_i^t(\mathbf x),A^t(\mathbf x)$ & Clients admitted by the buffer on client $i$'s path and the complete admitted set under profile $\mathbf x$ \\
-$B_i^t,V_i^t,q_i^t$ & Client bias cost, variance cost, and represented-sample aggregation weight used by the error proxy \\
-$V_{i,\mathrm{upd}}^t$ & Candidate-specific update-DP variance term induced by $\sigma_{i,h_i}^t$ \\
-$\widehat\Omega_{\mathrm{sys}}^t$ & System-level estimated convergence-error cost used for selection \\
-$\rho_C^t,\xi$ & Cloud-reaching represented-sample ratio and its insufficiency-penalty coefficient \\
-$\eta_{\mathrm{lr}},\sigma_{\mathrm{local}}^2$ & Learning rate and local stochastic-gradient variance \\
-$C_u,\mathcal B_{\mathrm{clip},i}^{t}$ & Update clipping threshold and profiled squared clipping-excess estimate \\
-\textsc{skip} & Execution/admission outcome when a candidate cannot be executed or admitted; not a collaboration mode \\
-\hline\hline
-\end{tabular}
-\end{table*}
-
 \section{Experiments}
 \label{sec:experiment}
 \subsection{Experimental Setup}
@@ -868,7 +998,7 @@ End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=1
 Training and test samples & 12000 and 2000 & Random seeds & 40, 42, and 44 \\
 Client computation and memory factors & Independent $\mathcal U(0.5,2.0)$ & Edge computation factor & $\mathcal U(2/3,1.5)$ \\
 Logical link block reference & \(L_B=5\) & Independent stages in multilevel modes & \(E_B=3\) \\
-Lifetime update-DP target & \(\bar\epsilon_{\mathrm{upd}}=8.0\) & DP slack parameter & \(\delta_{\mathrm{upd}}=10^{-5}\) \\
+Lifetime update-DP target & \(\bar\epsilon=8.0\) & DP slack parameter & \(\delta=10^{-5}\) \\
 Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=0.02052\) MB & HE expansion factor & \(\alpha_{\mathrm{HE}}=8.04\) \\
 CKKS polynomial degree and scale & \(8192\) and \(2^{40}\) & CKKS coefficient modulus bits & \([50,40]\) \\
 CKKS reference profile for a 4 MB update & 32.14 MB and 0.90 s & HE execution & Real SEAL when selected \\
@@ -965,8 +1095,8 @@ $\mathcal U(0.5,2.0)$, and edge computation factors are drawn from
 $\mathcal U(2/3,1.5)$. Lower computation factors indicate faster execution.
 For direction $u\rightarrow v$, the simulated rate in round $t$ is
 \begin{equation}
-R_{u,v}^{t}=\bar R_{u,v}[1+0.2\sin(t/3)]\zeta_{u,v}^{t},
-\qquad \zeta_{u,v}^{t}\sim\mathcal U(0.75,1.25).
+R_{i,u,v}^{t}=\bar R_{u,v}[1+0.2\sin(t/3)]\zeta_{i,u,v}^{t},
+\qquad \zeta_{i,u,v}^{t}\sim\mathcal U(0.75,1.25).
 \label{eq:experiment_link_rate}
 \end{equation}
 The base rates are 5 MB/s for end to edge links, 2.2 MB/s for end to cloud
@@ -1055,7 +1185,7 @@ aggregation, feasible-set, and timing semantics differ from the current protocol
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{lccccc}
 \hline
-\textbf{Method} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{$\epsilon_{\mathrm{upd}}$} \\
+\textbf{Method} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{$\epsilon$} \\
 \hline
 Fixed Mode + Fixed Privacy & -- & -- & -- & -- & -- \\
 Dynamic Mode + Fixed Privacy & -- & -- & -- & -- & -- \\
@@ -1285,7 +1415,7 @@ interval determined by the shortest completed ablation run.
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{lcccccc}
 \hline
-\textbf{Variant} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{Effective Clients (\%)} & \textbf{$\epsilon_{\mathrm{upd}}$} \\
+\textbf{Variant} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{Effective Clients (\%)} & \textbf{$\epsilon$} \\
 \hline
 Ours & -- & -- & -- & -- & -- & -- \\
 No Global Coordination & -- & -- & -- & -- & -- & -- \\
@@ -1340,14 +1470,13 @@ clipping be
 e_i^t=e_{\mathrm{uclip},i}^t.
 \label{eq:app_total_bias}
 \end{equation}
-For consistency with the separable upper bound used during selection, define
-$n_{i,\mathrm{upd}}^t=n_{i,c}^t+n_{i,e}^t$ as the candidate-specific protected
-update-DP event count appearing in Section~\ref{sec:cost_utility_model}. We use
+For consistency with the separable upper bound used during selection, write
+$\nu_{i,\mathrm{upd}}^t=\nu_{i,\mathrm{ind}}^t+\nu_{i,\mathrm{edge}}^t$ only as a local shorthand for the two DP-distortion attribution multiplicities used in Section~\ref{sec:cost_utility_model}. It is not a lifetime-accounting event counter. We use
 the conservative bound
 \begin{equation}
 \mathbb{E}[\|e_i^t\|_2^2\mid w^t]
-\le3n_{i,\mathrm{upd}}^t
-\mathcal{B}_{\mathrm{clip},i}^t.
+\le3\nu_{i,\mathrm{upd}}^t
+\mathcal{B}_{\mathrm{clip}}.
 \label{eq:app_combined_bias_bound}
 \end{equation}
 To make the coefficients in \equref{eq:client_error_cost} explicit, define the
@@ -1368,16 +1497,16 @@ where \(e_i^t\) is the deterministic bias in \equref{eq:app_total_bias} and
 \begin{aligned}
 V_i^t
 &=\mathbb{E}[\|s_i^t\|_2^2\mid w^t]\\
-&\le \sigma_{\mathrm{local}}^2
-+n_{i,\mathrm{upd}}^t
-\frac{(\sigma_{i,h_i}^t)^2(2C_u)^2d}{\alpha^2}.
+&\le V_{\mathrm{local}}
++\nu_{i,\mathrm{upd}}^t
+\frac{(\sigma_{i,h_i}^t)^2(2C_u)^2d_{\mathrm{upd}}}{\alpha^2}.
 \end{aligned}
 \label{eq:app_total_variance}
 \end{equation}
 Dividing the update perturbation by \(\alpha\) converts it to gradient units,
 which explains the factor \(\alpha^{-2}\) in
 \equref{eq:app_total_variance}. After admission, the client terms are
-combined using \(q_i^t(\mathbf x)\). The independent variance terms are
+combined using \(q_i^t(\mathbf h)\). The independent variance terms are
 therefore multiplied by \((q_i^t)^2\), as shown in
 \equref{eq:global_omega}. Noise added after edge aggregation is
 combined using the corresponding group weight \(q_g^t\).
@@ -1435,7 +1564,7 @@ Substituting \equref{eq:app_combined_bias_bound} into
 where
 \begin{equation}
 S_{\mathrm{bias},i}^t
-=n_{i,\mathrm{upd}}^t\mathcal B_{\mathrm{clip},i}^t.
+=\nu_{i,\mathrm{upd}}^t\mathcal B_{\mathrm{clip}}.
 \label{eq:app_bias_sum}
 \end{equation}
 Because \(G\alpha^2V_i^t/2\le G\alpha^2V_i^t\), we use the conservative residual
