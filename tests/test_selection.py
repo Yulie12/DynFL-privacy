@@ -110,6 +110,38 @@ def test_edge_cloud_coverage_repair_keeps_one_cloud_path_per_edge() -> None:
         )
 
 
+def test_coverage_infeasible_fallback_records_failure_edges() -> None:
+    edge = _candidate("LIIE", time=1.0)
+    selected = [
+        (0, edge, [edge], 8.0),
+        (1, edge, [edge], 8.0),
+    ]
+    diagnostics: dict[str, object] = {}
+    config = SelectionConfig(
+        num_clients=2,
+        num_edges=1,
+        require_edge_cloud_coverage=True,
+        min_edge_cloud_fusion_ratio=0.5,
+    )
+
+    rewritten, evaluation = choose_global_pareto_profile(
+        config=config,
+        selected=selected,
+        client_samples={0: 8.0, 1: 2.0},
+        client_edges={0: 0, 1: 0},
+        diagnostics=diagnostics,
+    )
+
+    assert all(candidate.mode == "SKIP" for _, candidate, _, _ in rewritten)
+    assert evaluation.profile
+    assert diagnostics["coverage_infeasible_fallback"] is True
+    assert diagnostics["coverage_target_ratio"] == 0.5
+    failures = diagnostics["coverage_failure_edges"]
+    assert isinstance(failures, list)
+    assert failures[0]["edge_id"] == 0
+    assert failures[0]["maximum_coverage_ratio"] == 0.0
+
+
 def test_pareto_archive_contains_only_coverage_feasible_profiles() -> None:
     edge = _candidate("LIIE", time=1.0)
     cloud = _candidate("LIIC", time=2.0)

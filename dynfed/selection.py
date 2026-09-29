@@ -1132,6 +1132,9 @@ def choose_global_pareto_profile(
     if config.require_edge_cloud_coverage and not _edge_cloud_coverage_possible_from_pools(
         config, pools, client_samples, client_edges
     ):
+        coverage_failures = _edge_cloud_coverage_failure_details(
+            config, pools, client_samples, client_edges
+        )
         fallback_profile = {client_id: skipped_candidate() for client_id in pools}
         fallback = _evaluate_profile(
             config,
@@ -1147,6 +1150,10 @@ def choose_global_pareto_profile(
                     "archive": (),
                     "chosen": fallback,
                     "coverage_infeasible_fallback": True,
+                    "coverage_target_ratio": min(
+                        max(float(config.min_edge_cloud_fusion_ratio), 0.0), 1.0
+                    ),
+                    "coverage_failure_edges": coverage_failures,
                     "candidate_pool_sizes": {
                         client_id: len(pool) for client_id, pool in pools.items()
                     },
@@ -1715,6 +1722,40 @@ def _nsga2_crowding(front: list[ProfileEvaluation]) -> dict[tuple, float]:
                 value(ordered[index + 1]) - value(ordered[index - 1])
             ) / span
     return distances
+
+
+def _edge_cloud_coverage_failure_details(
+    config: SelectionConfig,
+    pools: dict[int, list[Candidate]],
+    client_samples: dict[int, float],
+    client_edges: dict[int, int],
+) -> list[dict[str, object]]:
+    target_ratio = min(max(float(config.min_edge_cloud_fusion_ratio), 0.0), 1.0)
+    edge_clients: dict[int, list[int]] = {}
+    for client_id in pools:
+        edge_clients.setdefault(int(client_edges[client_id]), []).append(client_id)
+    failures: list[dict[str, object]] = []
+    for edge_id, clients in sorted(edge_clients.items()):
+        total = sum(float(client_samples[client_id]) for client_id in clients)
+        cloud_capable = [
+            client_id
+            for client_id in clients
+            if any(_candidate_reaches_cloud(candidate) for candidate in pools[client_id])
+        ]
+        maximum_covered = sum(float(client_samples[client_id]) for client_id in cloud_capable)
+        ratio = maximum_covered / total if total > 0.0 else 0.0
+        if ratio + 1e-12 < target_ratio:
+            failures.append(
+                {
+                    "edge_id": int(edge_id),
+                    "total_samples": float(total),
+                    "maximum_covered_samples": float(maximum_covered),
+                    "maximum_coverage_ratio": float(ratio),
+                    "target_ratio": float(target_ratio),
+                    "cloud_capable_client_ids": [int(client_id) for client_id in cloud_capable],
+                }
+            )
+    return failures
 
 
 def _edge_cloud_coverage_possible_from_pools(

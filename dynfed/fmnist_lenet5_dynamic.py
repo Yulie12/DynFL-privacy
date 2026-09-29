@@ -2885,6 +2885,19 @@ def _run_lenet5_policy(
                     ),
                     sort_keys=True,
                 ),
+                "selection_coverage_infeasible_fallback": int(
+                    bool(selection_diagnostics.get("coverage_infeasible_fallback", False))
+                ),
+                "selection_coverage_target_ratio": float(
+                    selection_diagnostics.get(
+                        "coverage_target_ratio",
+                        effective_selection.min_edge_cloud_fusion_ratio,
+                    )
+                ),
+                "selection_coverage_failure_edges": json.dumps(
+                    selection_diagnostics.get("coverage_failure_edges", []),
+                    sort_keys=True,
+                ),
                 "update_dp_coverage": update_dp_coverage,
                 "update_he_coverage": update_he_coverage,
                 "uniform_update_dp": int(uniform_update_dp),
