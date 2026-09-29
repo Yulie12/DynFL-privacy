@@ -4224,6 +4224,7 @@ def _mode_link_transmissions(
             ("C_L_logits", "logits", L, False),
             ("L_C_grad", "grad", L, True),
             ("C_L_emb_grad", "emb_grad", L, False),
+            ("L_C_upd", "upd", 1, True),
             ("C_L_upd_final_return", "upd", 1, False),
         )
     if mode == "LIIE":
