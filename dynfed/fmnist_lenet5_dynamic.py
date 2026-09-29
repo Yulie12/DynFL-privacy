@@ -1535,6 +1535,34 @@ def _run_lenet5_policy(
                     "feasible_risk": candidate.feasible_risk,
                     "feasible_time": candidate.feasible_time,
                     "has_feasible_candidate": has_feasible_candidate,
+                    "total_candidates": len(_candidates),
+                    "feasible_candidates": sum(
+                        bool(item.feasible) for item in _candidates
+                    ),
+                    "budget_ok_candidates": sum(
+                        bool(item.epsilon_used <= rem + 1e-12) for item in _candidates
+                    ),
+                    "fixed_mode_candidates": sum(
+                        item.mode == "LIIEIIIC" for item in _candidates
+                    ),
+                    "fixed_mode_feasible_candidates": sum(
+                        item.mode == "LIIEIIIC" and bool(item.feasible)
+                        for item in _candidates
+                    ),
+                    "fixed_mode_budget_ok_candidates": sum(
+                        item.mode == "LIIEIIIC"
+                        and bool(item.feasible)
+                        and item.epsilon_used <= rem + 1e-12
+                        for item in _candidates
+                    ),
+                    "fixed_mode_epsilon_min": min(
+                        (item.epsilon_used for item in _candidates if item.mode == "LIIEIIIC"),
+                        default="",
+                    ),
+                    "fixed_mode_epsilon_max": max(
+                        (item.epsilon_used for item in _candidates if item.mode == "LIIEIIIC"),
+                        default="",
+                    ),
                     "fast_response_client": fast_response_deadline is not None,
                     "fast_response_deadline": fast_response_deadline,
                     "deadline_satisfied": deadline_satisfied,
@@ -6161,3 +6189,5 @@ def _write_live_status(path: Path, payload: dict[str, Any]) -> None:
             if attempt == 4:
                 raise
             time.sleep(0.05 * (attempt + 1))
+
+
