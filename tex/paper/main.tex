@@ -169,10 +169,7 @@ The main contributions are as follows.
     including edge only, direct cloud, and edge to cloud training and aggregation
     paths. Each client selects its own mode in each round, and the mode determines
     its actual communication and aggregation topology.
-    \item We cast the selection as a multiobjective optimization that balances
-    system latency and DP perturbation under resource and privacy constraints. Experiments under
-    heterogeneous resource and data conditions show that dynamic collaboration and
-    dynamic privacy calibration outperform fixed policies.
+    \item We cast the selection as a multiobjective optimization that balances system latency and a theoretically derived learning error objective under resource and privacy constraints. The learning error objective jointly captures incomplete global fusion and DP-induced update perturbation.
 \end{itemize}
 
 \section{Related Work}
@@ -592,7 +589,7 @@ that round are added to \(\Phi_i^t(\alpha)\) according to
 the candidate modes in the next round.
 \subsection{Joint Cost and Utility Modeling}
 \label{sec:cost_utility_model}
-Given the link topology, each mode induces its transmissions and the corresponding protection. Its privacy feasibility is determined by the lifetime accounting in Sec.~\ref{sec:privacy_model}. Each mode is then evaluated by resource feasibility, path latency, and DP perturbation cost.
+Given the link topology, each mode induces its transmissions and the corresponding protection. Its privacy feasibility is determined by the lifetime accounting in Sec.~\ref{sec:privacy_model}. Each mode is then evaluated by resource feasibility, path latency, and learning error objective.
 \subsubsection{End Side Resource Feasibility}
 
 Each collaboration mode must satisfy the computation and memory capacities
@@ -726,16 +723,16 @@ latency.
 \caption{Representative common timeline for mixed collaboration modes in cloud-edge-end federated learning.}
 \label{fig:time}
 \end{figure*}
-\subsubsection{DP Perturbation Cost}
+\subsubsection{Learning Error and DP Perturbation Cost}
 \label{sec:learning_cost}
 
-The selector evaluates a candidate mode profile using quantities available at selection time. The DP perturbation cost measures the distortion that DP introduces into the model update packets released to the Cloud.
+The selector evaluates a candidate mode profile using quantities available at selection time. When updates are aggregated across distributed tiers, two distinct distortion sources affect global convergence: (i) deterministic global fusion bias induced by partial Cloud coverage, and (ii) stochastic perturbation variance injected for differential privacy.
 
-For a client update released directly to the Cloud, let \(C_u\) be the update clipping norm. Under replacement adjacency, the sensitivity bound is \(\Delta_u=2C_u\), where the factor two accounts for the maximum change between two clipped updates. For an update vector of dimension \(d_{\mathrm{upd}}\), the Gaussian perturbation associated with client \(i\) under mode \(h_i^t\) has expected squared magnitude \(d_{\mathrm{upd}}(\sigma_{i,h_i}^t\Delta_u)^2\), where \(\sigma_{i,h_i}^t\) is the noise multiplier calibrated from the lifetime privacy state.
+For a client update released directly to the Cloud, let $C_u$ be the update clipping norm. Under replacement adjacency, the sensitivity bound is $\Delta_u=2C_u$, where the factor two accounts for the maximum change between two clipped updates. For an update vector of dimension $d_{\mathrm{upd}}$, the Gaussian perturbation associated with client $i$ under mode $h_i^t$ has expected squared magnitude $d_{\mathrm{upd}}(\sigma_{i,h_i}^t\Delta_u)^2$, where $\sigma_{i,h_i}^t$ is the noise multiplier calibrated from the lifetime privacy state.
 
-For a hierarchical Edge group \(g\), the participating client updates are first clipped and aggregated at the Edge. The aggregation weight of client \(i\) within Edge group \(g\) is \(w_{i\mid g}=n_i/(\sum_{j\in\mathcal G_g}n_j)\). The sensitivity of the resulting Edge update is bounded by the largest client contribution in the group, \(\Delta_g^t=2C_u\max_{i\in\mathcal G_g}w_{i\mid g}\). This Edge update is then released to the Cloud as a single packet with DP protection, and its noise multiplier is \(\sigma_g^t\), as defined in \eqref{eq:edge_group_noise_multiplier}.
+For a hierarchical Edge group $g$, the participating client updates are first clipped and aggregated at the Edge. The aggregation weight of client $i$ within Edge group $g$ is $w_{i\mid g}=n_i/(\sum_{j\in\mathcal G_g}n_j)$. The sensitivity of the resulting Edge update is bounded by the largest client contribution in the group, $\Delta_g^t=2C_u\max_{i\in\mathcal G_g}w_{i\mid g}$. This Edge update is then released to the Cloud as a single packet with DP protection, and its noise multiplier is $\sigma_g^t$, as defined in \eqref{eq:edge_group_noise_multiplier}.
 
-For a complete mode profile \(\mathbf h^t=(h_1^t,\ldots,h_N^t)\), let \(N_C(\mathbf h^t)\) denote the total number of represented training samples participating in the current Cloud aggregation. The Cloud aggregation weight of a directly released client update is \(n_i/N_C(\mathbf h^t)\), and the corresponding weight of an Edge update from group \(g\) is \(\sum_{i\in\mathcal G_g}n_i/N_C(\mathbf h^t)\). The DP perturbation cost of a complete mode profile is then
+For a complete mode profile $\mathbf h^t=(h_1^t,\ldots,h_N^t)$, let $N_C^t(\mathbf h^t)$ denote the total number of represented training samples participating in the current Cloud aggregation. The Cloud aggregation weight of a directly released client update is $n_i/N_C^t(\mathbf h^t)$, and the corresponding weight of an Edge update from group $g$ is $\sum_{i\in\mathcal G_g}n_i/N_C^t(\mathbf h^t)$. The DP perturbation cost of a complete mode profile is then
 \begin{equation}
 \begin{aligned}
 J_{\mathrm{DP}}(\mathbf h^t)
@@ -763,7 +760,21 @@ d_{\mathrm{upd}}
 \end{aligned}
 \label{eq:dp_perturbation_cost}
 \end{equation}
-The first sum runs over clients whose protected updates are released directly to the Cloud, and the second over Edge groups whose aggregated updates are released to the Cloud.
+
+In addition to privacy noise, candidate modes that terminate at the Edge without Cloud forwarding omit client contributions from the global Cloud state, introducing fusion bias. Let $N_{\mathrm{total}} = \sum_{i=1}^N n_i$ denote the total training sample mass across all clients. The sample mass ratio represented at the Cloud under profile $\mathbf h^t$ is
+\begin{equation}
+r_C^t(\mathbf h^t) = \frac{N_C^t(\mathbf h^t)}{N_{\mathrm{total}}}.
+\label{eq:cloud_mass_ratio}
+\end{equation}
+When $r_C^t(\mathbf h^t) < 1$, the global descent trajectory deviates from full-participation federated aggregation. As formally bounded in Proposition~\ref{prop:learning_bound} (with detailed proof in Appendix), under $\beta$-smooth global loss and step size $\eta \le 1/\beta$, the one-round expected optimization loss increment is upper-bounded by an affine combination of the worst-case fusion deviation and DP variance. By leveraging the step-size condition $\beta \le 1/\eta$, both terms can be bounded with a common coefficient $\frac{1}{2\eta}$. Dropping this shared scaling factor and terms independent of $\mathbf h^t$, we define the formal learning objective evaluated at selection time as
+\begin{equation}
+\widehat J_{\mathrm{learn}}^t(\mathbf h^t)
+=
+4C_u^2\left(1 - r_C^t(\mathbf h^t)\right)^2 + J_{\mathrm{DP}}(\mathbf h^t).
+\label{eq:j_learn_objective}
+\end{equation}
+For the boundary case of Edge-only mode profiles where $r_C^t(\mathbf h^t) = 0$, no Cloud aggregation occurs. To prevent division by zero in \eqref{eq:dp_perturbation_cost}, we explicitly define $J_{\mathrm{DP}}(\mathbf h^t) = 0$ for such profiles, yielding a maximum fusion penalty of $\widehat J_{\mathrm{learn}}^t(\mathbf h^t) = 4C_u^2$. This explicitly ensures that abandoning global fusion is never evaluated as a zero-cost solution.
+Here, the weighting constants $\frac{4C_u^2}{\eta}$ and $\beta$ emerge intrinsically from the optimization descent lemma rather than empirical tuning, naturally capturing the fundamental trade-off between global information coverage and privacy distortion.
 \subsection{Global Multiobjective Collaborative Optimization}
 \label{sec:global_optimization}
 
@@ -783,7 +794,7 @@ A complete mixed mode profile is \(\mathbf h^t=(h_1^t,\ldots,h_N^t)\). The flow 
 \end{equation}
 An execution that is not admitted is reported as \textsc{skip}.
 
-For every feasible profile, the flow model produces the round duration \(T_{\mathrm{sys}}(\mathbf h^t)\), while the DP release model produces the perturbation cost \(J_{\mathrm{DP}}(\mathbf h^t)\) through \eqref{eq:dp_perturbation_cost}. The selector therefore minimizes the following two objective functions.
+For every feasible profile, the flow model produces the round duration $T_{\mathrm{sys}}(\mathbf h^t)$, while the formal learning objective $\widehat J_{\mathrm{learn}}^t(\mathbf h^t)$ is evaluated through \eqref{eq:j_learn_objective}. The selector therefore minimizes the following two objective functions:
 \begin{equation}
 \underset{\mathbf h^t\in\mathcal F_{\mathrm{sys}}^t}
 {\operatorname{minimize}}
@@ -792,12 +803,12 @@ For every feasible profile, the flow model produces the round duration \(T_{\mat
 =
 \begin{bmatrix}
 T_{\mathrm{sys}}(\mathbf h^t)\\
-J_{\mathrm{DP}}(\mathbf h^t)
+\widehat J_{\mathrm{learn}}^t(\mathbf h^t)
 \end{bmatrix}.
 \label{eq:global_multiobjective}
 \end{equation}
 
-Latency and DP perturbation are the two objectives in the current implementation. HE and communication processing contribute to the path latency, while DP calibration determines privacy feasibility and the resulting perturbation cost.
+Latency and the learning error are the two objectives in the current implementation. HE and communication processing contribute to the path latency, while partial Cloud participation and DP calibration jointly determine the expected learning error bound.
 
 The nondominated decision set is
 \begin{equation}
@@ -814,7 +825,7 @@ The nondominated decision set is
 \end{equation}
 where \(\prec\) denotes Pareto dominance with respect to the two objectives in \eqref{eq:global_multiobjective}. In the bounded solver, the maintained nondominated archive approximates this set.
 
-The Tchebycheff stage normalizes the two objectives over the current nondominated archive. Let \(T_{\min}^t,T_{\max}^t\) and \(J_{\min}^t,J_{\max}^t\) denote the minimum and maximum values of the latency and DP perturbation objectives observed in that archive. These values define the normalization range within the current archive. The normalized objectives are
+The Tchebycheff stage normalizes the two objectives over the current nondominated archive. Let $T_{\min}^t,T_{\max}^t$ and $J_{\min}^t,J_{\max}^t$ denote the minimum and maximum values of the latency and learning error objectives observed in that archive. These values define the normalization range within the current archive. The normalized objectives are
 \begin{equation}
 \bar T(\mathbf h^t)
 =
@@ -827,7 +838,7 @@ T_{\max}^t-T_{\min}^t+\gamma_n
 \bar J(\mathbf h^t)
 =
 \frac{
-J_{\mathrm{DP}}(\mathbf h^t)-J_{\min}^t
+\widehat J_{\mathrm{learn}}^t(\mathbf h^t)-J_{\min}^t
 }{
 J_{\max}^t-J_{\min}^t+\gamma_n
 }.
@@ -852,7 +863,7 @@ D_\infty(\mathbf h^t).
 \label{eq:selection}
 \end{equation}
 
-The implementation resolves equal distances deterministically using system latency, then \(J_{\mathrm{DP}}(\mathbf h^t)\), followed by a stable profile identity. Real test accuracy is reserved for experimental evaluation.
+The implementation resolves equal distances deterministically using system latency, then \(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\), followed by a stable profile identity. Real test accuracy is reserved for experimental evaluation.
 \section{Algorithm}
 \label{sec:algorithm}
 
@@ -919,7 +930,7 @@ using the shared flow, buffer, aggregation, and admission constraints
 \ENDIF
 
 \STATE Evaluate the initial candidate profiles using
-\(T_{\mathrm{sys}}(\mathbf h^t)\) and \(J_{\mathrm{DP}}(\mathbf h^t)\)
+\(T_{\mathrm{sys}}(\mathbf h^t)\) and \(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\) via \eqref{eq:j_learn_objective}
 
 \STATE Initialize archive \(\mathcal A\) with the nondominated initial
 profiles and queue \(\mathcal B\)
@@ -929,7 +940,7 @@ profiles and queue \(\mathcal B\)
     \(\mathcal A\cup\mathcal B\)
     \STATE Retain only profiles in \(\mathcal F_{\mathrm{sys}}^t\)
     \STATE Evaluate \(T_{\mathrm{sys}}(\mathbf h^t)\) and
-    \(J_{\mathrm{DP}}(\mathbf h^t)\) for the retained profiles
+    \(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\) via \eqref{eq:j_learn_objective} for the retained profiles
     \STATE Update \(\mathcal A\), keeping at most \(K_{\mathrm P}\)
     nondominated profiles
     \STATE Update \(\mathcal B\), keeping at most \(K_{\mathrm B}\)
@@ -1455,173 +1466,97 @@ cloud-edge-end deployment and will further reduce reconfiguration overhead
 through parallel profile evaluation, distributed search, and warm starts.
 
 \appendix
-\section{Derivation of the Convergence Error Cost Estimate}
-\label{app:convergence_derivation}
+\section{Derivation of the Expected Learning Objective Bound}
+\label{app:convergence_proof}
 
-This appendix provides the intermediate steps used to estimate convergence
-error cost in Section~\ref{sec:cost_utility_model}. It separates the effects
-of update clipping and Gaussian update noise.
+This appendix provides the formal proof for the learning objective bound formulated in Sec.~\ref{sec:learning_cost}.
 
-\subsection{PL Error Recursion}
+\subsection{System Model and Update Decomposition}
+Let $F(w)$ denote the global objective function. We assume that $F$ is $L$-smooth (denoted by $\beta$ in the main text to prevent notation conflict with the Local tier $L$), satisfying
+\begin{equation}
+F(y) \le F(x) + \langle \nabla F(x), y - x \rangle + \frac{\beta}{2}\|y - x\|_2^2, \quad \forall x, y.
+\label{eq:app_smoothness}
+\end{equation}
 
-Let the deterministic parameter gradient perturbation caused by update
-clipping be
+In round $t$, let $\Delta_{\mathrm{full}}^t = \sum_{i=1}^N \frac{n_i}{N_{\mathrm{total}}} u_i^t$ denote the ideal, unperturbed full-fusion model update with $\|u_i^t\|_2 \le C_u$. For a given collaboration profile $\mathbf h^t$, let $\mathcal C^t \subseteq \{1,\dots,N\}$ denote the subset of clients whose updates participate in Cloud aggregation (either directly or aggregated via Edge groups). The noise-free profile update received at the Cloud is
 \begin{equation}
-e_i^t=e_{\mathrm{uclip},i}^t.
-\label{eq:app_total_bias}
+\Delta_{\mathrm{prof}}^t = \sum_{i \in \mathcal C^t} \frac{n_i}{N_C^t(\mathbf h^t)} u_i^t,
 \end{equation}
-For consistency with the separable upper bound used during selection, write
-$\nu_{i,\mathrm{upd}}^t=\nu_{i,\mathrm{ind}}^t+\nu_{i,\mathrm{edge}}^t$ only as a local shorthand for the two DP-distortion attribution multiplicities used in Section~\ref{sec:cost_utility_model}. It is not a lifetime-accounting event counter. We use
-the conservative bound
+where $N_C^t(\mathbf h^t) = \sum_{i \in \mathcal C^t} n_i$.
+The privacy mechanism injects a zero-mean perturbation $z_{\mathrm{DP}}^t(\mathbf h^t)$ with variance $\mathbb E_t[\|z_{\mathrm{DP}}^t(\mathbf h^t)\|_2^2] = J_{\mathrm{DP}}(\mathbf h^t)$, yielding the executed global model update:
 \begin{equation}
-\mathbb{E}[\|e_i^t\|_2^2\mid w^t]
-\le3\nu_{i,\mathrm{upd}}^t
-\mathcal{B}_{\mathrm{clip}}.
-\label{eq:app_combined_bias_bound}
+w^{t+1} - w^t = \Delta_{\mathrm{prof}}^t + z_{\mathrm{DP}}^t(\mathbf h^t).
 \end{equation}
-To make the coefficients in \equref{eq:client_error_cost} explicit, define the
-effective round step size
+
+\subsection{Lemma 1: Bounding Fusion Deviation}
+\begin{lemma}
+Let $r_C^t(\mathbf h^t) = N_C^t(\mathbf h^t) / N_{\mathrm{total}} \in (0, 1]$ denote the sample mass ratio represented at the Cloud. The squared norm of the fusion deviation $e_{\mathrm{fus}}^t = \Delta_{\mathrm{prof}}^t - \Delta_{\mathrm{full}}^t$ satisfies
 \begin{equation}
-\alpha=\eta_{\mathrm{lr}}L_B
-\label{eq:app_effective_step}
+B_{\mathrm{fus}}^t(\mathbf h^t) := \|e_{\mathrm{fus}}^t\|_2^2 \le 4C_u^2\left(1 - r_C^t(\mathbf h^t)\right)^2.
+\label{eq:app_lemma_bound}
 \end{equation}
-and write one perturbed update in gradient units as
+\end{lemma}
+
+\begin{proof}
+Let $\bar u_C^t = \sum_{i \in \mathcal C^t} \frac{n_i}{N_C^t} u_i^t$ and $\bar u_{\bar C}^t = \sum_{i \notin \mathcal C^t} \frac{n_i}{N_{\mathrm{total}} - N_C^t} u_i^t$ be the convex combinations of updates inside and outside the Cloud-participating set, respectively. Then the full update decomposes as
 \begin{equation}
-w^{t+1}=w^t-\alpha
-\left[\nabla F(w^t)+e_i^t+s_i^t\right],
-\label{eq:app_perturbed_update}
+\Delta_{\mathrm{full}}^t = r_C^t \bar u_C^t + (1 - r_C^t)\bar u_{\bar C}^t.
 \end{equation}
-where \(e_i^t\) is the deterministic bias in \equref{eq:app_total_bias} and
-\(s_i^t\) is conditionally zero mean stochastic error. Let
+Since $\Delta_{\mathrm{prof}}^t = \bar u_C^t$, the discrepancy is
+\begin{equation}
+e_{\mathrm{fus}}^t = \bar u_C^t - \left(r_C^t \bar u_C^t + (1 - r_C^t)\bar u_{\bar C}^t\right) = (1 - r_C^t)(\bar u_C^t - \bar u_{\bar C}^t).
+\end{equation}
+Applying the triangle inequality under the clipping bound $\|u_i^t\|_2 \le C_u$:
+\begin{equation}
+\|e_{\mathrm{fus}}^t\|_2 \le (1 - r_C^t)\left(\|\bar u_C^t\|_2 + \|\bar u_{\bar C}^t\|_2\right) \le 2C_u(1 - r_C^t).
+\end{equation}
+Squaring both sides yields \eqref{eq:app_lemma_bound}.
+\end{proof}
+
+\subsection{Proposition 1: One-Round Expected Loss Bound}
+\begin{proposition}
+\label{prop:learning_bound}
+Assume the unperturbed full-fusion update provides the true gradient direction, such that $g^t = -\frac{1}{\eta}\Delta_{\mathrm{full}}^t = \nabla F(w^t)$. Under step size $\eta \le 1/\beta$, identifying $b_{\mathrm{fus}}^t = -\frac{1}{\eta}e_{\mathrm{fus}}^t$, the conditional expected loss satisfies
+\begin{equation}
+\mathbb E_t[F(w^{t+1})] \le F(w^t) - \frac{\eta}{2}\|\nabla F(w^t)\|_2^2 + \frac{1}{2\eta}\left[ B_{\mathrm{fus}}^t(\mathbf h^t) + J_{\mathrm{DP}}(\mathbf h^t) \right].
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Substituting $w^{t+1} - w^t = -\eta(g^t + b_{\mathrm{fus}}^t) + z_{\mathrm{DP}}^t$ into \eqref{eq:app_smoothness}:
 \begin{equation}
 \begin{aligned}
-V_i^t
-&=\mathbb{E}[\|s_i^t\|_2^2\mid w^t]\\
-&\le V_{\mathrm{local}}
-+\nu_{i,\mathrm{upd}}^t
-\frac{(\sigma_{i,h_i}^t)^2(2C_u)^2d_{\mathrm{upd}}}{\alpha^2}.
+F(w^{t+1}) \le F(w^t) &+ \langle \nabla F(w^t), -\eta(g^t + b_{\mathrm{fus}}^t) + z_{\mathrm{DP}}^t \rangle \\
+&+ \frac{\beta}{2}\left\|-\eta(g^t + b_{\mathrm{fus}}^t) + z_{\mathrm{DP}}^t\right\|_2^2.
 \end{aligned}
-\label{eq:app_total_variance}
 \end{equation}
-Dividing the update perturbation by \(\alpha\) converts it to gradient units,
-which explains the factor \(\alpha^{-2}\) in
-\equref{eq:app_total_variance}. After admission, the client terms are
-combined using \(q_i^t(\mathbf h)\). The independent variance terms are
-therefore multiplied by \((q_i^t)^2\), as shown in
-\equref{eq:global_omega}. Noise added after edge aggregation is
-combined using the corresponding group weight \(q_g^t\).
-
-Let \(g^t=\nabla F(w^t)\), and condition on \(w^t\). By \(G\)-smoothness and
-\(\mathbb{E}[s_i^t\mid w^t]=0\),
+Taking conditional expectation $\mathbb E_t[\cdot]$ given $w^t$, since the perturbation is zero-mean ($\mathbb E_t[z_{\mathrm{DP}}^t] = 0$) and independent of the current gradients, the inner product with $z_{\mathrm{DP}}^t$ vanishes:
 \begin{equation}
 \begin{aligned}
-\mathbb{E}_t[F(w^{t+1})]
-&\le F(w^t)-\alpha\langle g^t,g^t+e_i^t\rangle\\
-&\quad+\frac{G\alpha^2}{2}
-\left(\|g^t+e_i^t\|_2^2+V_i^t\right).
+\mathbb E_t[F(w^{t+1})] \le F(w^t) &- \eta \langle g^t, g^t + b_{\mathrm{fus}}^t \rangle \\
+&+ \frac{\beta\eta^2}{2}\|g^t + b_{\mathrm{fus}}^t\|_2^2 + \frac{\beta}{2}\mathbb E_t[\|z_{\mathrm{DP}}^t\|_2^2].
 \end{aligned}
-\label{eq:app_smooth_descent}
 \end{equation}
-Using the exact identity
-\begin{equation}
-\langle g,g+e\rangle
-=\frac{1}{2}\|g\|_2^2+\frac{1}{2}\|g+e\|_2^2
--\frac{1}{2}\|e\|_2^2,
-\label{eq:app_inner_product_identity}
-\end{equation}
-and assuming \(0<\alpha\le1/G\), \equref{eq:app_smooth_descent} becomes
+Using the condition $\eta \le 1/\beta \implies \frac{\beta\eta^2}{2} \le \frac{\eta}{2}$, we bound the quadratic term:
 \begin{equation}
 \begin{aligned}
-\mathbb{E}_t[F(w^{t+1})]
-&\le F(w^t)-\frac{\alpha}{2}\|g^t\|_2^2
--\frac{\alpha}{2}(1-G\alpha)\|g^t+e_i^t\|_2^2\\
-&\quad+\frac{\alpha}{2}\|e_i^t\|_2^2
-+\frac{G\alpha^2}{2}V_i^t\\
-&\le F(w^t)-\frac{\alpha}{2}\|g^t\|_2^2
-+\frac{\alpha}{2}\|e_i^t\|_2^2
-+\frac{G\alpha^2}{2}V_i^t.
+&-\eta \langle g^t, g^t + b_{\mathrm{fus}}^t \rangle + \frac{\beta\eta^2}{2}\|g^t + b_{\mathrm{fus}}^t\|_2^2 \\
+&\le -\eta \|g^t\|_2^2 - \eta \langle g^t, b_{\mathrm{fus}}^t \rangle \\
+&\quad + \frac{\eta}{2}\left(\|g^t\|_2^2 + 2\langle g^t, b_{\mathrm{fus}}^t \rangle + \|b_{\mathrm{fus}}^t\|_2^2\right) \\
+&= - \frac{\eta}{2}\|g^t\|_2^2 + \frac{\eta}{2}\|b_{\mathrm{fus}}^t\|_2^2.
 \end{aligned}
-\label{eq:app_descent_bias_variance}
 \end{equation}
-The PL inequality implies
-\(-\alpha\|g^t\|_2^2/2\le
--\mu\alpha[F(w^t)-F(w^*)]\). Define
+Notice that the cross term $\eta \langle g^t, b_{\mathrm{fus}}^t \rangle$ cancels out identically.
+Substituting $\|b_{\mathrm{fus}}^t\|_2^2 = \frac{1}{\eta^2}\|e_{\mathrm{fus}}^t\|_2^2 = \frac{1}{\eta^2}B_{\mathrm{fus}}^t$ and $\mathbb E_t[\|z_{\mathrm{DP}}^t\|_2^2] = J_{\mathrm{DP}}(\mathbf h^t)$ gives
 \begin{equation}
-\rho_{\mathrm{PL}}=\mu\alpha=\mu\eta_{\mathrm{lr}}L_B.
-\label{eq:app_pl_factor}
+\mathbb E_t[F(w^{t+1})] \le F(w^t) - \frac{\eta}{2}\|g^t\|_2^2 + \frac{1}{2\eta}B_{\mathrm{fus}}^t(\mathbf h^t) + \frac{\beta}{2}J_{\mathrm{DP}}(\mathbf h^t).
 \end{equation}
-Substituting \equref{eq:app_combined_bias_bound} into
-\equref{eq:app_descent_bias_variance} therefore gives
+Using the step-size assumption $\eta \le 1/\beta \implies \beta \le 1/\eta$, we can further upper-bound the DP term coefficient as $\frac{\beta}{2} \le \frac{1}{2\eta}$. Applying Lemma 1 to bound $B_{\mathrm{fus}}^t(\mathbf h^t) \le 4C_u^2(1 - r_C^t(\mathbf h^t))^2$, we obtain
 \begin{equation}
-\begin{aligned}
-\mathbb{E}_t[F(w^{t+1})-F(w^*)]
-&\le(1-\rho_{\mathrm{PL}})[F(w^t)-F(w^*)]\\
-&\quad+\frac{3\alpha}{2}S_{\mathrm{bias},i}^t
-+\frac{G\alpha^2}{2}V_i^t,
-\end{aligned}
-\label{eq:app_pl_recursion}
+\mathbb E_t[F(w^{t+1})] \le F(w^t) - \frac{\eta}{2}\|g^t\|_2^2 + \frac{1}{2\eta}\left[ 4C_u^2(1 - r_C^t(\mathbf h^t))^2 + J_{\mathrm{DP}}(\mathbf h^t) \right].
 \end{equation}
-where
-\begin{equation}
-S_{\mathrm{bias},i}^t
-=\nu_{i,\mathrm{upd}}^t\mathcal B_{\mathrm{clip}}.
-\label{eq:app_bias_sum}
-\end{equation}
-Because \(G\alpha^2V_i^t/2\le G\alpha^2V_i^t\), we use the conservative residual
-\begin{equation}
-\mathcal R(h_i)
-=\frac{3\alpha}{2}S_{\mathrm{bias},i}^t+G\alpha^2V_i^t.
-\label{eq:app_residual_definition}
-\end{equation}
-
-For a fixed conditional residual, iterating the recursion gives
-\begin{equation}
-\begin{aligned}
-\mathbb{E}[F(w^t)-F(w^*)]
-&\le(1-\rho_{\mathrm{PL}})^t[F(w^0)-F(w^*)]\\
-&\quad+\frac{1-(1-\rho_{\mathrm{PL}})^t}{\rho_{\mathrm{PL}}}
-\mathcal R(h_i).
-\end{aligned}
-\label{eq:app_recursion_unrolled}
-\end{equation}
-Thus its persistent contribution is estimated by
-\(\mathcal R(h_i)/\rho_{\mathrm{PL}}\). Substituting
-\(\alpha=\eta_{\mathrm{lr}}L_B\), \equref{eq:app_total_variance}, and
-\equref{eq:app_bias_sum} gives the client terms \(B_i^t\) and \(V_i^t\) in
-\equref{eq:client_error_cost}. Update terms are weighted by the protected update events induced by the
-candidate exposure. When a candidate contains a Cloud-facing update that requires
-DP, its variance contribution uses the lifetime-aware multiplier
-$\sigma_{i,h_i}^t$ determined from the current client ledger. Candidates without
-such an exposure do not acquire an artificial common release-noise term. Weighting
-the resulting client clipping-bias and variance terms by $q_i^t$, followed by the
-edge-group and Cloud-reaching terms defined in the main text, gives the
-system-level error proxy in \equref{eq:global_omega}.
-
-\section{CKKS Implementation and Security Scope}
-\label{app:he_model}
-The HE path uses the CKKS approximate arithmetic scheme~\cite{cheon2017ckks}.
-HE is attached to the update exposures whose protection requirements demand
-confidential aggregation; it is not a mode-independent post-selection overlay.
-Under the current paper profile, Cloud-facing update exposures require both DP
-and HE. DP calibrates the privacy loss of the protected update event, while CKKS
-protects the corresponding contribution during encrypted aggregation. The formal
-configuration uses the SEAL backend with real HE execution and rejects a selected
-HE candidate if real HE is unavailable.
-
-The implementation uses polynomial modulus degree 8192, coefficient modulus bits
-$[50,40]$, scale $2^{40}$, and chunks of at most 4096 values. The runtime records
-HE execution status and aggregation measurements for the selected protected
-paths. These measurements establish execution of the configured encrypted
-aggregation path; they do not by themselves establish threshold decryption,
-independent role isolation, or a uniform end-to-end DP guarantee for the final
-global model. Profiled/plaintext HE estimates remain diagnostic controls rather
-than substitutes for real HE in the formal configuration.
-
-\section*{Code and Data Availability}
-The supplementary artifact contains the implementation, versioned experiment
-configurations, generated device profiles, exact data partitions, and raw round
-logs used in this study. The datasets are obtained through their public
-torchvision interfaces and are not redistributed.
+Dropping the terms independent of $\mathbf h^t$ and factoring out the common positive scaling constant $\frac{1}{2\eta}$, we establish the surrogate objective $\widehat J_{\mathrm{learn}}^t(\mathbf h^t)$ in \eqref{eq:j_learn_objective}.
+\end{proof}
 
 \bibliographystyle{elsarticle-num}
 \bibliography{refs}
