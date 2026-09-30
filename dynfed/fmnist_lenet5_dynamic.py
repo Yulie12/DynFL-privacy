@@ -1411,7 +1411,7 @@ def _run_lenet5_policy(
                 search_method=search_method,
                 diagnostics=selection_diagnostics,
                 previous_client_updates=previous_client_updates,
-                fusion_objective_enabled=(policy == "full_dynfl_3obj_diag"),
+                fusion_objective_enabled=False,
             )
             if policy in {"ours", "full_dynfl"}:
                 global_pareto_selection_rounds += 1
@@ -2929,6 +2929,36 @@ def _run_lenet5_policy(
                 "selection_coverage_infeasible_fallback": int(
                     bool(selection_diagnostics.get("coverage_infeasible_fallback", False))
                 ),
+                "selection_cloud_reaching_candidates": int(
+                    selection_diagnostics.get("cloud_reaching_candidate_count", 0)
+                ),
+                "selection_clients_with_cloud_candidate": int(
+                    selection_diagnostics.get("clients_with_cloud_candidate", 0)
+                ),
+                "selection_seed_cloud_fusion_ratios": json.dumps(
+                    [
+                        evaluation.cloud_fusion_ratio
+                        for evaluation in selection_diagnostics.get("seed_evaluations", ())
+                    ]
+                ),
+                "selection_seed_dp_objectives": json.dumps(
+                    [
+                        evaluation.system_dp
+                        for evaluation in selection_diagnostics.get("seed_evaluations", ())
+                    ]
+                ),
+                "selection_seed_fusion_bounds": json.dumps(
+                    [
+                        evaluation.fusion_bound
+                        for evaluation in selection_diagnostics.get("seed_evaluations", ())
+                    ]
+                ),
+                "selection_seed_learning_error_objectives": json.dumps(
+                    [
+                        evaluation.system_learning_error
+                        for evaluation in selection_diagnostics.get("seed_evaluations", ())
+                    ]
+                ),
                 "selection_coverage_target_ratio": float(
                     selection_diagnostics.get(
                         "coverage_target_ratio",
@@ -2980,7 +3010,10 @@ def _run_lenet5_policy(
                     else "reuse"
                 ),
                 "system_latency_objective": profile_evaluation.system_latency if profile_evaluation else "",
-                "system_omega_objective": profile_evaluation.system_omega if profile_evaluation else "",
+                "dp_perturbation_objective": profile_evaluation.system_dp if profile_evaluation else "",
+                "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
+                "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
+                "system_omega_objective": profile_evaluation.system_learning_error if profile_evaluation else "",  # legacy column name
                 "fusion_distortion_objective": profile_evaluation.fusion_distortion if profile_evaluation else "",
                 "fusion_cosine_distortion": profile_evaluation.fusion_cosine_distortion if profile_evaluation else "",
                 "fusion_objective_enabled": bool(profile_evaluation.fusion_objective_enabled) if profile_evaluation else False,

@@ -419,9 +419,20 @@ class ProfileEvaluation:
     fusion_distortion: float = 0.0
     fusion_cosine_distortion: float = 0.0
     fusion_objective_enabled: bool = False
+    # Raw DP second moment J_DP.  ``system_omega`` is the selector's formal
+    # learning objective J_learn = J_fusion^ub + J_DP.  Keep this separate so
+    # diagnostics can still report the DP term on its own.
+    dp_perturbation: float | None = None
+    fusion_bound: float = 0.0
 
     @property
     def system_dp(self) -> float:
+        # Backward compatibility for old tests/readers that construct a
+        # ProfileEvaluation directly.
+        return self.system_omega if self.dp_perturbation is None else self.dp_perturbation
+
+    @property
+    def system_learning_error(self) -> float:
         return self.system_omega
 
 
@@ -579,7 +590,9 @@ def run_selection_experiment(
                             == profile_evaluation.profile_signature,
                             "system_latency_objective": evaluation.system_latency,
                             "dp_perturbation_objective": evaluation.system_dp,
-                    "system_omega_objective": evaluation.system_dp,  # legacy alias
+                            "fusion_bound_objective": evaluation.fusion_bound,
+                            "learning_error_objective": evaluation.system_learning_error,
+                            "system_omega_objective": evaluation.system_learning_error,  # legacy column name
                             "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
                             "he_clients": sum(
                                 candidate_has_he(candidate)
@@ -685,7 +698,9 @@ def run_selection_experiment(
                     "sensitivity": client_sensitivity[client_id],
                     "system_latency_objective": profile_evaluation.system_latency if profile_evaluation else "",
                     "dp_perturbation_objective": profile_evaluation.system_dp if profile_evaluation else "",
-                    "system_omega_objective": profile_evaluation.system_dp if profile_evaluation else "",  # legacy alias
+                    "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
+                    "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
+                    "system_omega_objective": profile_evaluation.system_learning_error if profile_evaluation else "",  # legacy column name
                     "cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
                     "admitted_client_ids_objective": ";".join(str(cid) for cid in profile_evaluation.admitted_client_ids) if profile_evaluation else "",
                 }
@@ -1121,7 +1136,7 @@ def choose_global_pareto_profile(
     """Approximate TeX Algorithm 1 over a global client profile.
 
     Each client contributes a feasible candidate set S_i. The search keeps a
-    bounded non-dominated archive over (T_sys, J_DP), expands profiles by
+    bounded non-dominated archive over (T_sys, J_learn), expands profiles by
     changing one client at a time, then selects the archive profile closest to
     the normalized ideal point by Tchebycheff distance.
     """
@@ -1207,7 +1222,12 @@ def choose_global_pareto_profile(
         return rewritten, fallback
 
     seeds = (
-        _initial_profiles(config, pools, previous_choices)
+        _initial_profiles(
+            config,
+            pools,
+            previous_choices,
+            client_samples=client_samples,
+        )
         if objective == "pareto"
         else _initial_latency_profiles(pools, previous_choices)
     )
@@ -1553,6 +1573,16 @@ def choose_global_pareto_profile(
                 "update_mechanism_counts_after_stability": (
                     _candidate_update_mechanism_population(pools)
                 ),
+                "cloud_reaching_candidate_count": sum(
+                    _candidate_reaches_cloud(candidate)
+                    for candidates in pools.values()
+                    for candidate in candidates
+                ),
+                "clients_with_cloud_candidate": sum(
+                    any(_candidate_reaches_cloud(candidate) for candidate in candidates)
+                    for candidates in pools.values()
+                ),
+                "seed_evaluations": tuple(seed_evaluations),
                 "search_method": search_method,
             }
         )
@@ -2037,10 +2067,83 @@ def evaluate_global_profile(
     )
 
 
+def _cloud_coverage_anchor_profiles(
+    pools: dict[int, list[Candidate]],
+    fastest: dict[int, Candidate],
+    client_samples: dict[int, float] | None = None,
+    targets: tuple[float, ...] = (0.25, 0.50, 0.75, 1.00),
+) -> list[dict[int, Candidate]]:
+    """Build deterministic search seeds spanning low-to-high Cloud coverage.
+
+    These are search anchors only; they do not impose a minimum Cloud-coverage
+    constraint and do not change the Pareto objectives.  Starting from the
+    fastest profile, clients are switched to their fastest Cloud-reaching
+    candidate in increasing latency-cost-per-sample order until each requested
+    represented-sample target is reached or no further Cloud candidate exists.
+    """
+    if not pools:
+        return []
+    sample_mass = {
+        client_id: max(float((client_samples or {}).get(client_id, 1.0)), 0.0)
+        for client_id in pools
+    }
+    total_mass = sum(sample_mass.values())
+    if total_mass <= 0.0:
+        sample_mass = {client_id: 1.0 for client_id in pools}
+        total_mass = float(len(pools))
+
+    base = dict(fastest)
+    covered_mass = sum(
+        sample_mass[client_id]
+        for client_id, candidate in base.items()
+        if _candidate_reaches_cloud(candidate)
+    )
+    switches: list[tuple[float, float, int, Candidate]] = []
+    for client_id, candidates in pools.items():
+        if _candidate_reaches_cloud(base[client_id]):
+            continue
+        cloud_candidates = [
+            candidate for candidate in candidates if _candidate_reaches_cloud(candidate)
+        ]
+        if not cloud_candidates:
+            continue
+        cloud_candidate = min(
+            cloud_candidates,
+            key=lambda item: (item.time, _candidate_key(item)),
+        )
+        mass = max(sample_mass[client_id], 1e-12)
+        latency_delta = float(cloud_candidate.time - base[client_id].time)
+        switches.append(
+            (
+                max(latency_delta, 0.0) / mass,
+                latency_delta,
+                client_id,
+                cloud_candidate,
+            )
+        )
+    switches.sort(key=lambda item: (item[0], item[1], item[2], _candidate_key(item[3])))
+
+    anchors: list[dict[int, Candidate]] = []
+    current = dict(base)
+    switch_index = 0
+    for target in targets:
+        target_mass = min(max(float(target), 0.0), 1.0) * total_mass
+        while covered_mass + 1e-12 < target_mass and switch_index < len(switches):
+            _cost, _delta, client_id, cloud_candidate = switches[switch_index]
+            switch_index += 1
+            if _candidate_reaches_cloud(current[client_id]):
+                continue
+            current[client_id] = cloud_candidate
+            covered_mass += sample_mass[client_id]
+        anchors.append(dict(current))
+    return _unique_profiles(anchors)
+
+
 def _initial_profiles(
     config: SelectionConfig,
     pools: dict[int, list[Candidate]],
     previous_choices: dict[int, Candidate],
+    client_samples: dict[int, float] | None = None,
 ) -> list[dict[int, Candidate]]:
     fastest = {client_id: min(candidates, key=lambda item: (item.time, _local_omega_proxy(item, config=config))) for client_id, candidates in pools.items()}
     # Zero-DP HE candidates can tie on local Omega; retain the cloud-fusion endpoint in that tie.
@@ -2095,8 +2198,13 @@ def _initial_profiles(
                 ),
             )
         intermediate_profiles.append(profile)
+    coverage_anchors = _cloud_coverage_anchor_profiles(
+        pools,
+        fastest,
+        client_samples=client_samples,
+    )
     return _unique_profiles(
-        [previous, fastest, *intermediate_profiles, lowest_omega]
+        [previous, fastest, *intermediate_profiles, *coverage_anchors, lowest_omega]
     )
 
 
@@ -2361,6 +2469,13 @@ def _evaluate_profile(
         client_samples,
         admitted_client_ids,
     )
+    # Formal selection-time fusion bound from the paper:
+    #   J_fusion^ub = 4 C_u^2 (1-r_C)^2.
+    # For Edge-only profiles r_C=0 and _global_dp_perturbation_cost returns
+    # zero because there is no Cloud release, hence J_learn=4 C_u^2.
+    clip_norm = max(float(config.omega_update_clip_norm), 0.0)
+    fusion_bound = 4.0 * clip_norm * clip_norm * (1.0 - cloud_fusion_ratio) ** 2
+    system_learning_error = fusion_bound + system_dp
     fusion_distortion, fusion_cosine_distortion = _profile_fusion_distortion(
         profile,
         client_samples,
@@ -2371,13 +2486,17 @@ def _evaluate_profile(
     return ProfileEvaluation(
         profile=profile,
         system_latency=system_latency,
-        system_omega=system_dp,
+        system_omega=system_learning_error,
         cloud_fusion_ratio=cloud_fusion_ratio,
         admitted_client_ids=tuple(sorted(admitted_client_ids)),
         profile_signature=profile_signature,
         fusion_distortion=fusion_distortion,
         fusion_cosine_distortion=fusion_cosine_distortion,
-        fusion_objective_enabled=bool(fusion_objective_enabled),
+        # The old three-objective diagnostic is intentionally retired from
+        # selection.  Observed fusion distortion remains diagnostic-only.
+        fusion_objective_enabled=False,
+        dp_perturbation=system_dp,
+        fusion_bound=fusion_bound,
     )
 
 

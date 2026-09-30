@@ -43,6 +43,38 @@ def test_lowest_omega_seed_prefers_cloud_when_local_error_is_tied() -> None:
     assert all(candidate.mode == "LIIC" for candidate in profiles[-1].values())
 
 
+def test_initial_profiles_include_sample_mass_cloud_coverage_anchors() -> None:
+    pools = {
+        client_id: [
+            _candidate("LIIE", time=1.0),
+            _candidate("LIIC", time=2.0 + 0.1 * client_id),
+        ]
+        for client_id in range(4)
+    }
+    samples = {0: 4.0, 1: 3.0, 2: 2.0, 3: 1.0}
+
+    profiles = _initial_profiles(
+        SelectionConfig(),
+        pools,
+        previous_choices={},
+        client_samples=samples,
+    )
+    ratios = [
+        sum(
+            samples[client_id]
+            for client_id, candidate in profile.items()
+            if selection_module._candidate_reaches_cloud(candidate)
+        )
+        / sum(samples.values())
+        for profile in profiles
+    ]
+
+    assert any(ratio >= 0.25 for ratio in ratios)
+    assert any(ratio >= 0.50 for ratio in ratios)
+    assert any(ratio >= 0.75 for ratio in ratios)
+    assert any(ratio >= 1.00 for ratio in ratios)
+
+
 def test_each_profile_derives_its_own_admitted_clients() -> None:
     config = SelectionConfig(
         num_clients=4,
