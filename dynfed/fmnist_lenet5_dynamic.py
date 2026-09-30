@@ -1081,6 +1081,7 @@ def _run_lenet5_policy(
     real_he_aggregated_clients = 0
     global_pareto_selection_rounds = 0
     client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
+    previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
 
     checkpoint_path = output_dir / "checkpoint.pt"
     if resume_from_policy_dir is not None:
@@ -1374,6 +1375,7 @@ def _run_lenet5_policy(
             "ours_no_omega",
             "ours_fixed_liieiiic",
             "full_dynfl",
+            "full_dynfl_3obj_diag",
             "fixed_mode_fixed_privacy",
             "dynamic_mode_fixed_privacy",
             "fixed_mode_dynamic_privacy",
@@ -1408,6 +1410,8 @@ def _run_lenet5_policy(
                 objective=objective,
                 search_method=search_method,
                 diagnostics=selection_diagnostics,
+                previous_client_updates=previous_client_updates,
+                fusion_objective_enabled=(policy == "full_dynfl_3obj_diag"),
             )
             if policy in {"ours", "full_dynfl"}:
                 global_pareto_selection_rounds += 1
@@ -1417,6 +1421,7 @@ def _run_lenet5_policy(
             "ours_no_omega",
             "ours_fixed_liieiiic",
             "full_dynfl",
+            "full_dynfl_3obj_diag",
             "fixed_mode_fixed_privacy",
             "dynamic_mode_fixed_privacy",
             "fixed_mode_dynamic_privacy",
@@ -1652,12 +1657,20 @@ def _run_lenet5_policy(
                 for field in ("actual_local_batches", "actual_optimizer_steps"):
                     row[field] = result.get(field, 0)
 
+        round_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
         for client_id, candidate, idx, sequence in train_tasks:
             result = worker_results.get(client_id)
             if result is None:
                 skipped_clients += 1
                 continue
             state_diff = result["state_diff"]
+            round_client_updates[client_id] = {
+                part_name: {
+                    name: tensor.detach().cpu().clone()
+                    for name, tensor in part_values.items()
+                }
+                for part_name, part_values in state_diff.items()
+            }
             measured_local = float(result["measured_local"])
             if not result["finite"]:
                 skipped_clients += 1
@@ -2968,6 +2981,9 @@ def _run_lenet5_policy(
                 ),
                 "system_latency_objective": profile_evaluation.system_latency if profile_evaluation else "",
                 "system_omega_objective": profile_evaluation.system_omega if profile_evaluation else "",
+                "fusion_distortion_objective": profile_evaluation.fusion_distortion if profile_evaluation else "",
+                "fusion_cosine_distortion": profile_evaluation.fusion_cosine_distortion if profile_evaluation else "",
+                "fusion_objective_enabled": bool(profile_evaluation.fusion_objective_enabled) if profile_evaluation else False,
                 "cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
                 "selector_cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
                 "actual_cloud_fusion_ratio": actual_cloud_fusion_ratio,
@@ -3077,6 +3093,9 @@ def _run_lenet5_policy(
             "he_max_abs_error": current_round["he_max_abs_error"],
             "system_latency_objective": current_round["system_latency_objective"],
             "system_omega_objective": current_round["system_omega_objective"],
+            "fusion_distortion_objective": current_round["fusion_distortion_objective"],
+            "fusion_cosine_distortion": current_round["fusion_cosine_distortion"],
+            "fusion_objective_enabled": current_round["fusion_objective_enabled"],
             "cloud_fusion_ratio": current_round["cloud_fusion_ratio"],
             "selector_cloud_fusion_ratio": current_round["selector_cloud_fusion_ratio"],
             "actual_cloud_fusion_ratio": current_round["actual_cloud_fusion_ratio"],
@@ -3187,6 +3206,11 @@ def _run_lenet5_policy(
                 f"mean_client_norm={current_round['direction_mean_client_norm']:.6g}",
                 flush=True,
             )
+        if policy == "full_dynfl_3obj_diag":
+            previous_client_updates = round_client_updates
+        else:
+            previous_client_updates = {}
+
         worker_results.clear()
         flow_inputs.clear()
         initial_admitted_updates.clear()

@@ -4,6 +4,8 @@ import csv
 import json
 import math
 import random
+
+import torch
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from itertools import product
@@ -414,6 +416,9 @@ class ProfileEvaluation:
     cloud_fusion_ratio: float
     admitted_client_ids: tuple[int, ...] = ()
     profile_signature: tuple[int, ...] = ()
+    fusion_distortion: float = 0.0
+    fusion_cosine_distortion: float = 0.0
+    fusion_objective_enabled: bool = False
 
     @property
     def system_dp(self) -> float:
@@ -1110,6 +1115,8 @@ def choose_global_pareto_profile(
     objective: str = "pareto",
     search_method: str = "bounded",
     diagnostics: dict[str, Any] | None = None,
+    previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] | None = None,
+    fusion_objective_enabled: bool = False,
 ) -> tuple[list[tuple[int, Candidate, list[Candidate], float]], ProfileEvaluation]:
     """Approximate TeX Algorithm 1 over a global client profile.
 
@@ -1264,6 +1271,8 @@ def choose_global_pareto_profile(
             profile_signature=profile_key,
             flow_inputs_by_candidate=flow_inputs_by_candidate,
             flow_objectives=flow_objectives,
+            previous_client_updates=previous_client_updates,
+            fusion_objective_enabled=fusion_objective_enabled,
         )
         evaluation_cache[profile_key] = evaluated
         return evaluated
@@ -1708,13 +1717,15 @@ def _profile_objectives_dominate(
     left: ProfileEvaluation,
     right: ProfileEvaluation,
 ) -> bool:
+    values_left = [left.system_latency, left.system_omega]
+    values_right = [right.system_latency, right.system_omega]
+    use_fusion = left.fusion_objective_enabled or right.fusion_objective_enabled
+    if use_fusion:
+        values_left.append(left.fusion_distortion)
+        values_right.append(right.fusion_distortion)
     return (
-        left.system_latency <= right.system_latency
-        and left.system_omega <= right.system_omega
-        and (
-            left.system_latency < right.system_latency
-            or left.system_omega < right.system_omega
-        )
+        all(a <= b for a, b in zip(values_left, values_right))
+        and any(a < b for a, b in zip(values_left, values_right))
     )
 
 
@@ -2200,6 +2211,118 @@ def _global_replacement_priority(
     )
 
 
+
+def _state_diff_vector(state_diff: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
+    parts: list[torch.Tensor] = []
+    for part_name in ("end", "edge"):
+        for name in sorted(state_diff.get(part_name, {})):
+            parts.append(state_diff[part_name][name].detach().to(torch.float64).reshape(-1).cpu())
+    if not parts:
+        return torch.zeros(0, dtype=torch.float64)
+    return torch.cat(parts)
+
+
+def _weighted_update(
+    updates: list[tuple[torch.Tensor, float]],
+) -> torch.Tensor:
+    if not updates:
+        return torch.zeros(0, dtype=torch.float64)
+    total = sum(max(float(weight), 0.0) for _vec, weight in updates)
+    if total <= 0.0:
+        total = float(len(updates))
+        return sum(vec for vec, _weight in updates) / total
+    out = torch.zeros_like(updates[0][0])
+    for vec, weight in updates:
+        out = out + vec * (max(float(weight), 0.0) / total)
+    return out
+
+
+def _profile_fusion_distortion(
+    profile: dict[int, Candidate],
+    client_samples: dict[int, float],
+    client_edges: dict[int, int],
+    admitted_client_ids: tuple[int, ...],
+    previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] | None,
+) -> tuple[float, float]:
+    """Estimate global-update distortion caused by incomplete Cloud fusion.
+
+    The reference is sample-weighted full-client fusion of the previous-round
+    effective client updates. The candidate profile keeps direct Cloud
+    contributions individually and aggregates Edge->Cloud contributions by
+    Edge before the final Cloud fusion.
+    """
+    if not previous_client_updates:
+        return 0.0, 0.0
+
+    update_vectors = {
+        client_id: _state_diff_vector(state)
+        for client_id, state in previous_client_updates.items()
+        if state
+    }
+    if not update_vectors:
+        return 0.0, 0.0
+
+    common_ids = [
+        client_id
+        for client_id in sorted(client_samples)
+        if client_id in update_vectors
+    ]
+    if not common_ids:
+        return 0.0, 0.0
+
+    reference = _weighted_update(
+        [
+            (
+                update_vectors[client_id],
+                float(client_samples.get(client_id, 0.0)),
+            )
+            for client_id in common_ids
+        ]
+    )
+    if reference.numel() == 0:
+        return 0.0, 0.0
+
+    admitted = set(admitted_client_ids)
+    direct_updates: list[tuple[torch.Tensor, float]] = []
+    edge_groups: dict[int, list[tuple[torch.Tensor, float]]] = {}
+
+    for client_id in common_ids:
+        if client_id not in admitted:
+            continue
+        candidate = profile.get(client_id)
+        if candidate is None or not _candidate_reaches_cloud(candidate):
+            continue
+        weight = float(client_samples.get(client_id, 0.0))
+        vector = update_vectors[client_id]
+        if candidate.mode in EDGE_CLOUD_MODES:
+            edge_groups.setdefault(int(client_edges.get(client_id, -1)), []).append((vector, weight))
+        else:
+            direct_updates.append((vector, weight))
+
+    cloud_contributions = list(direct_updates)
+    for grouped in edge_groups.values():
+        group_weight = sum(max(float(weight), 0.0) for _vec, weight in grouped)
+        if group_weight <= 0.0:
+            continue
+        cloud_contributions.append((_weighted_update(grouped), group_weight))
+
+    actual = _weighted_update(cloud_contributions)
+    if actual.numel() == 0 or actual.shape != reference.shape:
+        return 1.0, 1.0
+
+    ref_norm = float(torch.linalg.vector_norm(reference))
+    diff_norm = float(torch.linalg.vector_norm(reference - actual))
+    relative = diff_norm / max(ref_norm, 1e-12)
+
+    actual_norm = float(torch.linalg.vector_norm(actual))
+    if ref_norm <= 1e-12 or actual_norm <= 1e-12:
+        cosine_distortion = 1.0 if ref_norm > 1e-12 or actual_norm > 1e-12 else 0.0
+    else:
+        cosine = float(torch.dot(reference, actual) / (ref_norm * actual_norm))
+        cosine_distortion = 1.0 - max(-1.0, min(1.0, cosine))
+    return float(relative), float(cosine_distortion)
+
+
 def _evaluate_profile(
     config: SelectionConfig,
     profile: dict[int, Candidate],
@@ -2210,6 +2333,8 @@ def _evaluate_profile(
     profile_signature: tuple[int, ...] = (),
     flow_inputs_by_candidate: dict[int, dict[tuple, ClientFlowInput]] | None = None,
     flow_objectives: tuple[tuple[int, ...], float] | None = None,
+    previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] | None = None,
+    fusion_objective_enabled: bool = False,
 ) -> ProfileEvaluation:
     if flow_objectives is None:
         flow_result = _profile_flow_result(
@@ -2236,6 +2361,13 @@ def _evaluate_profile(
         client_samples,
         admitted_client_ids,
     )
+    fusion_distortion, fusion_cosine_distortion = _profile_fusion_distortion(
+        profile,
+        client_samples,
+        client_edges,
+        admitted_client_ids,
+        previous_client_updates,
+    )
     return ProfileEvaluation(
         profile=profile,
         system_latency=system_latency,
@@ -2243,6 +2375,9 @@ def _evaluate_profile(
         cloud_fusion_ratio=cloud_fusion_ratio,
         admitted_client_ids=tuple(sorted(admitted_client_ids)),
         profile_signature=profile_signature,
+        fusion_distortion=fusion_distortion,
+        fusion_cosine_distortion=fusion_cosine_distortion,
+        fusion_objective_enabled=bool(fusion_objective_enabled),
     )
 
 
@@ -3403,68 +3538,77 @@ def _bounded_search_beam(
     o_values = [item.system_omega for item in bounds_source]
     t_min, t_max = min(t_values), max(t_values)
     o_min, o_max = min(o_values), max(o_values)
-    return sorted(
-        candidates,
-        key=lambda item: (
-            max(
-                _safe_norm_eps(item.system_latency, t_min, t_max, norm_eps),
-                _safe_norm_eps(item.system_omega, o_min, o_max, norm_eps),
-            ),
+    use_fusion = any(item.fusion_objective_enabled for item in bounds_source)
+    if use_fusion:
+        f_values = [item.fusion_distortion for item in bounds_source]
+        f_min, f_max = min(f_values), max(f_values)
+    else:
+        f_min = f_max = 0.0
+
+    def beam_key(item: ProfileEvaluation) -> tuple:
+        values = [
+            _safe_norm_eps(item.system_latency, t_min, t_max, norm_eps),
+            _safe_norm_eps(item.system_omega, o_min, o_max, norm_eps),
+        ]
+        if use_fusion:
+            values.append(_safe_norm_eps(item.fusion_distortion, f_min, f_max, norm_eps))
+        return (
+            max(values),
             item.system_latency,
             item.system_omega,
+            item.fusion_distortion,
             _evaluation_key(item),
-        ),
-    )[:limit]
+        )
+
+    return sorted(candidates, key=beam_key)[:limit]
 
 
 def _pareto_archive(evaluations: list[ProfileEvaluation], limit: int) -> list[ProfileEvaluation]:
-    unique: dict[tuple, ProfileEvaluation] = {}
-    for item in evaluations:
-        key = _evaluation_key(item)
-        previous = unique.get(key)
-        if previous is None or (item.system_latency, item.system_omega) < (previous.system_latency, previous.system_omega):
-            unique[key] = item
+    unique = _unique_evaluations(evaluations)
+    if not unique:
+        return []
 
-    items = sorted(
-        unique.values(),
-        key=lambda item: (item.system_latency, item.system_omega),
-    )
-    frontier: list[ProfileEvaluation] = []
-    best_omega = float("inf")
-    cursor = 0
-    while cursor < len(items):
-        latency = items[cursor].system_latency
-        group_end = cursor + 1
-        while group_end < len(items) and items[group_end].system_latency == latency:
-            group_end += 1
-
-        min_group_omega = items[cursor].system_omega
-        if min_group_omega < best_omega:
-            frontier.extend(
-                item
-                for item in items[cursor:group_end]
-                if item.system_omega == min_group_omega
-            )
-            best_omega = min_group_omega
-        cursor = group_end
-
-    frontier = frontier or items
-    if len(frontier) <= max(limit, 1):
+    frontier = [
+        candidate
+        for candidate in unique
+        if not any(
+            _profile_objectives_dominate(other, candidate)
+            for other in unique
+            if other is not candidate
+        )
+    ]
+    frontier = frontier or unique
+    if len(frontier) <= max(int(limit), 1):
         return frontier
-    if limit <= 2:
-        return frontier[:limit]
 
-    by_omega = min(frontier, key=lambda item: (item.system_omega, item.system_latency))
-    endpoints = [frontier[0], by_omega]
-    middle = [item for item in frontier if item not in endpoints]
-    slots = max(limit - len(endpoints), 0)
-    if not middle or slots <= 0:
-        return endpoints[:limit]
-    if slots >= len(middle):
-        return sorted(endpoints + middle, key=lambda item: (item.system_latency, item.system_omega))[:limit]
-    step = (len(middle) - 1) / max(slots - 1, 1)
-    sampled = [middle[round(idx * step)] for idx in range(slots)]
-    return sorted(_unique_evaluations(endpoints + sampled), key=lambda item: (item.system_latency, item.system_omega))[:limit]
+    # Deterministic normalized Tchebycheff truncation of a potentially large frontier.
+    t_values = [item.system_latency for item in frontier]
+    o_values = [item.system_omega for item in frontier]
+    t_min, t_max = min(t_values), max(t_values)
+    o_min, o_max = min(o_values), max(o_values)
+    use_fusion = any(item.fusion_objective_enabled for item in frontier)
+    if use_fusion:
+        f_values = [item.fusion_distortion for item in frontier]
+        f_min, f_max = min(f_values), max(f_values)
+    else:
+        f_min = f_max = 0.0
+
+    def key(item: ProfileEvaluation) -> tuple:
+        vals = [
+            _safe_norm_eps(item.system_latency, t_min, t_max, 1e-9),
+            _safe_norm_eps(item.system_omega, o_min, o_max, 1e-9),
+        ]
+        if use_fusion:
+            vals.append(_safe_norm_eps(item.fusion_distortion, f_min, f_max, 1e-9))
+        return (
+            max(vals),
+            item.system_latency,
+            item.system_omega,
+            item.fusion_distortion,
+            repr(_evaluation_key(item)),
+        )
+
+    return sorted(frontier, key=key)[:max(int(limit), 1)]
 
 
 def _latency_archive(
@@ -3485,14 +3629,25 @@ def _choose_tchebycheff(archive: list[ProfileEvaluation], norm_eps: float) -> Pr
     o_values = [item.system_omega for item in archive]
     t_min, t_max = min(t_values), max(t_values)
     o_min, o_max = min(o_values), max(o_values)
+    use_fusion = any(item.fusion_objective_enabled for item in archive)
+    if use_fusion:
+        f_values = [item.fusion_distortion for item in archive]
+        f_min, f_max = min(f_values), max(f_values)
+    else:
+        f_min = f_max = 0.0
 
-    def distance(item: ProfileEvaluation) -> tuple[float, float, float, str]:
-        t_norm = _safe_norm_eps(item.system_latency, t_min, t_max, norm_eps)
-        o_norm = _safe_norm_eps(item.system_omega, o_min, o_max, norm_eps)
+    def distance(item: ProfileEvaluation) -> tuple[float, float, float, float, str]:
+        values = [
+            _safe_norm_eps(item.system_latency, t_min, t_max, norm_eps),
+            _safe_norm_eps(item.system_omega, o_min, o_max, norm_eps),
+        ]
+        if use_fusion:
+            values.append(_safe_norm_eps(item.fusion_distortion, f_min, f_max, norm_eps))
         return (
-            max(abs(t_norm), abs(o_norm)),
+            max(abs(value) for value in values),
             item.system_latency,
             item.system_omega,
+            item.fusion_distortion,
             repr(_evaluation_key(item)),
         )
 
