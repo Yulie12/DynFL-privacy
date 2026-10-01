@@ -46,8 +46,9 @@ def test_more_rounds_increase_noise_not_total_target() -> None:
     hundred = resolved_privacy_parameters(SelectionConfig(rounds=100, initial_epsilon=8.0))
     assert fifty["feature_budget"] == hundred["feature_budget"] == 8.0
     assert fifty["update_budget"] == hundred["update_budget"] == 8.0
-    assert fifty["feature_horizon_events"] == hundred["feature_horizon_events"] == 0
-    assert fifty["feature_noise_multiplier"] == hundred["feature_noise_multiplier"] == 1.0
+    assert fifty["feature_horizon_events"] == 150
+    assert hundred["feature_horizon_events"] == 300
+    assert hundred["feature_noise_multiplier"] > fifty["feature_noise_multiplier"]
     assert hundred["update_noise_multiplier"] > fifty["update_noise_multiplier"]
 
 

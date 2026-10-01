@@ -255,11 +255,11 @@ class PrivacyProjection:
 
 
 class ClientPrivacyLedger:
-    """Client-level update-DP ledger with inert feature-accounting compatibility.
+    """Per-client RDP ledgers for feature and update releases.
 
-    The paper mainline charges only update events.  The feature accountant is
-    retained temporarily so older checkpoints/result readers remain loadable;
-    formal selection passes zero feature events.
+    Split modes may release a DP-protected intermediate embedding, while
+    Cloud-facing model updates may independently use update-level DP. The two
+    channels keep separate accounting states and feasibility budgets.
     """
 
     def __init__(

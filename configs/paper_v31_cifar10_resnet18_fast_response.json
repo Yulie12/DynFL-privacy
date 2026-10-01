@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "paper_v31_cifar10_resnet18_fast_response",
   "execution_revision": "paper_flow_v31_mode_specific_privacy",
   "output_root": "out/paper_v31_final/fig4_fast_response",

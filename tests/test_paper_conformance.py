@@ -634,6 +634,13 @@ def test_split_modes_keep_labels_local() -> None:
         assert mode_candidates
         assert all("label" not in candidate.mechanisms for candidate in mode_candidates)
         assert all(candidate.feasible_risk for candidate in mode_candidates)
+        assert all(
+            candidate.link_mechanisms.get(
+                "L_C_emb" if mode == "LIC" else "L_E_emb"
+            ) == "dp"
+            for candidate in mode_candidates
+        )
+        assert all(candidate.feature_dp_events > 0 for candidate in mode_candidates)
         objects = {obj for obj, _count, _eligible in _mode_link_events(mode, 5, 3)}
         assert "label" not in objects
         assert {"emb", "logits", "grad", "emb_grad"}.issubset(objects)
@@ -653,12 +660,16 @@ def test_unprotected_output_gradient_uses_ordinary_batch_average() -> None:
     torch.testing.assert_close(actual, expected)
 
 
-def test_formal_feature_dp_horizon_is_disabled() -> None:
+def test_formal_feature_dp_horizon_matches_split_embedding_releases() -> None:
     resolved = resolved_privacy_parameters(
         SelectionConfig(rounds=200, L_block_cycles=5, privacy_local_epochs=3)
     )
-    assert resolved["max_feature_events_per_round"] == 0
-    assert resolved["feature_horizon_events"] == 0
+    # LIEIIIC is the maximum: 3 local epochs x 3 explicit edge loops.
+    # Only the released embedding is feature-DP; the returned/label gradients
+    # are not counted as feature-DP events.
+    assert resolved["max_feature_events_per_round"] == 9
+    assert resolved["feature_horizon_events"] == 1800
+    assert resolved["feature_dp_enabled"]
 
 
 def test_trusted_edge_splitfed_uses_he_without_feature_dp() -> None:

@@ -34,7 +34,7 @@ from .training import MODE_SPECS, ModeSpec
 
 
 MECHANISMS_BY_OBJECT = {
-    "emb": ("none",),
+    "emb": ("none", "dp"),
     "logits": ("none",),
     "grad": ("none",),
     "emb_grad": ("none",),
@@ -93,9 +93,10 @@ def paper_client_privacy_requirement() -> ExposurePrivacyRequirement:
     """
 
     cloud_update_links = frozenset({"L_C_upd", "E_C_upd"})
+    split_embedding_links = frozenset({"L_E_emb", "L_C_emb"})
     return ExposurePrivacyRequirement(
         plaintext_forbidden_links=cloud_update_links,
-        dp_required_links=cloud_update_links,
+        dp_required_links=cloud_update_links | split_embedding_links,
     )
 
 
@@ -329,8 +330,13 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
         )
         feature_events = sum(
             _record_dp_event_count(config, mode, count)
-            for _link_id, obj, count, privacy_eligible in events
-            if privacy_eligible and obj != "upd"
+            for link_id, obj, count, privacy_eligible in events
+            if privacy_eligible
+            and obj == "emb"
+            and not (
+                config.trusted_edge_split_execution
+                and link_id.startswith("L_E_")
+            )
         )
         update_events = sum(
             count
@@ -344,7 +350,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
         )
         per_mode_counts.append((feature_events, update_events))
 
-    max_feature_events_per_round = 0
+    max_feature_events_per_round = max((item[0] for item in per_mode_counts), default=0)
     max_update_events_per_round = max((item[1] for item in per_mode_counts), default=0)
     feature_horizon_events = config.rounds * max_feature_events_per_round
     update_horizon_events = max(1, config.rounds * max_update_events_per_round)
@@ -391,7 +397,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
         "max_update_events_per_round": max_update_events_per_round,
         "feature_horizon_events": feature_horizon_events,
         "update_horizon_events": update_horizon_events,
-        "feature_dp_enabled": False,
+        "feature_dp_enabled": feature_horizon_events > 0,
     }
 
 
@@ -4314,10 +4320,17 @@ def _estimate_candidate(
     )
     pre_aggregation_time = first_aggregation_arrival_time
 
-    # Formal accounting is update-level client DP only (Q12/Q21/Q22).
-    # Keep the feature fields in Candidate/PrivacyProjection as compatibility
-    # shims for old result readers, but formal candidates never charge them.
-    feature_dp_events = 0
+    # Split modes release an intermediate embedding outside the client. When
+    # that embedding link is assigned DP, charge one record-level feature-DP
+    # event per local epoch (and per explicit edge loop for repeated split
+    # execution), consistently with _record_dp_event_count().
+    feature_dp_events = sum(
+        _record_dp_event_count(config, mode, count)
+        for link_id, obj, count, privacy_eligible in link_events
+        if privacy_eligible
+        and obj == "emb"
+        and mechanism_uses_dp(actual_link_mechanisms[link_id])
+    )
     update_dp_events = sum(
         count
         for link_id, obj, count, privacy_eligible in link_events
@@ -4333,7 +4346,12 @@ def _estimate_candidate(
             update_dp_events,
             update_noise_multiplier=update_noise_multiplier,
         )
-        epsilon_used = projection.update_epsilon_increment
+        # Legacy scalar used only for diagnostics/old local policies. The
+        # formal feasibility test remains two-ledger (feature, update).
+        epsilon_used = max(
+            projection.feature_epsilon_increment,
+            projection.update_epsilon_increment,
+        )
         feature_epsilon_after = projection.feature_epsilon_after
         update_epsilon_after = projection.update_epsilon_after
         feasible_privacy = privacy_ledger.can_apply(projection)
@@ -4522,7 +4540,6 @@ def _mode_link_transmissions(
             ("C_L_logits", "logits", L, False),
             ("L_C_grad", "grad", L, True),
             ("C_L_emb_grad", "emb_grad", L, False),
-            ("L_C_upd", "upd", 1, True),
             ("C_L_upd_final_return", "upd", 1, False),
         )
     if mode == "LIIE":
