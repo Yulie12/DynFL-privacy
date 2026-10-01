@@ -257,3 +257,57 @@ def protocol_audit(
             "no_dropout_recovery_or_malicious_client_proofs"
         ),
     }
+
+
+def make_masked_client_packet_with_external_noise(
+    *,
+    context: ClientMaskingContext,
+    update: torch.Tensor,
+    external_noise_share: torch.Tensor,
+    public_keys: Mapping[int, bytes],
+    plan: ClientSecureAggregatePlan,
+    round_idx: int,
+    mask_std: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, float | int | bool | str]]:
+    """Build a SecAgg packet using an externally supplied joint-noise share.
+
+    This is the integration seam for a future reviewed MPC/threshold noise
+    backend.  The function itself makes no claim about how ``external_noise_share``
+    was generated.  In particular, passing a share from the ideal simulator in
+    ``joint_noise_mpc_common`` is suitable only for diagnostics.
+    """
+    i = context.client_id
+    if i < 0 or i >= len(plan.weights) or set(public_keys) != set(range(len(plan.weights))):
+        raise ValueError("Public-key roster must exactly match the fixed cohort")
+    if public_keys[i] != context.public_key:
+        raise ValueError("Client public key does not match roster")
+    if not math.isfinite(mask_std) or mask_std <= 0.0:
+        raise ValueError("mask_std must be finite and positive")
+    clipped, preclip_norm, was_clipped = clip_l2(update, plan.clip_norm)
+    noise = external_noise_share.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
+    if noise.shape != clipped.shape or not bool(torch.isfinite(noise).all()):
+        raise ValueError("Finite external noise share matching update dimension required")
+    packet = clipped * plan.weights[i] + noise
+    dimension = clipped.numel()
+    for j in range(len(plan.weights)):
+        if j == i:
+            continue
+        shared = context.shared_secret(public_keys[j])
+        mask = _pairwise_mask(
+            shared,
+            round_idx=round_idx,
+            client_a=i,
+            client_b=j,
+            dimension=dimension,
+            mask_std=mask_std,
+        )
+        packet = packet + mask if i < j else packet - mask
+    return packet, {
+        "client_id": i,
+        "preclip_norm": preclip_norm,
+        "clipped": was_clipped,
+        "weight": plan.weights[i],
+        "noise_source": "external_joint_noise_share",
+        "pairwise_masks": len(plan.weights) - 1,
+        "individual_plaintext_sent_to_edge": False,
+    }
