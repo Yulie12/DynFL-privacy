@@ -93,7 +93,7 @@ def test_liieiiic_hierarchical_cost_matches_one_global_exact_target_release() ->
     assert actual == pytest.approx(expected)
 
 
-def test_update_clip_is_separate_from_effective_noise_in_jlearn_v2() -> None:
+def test_update_clip_is_diagnostic_only_for_formal_jlearn() -> None:
     k = 4
     clip_excess_sq = 0.03
     config = SelectionConfig(
@@ -119,10 +119,7 @@ def test_update_clip_is_separate_from_effective_noise_in_jlearn_v2() -> None:
     assert clip_cost == pytest.approx(clip_excess_sq)
     assert result.update_clip_perturbation == pytest.approx(clip_excess_sq)
     assert result.system_learning_error == pytest.approx(
-        result.fusion_bound
-        + result.feature_perturbation
-        + result.update_clip_perturbation
-        + result.dp_perturbation
+        result.fusion_bound + result.dp_perturbation
     )
 
 

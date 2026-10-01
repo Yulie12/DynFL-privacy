@@ -2647,14 +2647,15 @@ def _evaluate_profile(
     # zero because there is no Cloud release, hence J_learn=4 C_u^2.
     clip_norm = max(float(config.omega_update_clip_norm), 0.0)
     fusion_bound = 4.0 * clip_norm * clip_norm * (1.0 - cloud_fusion_ratio) ** 2
-    # J_learn^v2 is expressed in update-space squared-error units:
-    # clean-placement/fusion bound + split-feature perturbation + update clipping
-    # + the *effective released aggregate* DP noise.  In particular, full-local
-    # II modes use the same exact-target aggregate-DP semantics as execution;
-    # they are no longer charged high-dimensional per-client local-DP noise.
-    system_learning_error = (
-        fusion_bound + system_feature + system_update_clip + system_dp
-    )
+    # Formal selection-time learning objective:
+    #   J_learn = J_fusion^ub + J_DP.
+    # Feature perturbation and update-clipping distortion are retained as
+    # diagnostics, but they do not participate in Pareto selection. Split-feature
+    # exposure is controlled by the resource-aware split activation rule together
+    # with the mode-specific privacy/protection feasibility constraints.
+    # J_DP is evaluated at the actual release boundary, including exact aggregate
+    # releases for the corresponding full-local/hierarchical paths.
+    system_learning_error = fusion_bound + system_dp
     fusion_distortion, fusion_cosine_distortion = _profile_fusion_distortion(
         profile,
         client_samples,
