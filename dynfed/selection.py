@@ -3802,14 +3802,58 @@ def _aggregation_sizes(
     }
 
 
+def _local_proxy_aggregation_size_hint(
+    candidate: Candidate,
+    config: SelectionConfig,
+) -> int:
+    """Cheap cohort-size hint for aggregate-DP-aware search ordering.
+
+    The exact profile objective recomputes aggregate sensitivity from the
+    selected client masses.  Before a profile exists, the local seed/neighbor
+    heuristic only needs a scale-consistent estimate so exact-target II-family
+    candidates are not ranked with legacy per-client packet DP cost.
+    """
+    if _candidate_uses_secure_aggregate_update_dp_for_selection(candidate):
+        return max(int(config.num_clients), 1)
+    if _candidate_uses_edge_local_exact_update_dp(candidate):
+        edges = max(int(config.num_edges), 1)
+        return max(int(math.ceil(float(config.num_clients) / float(edges))), 1)
+    return 1
+
+
 def _local_omega_proxy(
     candidate: Candidate,
-    aggregation_size: int = 1,
+    aggregation_size: int | None = None,
     config: SelectionConfig | None = None,
 ) -> float:
     config = config or SelectionConfig()
     components = _local_omega_components(candidate, config)
-    size = max(float(aggregation_size), 1.0)
+    size = max(
+        float(
+            _local_proxy_aggregation_size_hint(candidate, config)
+            if aggregation_size is None
+            else aggregation_size
+        ),
+        1.0,
+    )
+
+    # Legacy independent client-packet noise averages as 1/K in the old local
+    # convergence proxy. Exact-target aggregate DP is different: execution
+    # calibrates the released aggregate with sensitivity 2 C / K (equal-mass
+    # search hint), so its second moment scales as 1/K^2.  Apply that extra
+    # attenuation only to the exact aggregate paths; split/local-packet DP keeps
+    # the previous heuristic. Exact profile evaluation still uses real masses.
+    if (
+        _candidate_uses_secure_aggregate_update_dp_for_selection(candidate)
+        or _candidate_uses_edge_local_exact_update_dp(candidate)
+    ):
+        return (
+            components.client_bias
+            + components.client_variance / (size * size)
+            + components.edge_bias
+            + components.edge_variance / (size * size)
+        )
+
     return (
         components.client_bias
         + components.client_variance / size

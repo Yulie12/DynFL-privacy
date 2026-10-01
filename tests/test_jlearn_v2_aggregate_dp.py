@@ -8,6 +8,7 @@ from dynfed.selection import (
     _evaluate_profile,
     _global_dp_perturbation_cost,
     _global_update_clip_perturbation_cost,
+    _local_omega_proxy,
 )
 
 
@@ -145,3 +146,59 @@ def test_dp_he3_full_local_cloud_path_keeps_aggregate_boundary_cost() -> None:
     actual = _global_dp_perturbation_cost(config, profile, samples, edges, tuple(profile))
     expected = dim * (sigma * (2.0 * clip / k)) ** 2
     assert actual == pytest.approx(expected)
+
+
+def test_liic_local_search_proxy_uses_aggregate_boundary_scaling() -> None:
+    k = 10
+    config = SelectionConfig(
+        num_clients=k,
+        num_edges=2,
+        omega_local_variance=0.0,
+        omega_update_dimension=1000.0,
+        omega_update_clip_norm=0.25,
+        omega_update_clip_excess_sq=0.0,
+    )
+    candidate = _candidate("LIIC", "L_C_upd", sigma=0.5)
+
+    singleton = _local_omega_proxy(candidate, aggregation_size=1, config=config)
+    search_proxy = _local_omega_proxy(candidate, config=config)
+
+    assert singleton > 0.0
+    assert search_proxy == pytest.approx(singleton / (k * k))
+
+
+def test_liie_local_search_proxy_uses_expected_edge_cohort_scaling() -> None:
+    config = SelectionConfig(
+        num_clients=10,
+        num_edges=2,
+        omega_local_variance=0.0,
+        omega_update_dimension=1000.0,
+        omega_update_clip_norm=0.25,
+        omega_update_clip_excess_sq=0.0,
+    )
+    candidate = _candidate("LIIE", "L_E_upd", sigma=0.5)
+
+    singleton = _local_omega_proxy(candidate, aggregation_size=1, config=config)
+    search_proxy = _local_omega_proxy(candidate, config=config)
+
+    expected_cohort = 5
+    assert singleton > 0.0
+    assert search_proxy == pytest.approx(singleton / (expected_cohort * expected_cohort))
+
+
+def test_split_local_packet_dp_keeps_legacy_local_search_proxy() -> None:
+    config = SelectionConfig(
+        num_clients=10,
+        num_edges=2,
+        omega_local_variance=0.0,
+        omega_update_dimension=1000.0,
+        omega_update_clip_norm=0.25,
+        omega_update_clip_excess_sq=0.0,
+    )
+    candidate = _candidate("LIEIIC", "L_C_upd", mechanism="dp", sigma=0.5)
+
+    singleton = _local_omega_proxy(candidate, aggregation_size=1, config=config)
+    search_proxy = _local_omega_proxy(candidate, config=config)
+
+    assert singleton > 0.0
+    assert search_proxy == pytest.approx(singleton)
