@@ -2686,3 +2686,72 @@ def test_step32_2_runtime_sigma_audit_fields_are_emitted() -> None:
     assert '"sigma_execution_accounting_consistent"' in source
     assert 'if noise_location == "packet" and selected_sigmas' in source
     assert 'if noise_location == "aggregate_share"' in source
+
+
+def test_workload_split_interactions_follow_epochs_and_minibatches() -> None:
+    from dynfed.selection import _split_interaction_count
+
+    config = SelectionConfig(
+        split_interaction_mode="workload",
+        split_batch_size=128,
+        privacy_local_epochs=3,
+    )
+    assert _split_interaction_count(config, 120) == 3
+    assert _split_interaction_count(config, 600) == 15
+    assert _split_interaction_count(config, 1200) == 30
+
+
+def test_fl_first_split_on_demand_suppresses_split_when_full_local_is_device_feasible() -> None:
+    candidates = enumerate_candidates(
+        config=SelectionConfig(
+            fl_first_split_on_demand=True,
+            split_interaction_mode="workload",
+            split_batch_size=128,
+            privacy_local_epochs=3,
+            memory_limit=1.35,
+            resource_limit=1.35,
+        ),
+        client_id=0, edge_factor=1.0, compute_factor=1.0,
+        memory_capacity_factor=1.0, samples=120, remaining_epsilon=8.0,
+        round_idx=0, rng=random.Random(5), policy="full_dynfl",
+    )
+    assert candidates
+    assert {item.mode for item in candidates} <= {"LIIE", "LIIC", "LIIEIIIC"}
+
+
+def test_fl_first_split_on_demand_allows_split_when_full_local_is_device_infeasible() -> None:
+    candidates = enumerate_candidates(
+        config=SelectionConfig(
+            fl_first_split_on_demand=True,
+            split_interaction_mode="workload",
+            split_batch_size=128,
+            privacy_local_epochs=3,
+            memory_limit=0.75,
+            resource_limit=1.35,
+        ),
+        client_id=0, edge_factor=1.0, compute_factor=1.0,
+        memory_capacity_factor=1.0, samples=120, remaining_epsilon=8.0,
+        round_idx=0, rng=random.Random(5), policy="full_dynfl",
+    )
+    assert any(item.mode in {"LIE", "LIC", "LIEIIC", "LIEIIIC"} for item in candidates)
+
+
+def test_lic_cloud_split_compute_scales_with_workload_interactions() -> None:
+    base = dict(
+        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=120,
+        remaining_epsilon=8.0, round_idx=0, rng=random.Random(7),
+        policy="fixed_dp",
+    )
+    fixed = enumerate_candidates(
+        config=SelectionConfig(split_interaction_mode="fixed", L_block_cycles=1),
+        **base,
+    )
+    workload = enumerate_candidates(
+        config=SelectionConfig(
+            split_interaction_mode="workload", split_batch_size=128, privacy_local_epochs=3
+        ),
+        **base,
+    )
+    fixed_lic = min((x for x in fixed if x.mode == "LIC"), key=lambda x: x.time)
+    workload_lic = min((x for x in workload if x.mode == "LIC"), key=lambda x: x.time)
+    assert workload_lic.time > fixed_lic.time

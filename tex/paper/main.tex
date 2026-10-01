@@ -382,7 +382,28 @@ aggregation tier. Raw training samples remain on the end device in every mode.
 \subsubsection{Collaborative Link Blocks and Mode Flows}
 A collaborative link block represents the basic training unit performed by a
 client within one collaboration stage. We consider two types of blocks.
-A split training block \(S_{Lr}(L_B)\), \(r\in\{E,C\}\), performs \(L_B\) training steps jointly between the Local tier and tier \(r\) through split interaction. A local training block \(T_L(L_B)\) performs \(L_B\) training steps at the Local tier and produces a model update for subsequent aggregation. Thus \(L_B\) denotes the number of training steps within one collaborative link block.
+For client \(i\) in round \(t\), let
+\begin{equation}
+N_i^t
+=
+E_i^t
+\left\lceil
+\frac{|\mathcal D_i^t|}{B_i^t}
+\right\rceil,
+\label{eq:split_interaction_count}
+\end{equation}
+where \(E_i^t\) is the number of local epochs, \(|\mathcal D_i^t|\) is the
+number of local training samples, and \(B_i^t\) is the minibatch size. Thus
+\(N_i^t\) is the workload-derived number of optimizer steps and, for a split
+mode, the number of interactive split exchanges in one collaboration stage.
+A split training block \(S_{Lr}(N_i^t)\), \(r\in\{E,C\}\), performs these
+steps jointly between the Local tier and tier \(r\) through split interaction.
+A local training block \(T_L(N_i^t)\) performs the same local workload entirely
+at the Local tier and produces one model update for subsequent aggregation.
+The optimizer workload and the number of network releases are therefore kept
+conceptually separate: split modes communicate once per split step, whereas
+update-submission modes communicate the resulting update after the local
+training block.
 
 A collaborative link flow describes how the training blocks, update
 transmissions, and aggregation stages are connected under a collaboration
@@ -394,22 +415,22 @@ With these definitions, the seven mode flows are
 \begin{equation}
 \begin{aligned}
 \mathrm{LIE}:~~&
-S_{LE}(L_B) \rightarrow A_E,\\
+S_{LE}(N_i^t) \rightarrow A_E,\\
 \mathrm{LIIE}:~~&
-T_L(L_B) \xrightarrow{L\to E:\mathrm{upd}} A_E,\\
+T_L(N_i^t) \xrightarrow{L\to E:\mathrm{upd}} A_E,\\
 \mathrm{LIC}:~~&
-S_{LC}(L_B) \rightarrow A_C,\\
+S_{LC}(N_i^t) \rightarrow A_C,\\
 \mathrm{LIIC}:~~&
-T_L(L_B) \xrightarrow{L\to C:\mathrm{upd}} A_C,\\
+T_L(N_i^t) \xrightarrow{L\to C:\mathrm{upd}} A_C,\\
 \mathrm{LIEIIC}:~~&
-S_{LE}(L_B)
+S_{LE}(N_i^t)
 \xrightarrow{E\to C:\mathrm{upd}} A_C,\\
 \mathrm{LIEIIIC}:~~&
-\bigl[S_{LE}(L_B)\rightarrow A_E\bigr]^{E_B}
+\bigl[S_{LE}(N_i^t)\rightarrow A_E\bigr]^{E_B}
 \xrightarrow{E\to C:\mathrm{upd}} A_C,\\
 \mathrm{LIIEIIIC}:~~&
 \bigl[
-T_L(L_B)
+T_L(N_i^t)
 \xrightarrow{L\to E:\mathrm{upd}} A_E
 \bigr]^{E_B}
 \xrightarrow{E\to C:\mathrm{upd}} A_C .
@@ -417,7 +438,7 @@ T_L(L_B)
 \label{eq:mode_flows}
 \end{equation}
 Figure~\ref{fig:eecblockflow} illustrates the execution structure of the seven collaboration modes, with each subfigure showing one mode.
-Orange links represent collaborative link block execution, with each block containing \(L_B\) training steps.
+Orange links represent collaborative link block execution, with each block containing the workload-derived \(N_i^t\) training steps.
 Green links represent execution at the Edge stage in hierarchical modes. This execution is repeated \(E_B\) times before the resulting Edge update is forwarded to the Cloud.
 Black self loops represent the final aggregation at the corresponding aggregation node. Black arrows represent update forwarding and model return paths among end devices, Edge nodes, and the Cloud. These flows determine the structure of the directed payload transmissions \(\mathcal X_i^t(h)\) presented below.
 
@@ -610,6 +631,26 @@ M_{i,L}^{\mathrm{mem}}(h_i)\le Q_{\mathrm{mem},i}
 \right\}.
 \label{eq:resource_feasible}
 \end{equation}
+We further distinguish the full-local/update family
+\(\mathcal H^{\mathrm{FL}}=\{\mathrm{LIIE},\mathrm{LIIC},\mathrm{LIIEIIIC}\}\)
+and the split/offloading family
+\(\mathcal H^{\mathrm{SP}}=\{\mathrm{LIE},\mathrm{LIC},\mathrm{LIEIIC},\mathrm{LIEIIIC}\}\).
+DynFL follows an FL-first, split-on-demand admissibility rule. If at least
+one full-local mode is resource feasible, dynamic mode selection is restricted
+to the feasible full-local family. Split modes are activated when no full-local
+mode satisfies the end-side computation and memory constraints. Fixed baselines
+are evaluated independently of this dynamic admissibility rule. Accordingly,
+the dynamic admissible set is
+\begin{equation}
+\mathcal H_i^{\mathrm{adm}}
+=
+\begin{cases}
+\mathcal H_i^{\mathrm{res}}\cap\mathcal H^{\mathrm{FL}},
+&\text{if }\mathcal H_i^{\mathrm{res}}\cap\mathcal H^{\mathrm{FL}}\neq\varnothing,\\
+\mathcal H_i^{\mathrm{res}},&\text{otherwise.}
+\end{cases}
+\label{eq:fl_first_admissible}
+\end{equation}
 
 \subsubsection{Path and Round Latency on a Common Timeline}
 
@@ -634,20 +675,28 @@ T_{u,v,b}^{\mathrm{priv},t}
 where \(\alpha(\cdot)\) is the payload expansion factor caused by the protection mechanism and \(T_{u,v,b}^{\mathrm{priv},t}(\cdot)\) is the corresponding protection processing latency. For an unprotected transmission, \(\alpha(\mathrm{none})=1\) and \(T_{u,v,b}^{\mathrm{priv},t}(\mathrm{none})=0\).
 
 \textbf{Execution latency.}
-Let \(\tau_{i,L}^t(h_i)\) and \(\tau_{i,E}^t(h_i)\) denote the Local and Edge execution times within one training step under mode \(h_i\). For split training between Local and Edge, the \(L_B\) training steps are pipelined across the two tiers, giving
+Let \(\tau_{i,L}^t(h_i)\) and \(\tau_{i,r}^t(h_i)\), \(r\in\{E,C\}\), denote
+the Local and remote-tier execution times within one training step under mode
+\(h_i\). For split training, the \(N_i^t\) workload-derived steps may be
+pipelined across the two participating tiers, giving
 \begin{equation}
 T_i^{\mathrm{stage},t}(h_i)
 =
-L_B\max\!\left\{
-\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
+N_i^t\max\!\left\{
+\tau_{i,L}^t(h_i),\tau_{i,r}^t(h_i)
 \right\}
 +
 \min\!\left\{
-\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
-\right\}.
+\tau_{i,L}^t(h_i),\tau_{i,r}^t(h_i)
+\right\},\qquad r\in\{E,C\}.
 \label{eq:execution_latency}
 \end{equation}
-For local training, \(T_i^{\mathrm{stage},t}(h_i)=L_B\tau_{i,L}^t(h_i)\). Hierarchical modes repeat the corresponding Edge stage \(E_B\) times.
+This expression is the ideal two-stage pipeline bound; all directed split
+payloads in \(\mathcal X_i^t(h)\) retain multiplicity \(N_i^t\), so base link
+delay and transmission time are incurred at every interactive step. For local
+training, \(T_i^{\mathrm{stage},t}(h_i)=N_i^t\tau_{i,L}^t(h_i)\), while the
+resulting update is submitted once after the local training block. Hierarchical
+modes repeat the corresponding Edge stage \(E_B\) times.
 
 \textbf{Reconfiguration latency.}
 Changing the collaboration mode may require model reconfiguration across tiers. The resulting delay is
@@ -1008,7 +1057,7 @@ the current formal results. The main parameters are listed in
 End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=100\) \\
 Training and test samples & 12000 and 2000 & Random seeds & 40, 42, and 44 \\
 Client computation and memory factors & Independent $\mathcal U(0.5,2.0)$ & Edge computation factor & $\mathcal U(2/3,1.5)$ \\
-Logical link block reference & \(L_B=5\) & Independent stages in multilevel modes & \(E_B=3\) \\
+Split minibatch size & \(B_i=128\) & Independent stages in multilevel modes & \(E_B=3\) \\
 Lifetime update-DP target & \(\bar\epsilon=8.0\) & DP slack parameter & \(\delta=10^{-5}\) \\
 Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=0.02052\) MB & HE expansion factor & \(\alpha_{\mathrm{HE}}=8.04\) \\
 CKKS polynomial degree and scale & \(8192\) and \(2^{40}\) & CKKS coefficient modulus bits & \([50,40]\) \\

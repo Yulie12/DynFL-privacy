@@ -167,6 +167,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resource-limit", type=float, default=1.35)
     parser.add_argument("--memory-limit", type=float, default=1.35)
+    parser.add_argument(
+        "--split-interaction-mode", choices=["fixed", "workload"], default="fixed",
+        help="Use fixed L_block_cycles or workload-derived split minibatch interactions.",
+    )
+    parser.add_argument(
+        "--split-batch-size", type=int, default=128,
+        help="Batch size used to derive split interaction count in workload mode.",
+    )
+    parser.add_argument(
+        "--fl-first-split-on-demand", action="store_true",
+        help=(
+            "For dynamic mode selection, suppress split/I modes whenever at least one "
+            "full-local/update mode is device-feasible; fixed baselines are unchanged."
+        ),
+    )
     parser.add_argument("--time-limit", type=float, default=8.0)
     parser.add_argument(
         "--fast-client-deadlines",
@@ -297,6 +312,9 @@ def main() -> None:
         omega_update_clip_norm=update_clip_norm,
         resource_limit=args.resource_limit,
         memory_limit=args.memory_limit,
+        split_interaction_mode=args.split_interaction_mode,
+        split_batch_size=args.split_batch_size,
+        fl_first_split_on_demand=args.fl_first_split_on_demand,
         time_limit=args.time_limit,
         fast_client_deadlines=tuple(fast_client_deadlines),
         risk_limit=args.risk_limit,

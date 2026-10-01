@@ -127,6 +127,8 @@ def build_command(
         "edges": system["edges"],
         "resource_limit": system["resource_limit"],
         "memory_limit": system["memory_limit"],
+        "split_interaction_mode": system.get("split_interaction_mode", "fixed"),
+        "split_batch_size": system.get("split_batch_size", 128),
         "time_limit": system["time_limit"],
         "risk_limit": system["risk_limit"],
         "aggregation_fraction": system["aggregation_fraction"],
@@ -184,6 +186,8 @@ def build_command(
             ["--fast-client-deadlines", *[f"{client_id}:{deadline}" for client_id, deadline in fast_deadlines.items()]]
         )
     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
+    if system.get("fl_first_split_on_demand", False):
+        command.append("--fl-first-split-on-demand")
     if equal_optimizer_work_control:
         command.append("--equal-optimizer-work-control")
     if max_new_rounds is not None:

@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from experiments.validate_trusted_aggregate_dp import release_scales
+from experiments.validate_trusted_aggregate_dp import distortion_metrics, release_scales
 
 
 @pytest.mark.parametrize("clients", [1, 4, 20, 100])
@@ -37,3 +37,24 @@ def test_noise_to_clipped_signal_is_scale_invariant_when_all_clip():
         # Aligned independent unit updates, all clipped, have mean norm C.
         ratios.append(release_scales(20, c, 6.0)["aggregate_noise_std"] / c)
     assert ratios == pytest.approx([0.6] * 3)
+
+
+def test_distortion_metrics_separates_clip_and_noise():
+    import torch
+    reference = torch.tensor([2.0, 0.0])
+    clipped = torch.tensor([1.0, 0.0])
+    noise = torch.tensor([0.0, 1.0])
+    metrics = distortion_metrics(reference, clipped, noise)
+    assert metrics["D_clip"] == pytest.approx(0.25)
+    assert metrics["D_noise"] == pytest.approx(0.25)
+    assert metrics["D_total"] == pytest.approx(0.5)
+    assert metrics["relative_error_norm"] == pytest.approx(math.sqrt(0.5))
+
+
+def test_distortion_metrics_zero_noise_recovers_clip_distortion():
+    import torch
+    reference = torch.tensor([1.0, 2.0])
+    clipped = torch.tensor([0.5, 1.0])
+    metrics = distortion_metrics(reference, clipped, torch.zeros_like(reference))
+    assert metrics["D_total"] == pytest.approx(metrics["D_clip"])
+    assert metrics["D_noise"] == 0.0

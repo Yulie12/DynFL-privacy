@@ -144,6 +144,9 @@ class SelectionConfig:
     output_dir: str = "out/selection"
     require_feasible: bool = False
     L_block_cycles: int = 5
+    split_interaction_mode: str = "fixed"
+    split_batch_size: int = 128
+    fl_first_split_on_demand: bool = False
     privacy_local_epochs: int = 1
     trusted_edge_split_execution: bool = False
     allow_he: bool = True
@@ -828,7 +831,7 @@ def enumerate_candidates(
             update_events = sum(
                 count
                 for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
-                    mode, config.L_block_cycles, spec.E_edge_loops
+                    mode, _split_interaction_count(config, samples), spec.E_edge_loops
                 )
                 if privacy_eligible
                 and obj == "upd"
@@ -885,6 +888,15 @@ def enumerate_candidates(
                         fast_response_deadline=fast_response_deadline,
                     )
                 )
+    if config.fl_first_split_on_demand and _policy_uses_dynamic_mode_selection(policy):
+        full_local_modes = {"LIIE", "LIIC", "LIIEIIIC"}
+        full_local_device_feasible = any(
+            candidate.mode in full_local_modes and candidate.feasible_device
+            for candidate in candidates
+        )
+        if full_local_device_feasible:
+            candidates = [candidate for candidate in candidates if candidate.mode in full_local_modes]
+
     # Q72/Q73: fast-response QoS is a hard feasibility gate only for clients
     # that explicitly carry a per-client deadline. Ordinary clients keep time
     # in the latency objective and are not rejected by a universal time limit.
@@ -4282,7 +4294,7 @@ def _estimate_candidate(
     update_noise_multiplier: float | None = None,
     fast_response_deadline: float | None = None,
 ) -> Candidate:
-    L = config.L_block_cycles
+    L = _split_interaction_count(config, samples)
     E = spec.E_edge_loops
 
     local_load = spec.local_work * samples / max(config.minibatch_reference_samples, 1e-9)
@@ -4307,6 +4319,10 @@ def _estimate_candidate(
         block_compute = L * (local_time + edge_time)
 
     cloud_time = spec.cloud_work * 0.55
+    if mode == "LIC":
+        # Direct client-cloud split executes the remote partition once per
+        # split interaction, just as L-E split modes repeat edge work.
+        cloud_time *= L
     link_events = (_fusion_link_transmissions(mode, L, E) if config.mainline_fusion
                    else _mode_link_transmissions(mode, L, E))
     actual_link_mechanisms = dict(link_mechanisms or {})
@@ -4647,6 +4663,42 @@ def _fusion_link_transmissions(mode, local_block_cycles, edge_loops):
     return training + (("E_C_upd", "upd", 1, True),
                        ("C_E_upd_final_return", "upd", 1, False),
                        ("E_L_upd_final_return", "upd", 1, False))
+
+
+_DYNAMIC_MODE_POLICIES = {
+    "ours",
+    "ours_no_omega",
+    "full_dynfl",
+    "full_dynfl_3obj_diag",
+    "dynamic_mode_fixed_privacy",
+    "nsga2",
+    "individual_optimal",
+    "random",
+}
+
+
+def _policy_uses_dynamic_mode_selection(policy: str) -> bool:
+    return policy in _DYNAMIC_MODE_POLICIES
+
+
+def _split_interaction_count(config: SelectionConfig, samples: int) -> int:
+    """Return communication interactions for one local split-training stage.
+
+    ``fixed`` preserves the historical L_block_cycles model. ``workload``
+    binds split communication to the actual local training workload: local
+    epochs times the number of minibatches. Privacy accounting remains
+    separate because record-level exposure is not the same as batch-level
+    communication multiplicity.
+    """
+    if config.split_interaction_mode == "fixed":
+        return max(1, int(config.L_block_cycles))
+    if config.split_interaction_mode != "workload":
+        raise ValueError(
+            "split_interaction_mode must be 'fixed' or 'workload'"
+        )
+    batch_size = max(1, int(config.split_batch_size))
+    batches_per_epoch = max(1, math.ceil(max(1, int(samples)) / batch_size))
+    return max(1, int(config.privacy_local_epochs)) * batches_per_epoch
 
 
 def _mode_link_transmissions(
