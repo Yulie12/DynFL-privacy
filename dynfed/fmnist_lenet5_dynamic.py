@@ -335,7 +335,12 @@ def _candidate_uses_local_packet_update_dp(
     mechanism = _candidate_cloud_update_mechanism(candidate)
     # Full-local direct-cloud FL no longer needs high-dimensional local packet DP.
     # Its DP release is closed at the aggregate boundary by streaming SecAgg.
-    if candidate is not None and candidate.mode == "LIIC" and mechanism_uses_dp(mechanism):
+    if (
+        candidate is not None
+        and candidate.mode in {"LIIC", "LIIEIIIC"}
+        and mechanism_uses_dp(mechanism)
+        and not mechanism_uses_he(mechanism)
+    ):
         return False
     return mechanism_uses_dp(mechanism) and not mechanism_uses_he(mechanism)
 
@@ -346,6 +351,8 @@ def _candidate_uses_secure_aggregate_update_dp(
 ) -> bool:
     mechanism = _candidate_cloud_update_mechanism(candidate)
     if candidate is not None and candidate.mode == "LIIC":
+        return mechanism_uses_dp(mechanism)
+    if candidate is not None and candidate.mode == "LIIEIIIC":
         return mechanism_uses_dp(mechanism)
     return mechanism_uses_dp(mechanism) and mechanism_uses_he(mechanism)
 
@@ -2154,6 +2161,7 @@ def _run_lenet5_policy(
         local_dp_packet_sensitivities: list[float] = []
         local_dp_pending_components: list[tuple[int, float, int]] = []
         edge_cloud_groups: dict[tuple[int, str, str], list[tuple[int, Any, int, Candidate | None]]] = {}
+        hierarchical_streaming_secagg_groups: dict[int, list[tuple[int, Any, int, Candidate | None]]] = {}
         if effective_selection.mainline_fusion:
             for client_id, state_diff, sample_count, candidate in global_updates:
                 relative_update = _state_difference_from_client_update(
@@ -2360,6 +2368,13 @@ def _run_lenet5_policy(
                 secure_aggregate_dp_client_fractions.append(
                     max_client_fraction if secure_aggregate_dp else 0.0
                 )
+                if (
+                    secure_aggregate_dp
+                    and _liieiiic_streaming_secagg_eligible(
+                        updates, execute_real_he=execute_real_he
+                    )
+                ):
+                    hierarchical_streaming_secagg_groups[cloud_index] = updates
 
         global_aggregation_weights = _edge_normalized_cloud_weights(
             cloud_updates,
@@ -2436,10 +2451,84 @@ def _run_lenet5_policy(
             del noise
 
         aggregate_dp_noise_share_count = 0
+        hierarchical_secagg_release_records: list[dict[str, Any]] = []
+        hierarchical_secagg_indices: set[int] = set()
+        for cloud_index, updates in hierarchical_streaming_secagg_groups.items():
+            desired_edge_noise_std = float(aggregate_dp_share_stds[cloud_index])
+            if desired_edge_noise_std <= 0.0:
+                continue
+            clean_edge_update, sample_count, candidate, client_ids = cloud_updates[cloud_index]
+            relative_updates = [
+                _state_difference_from_client_update(
+                    client_id=client_id,
+                    state_diff=state_diff,
+                    client_model_states=client_model_states,
+                    global_end=global_end,
+                    global_edge=global_edge,
+                    device=torch.device("cpu"),
+                )
+                for client_id, state_diff, _count, _candidate in updates
+            ]
+            local_total = max(float(sum(item[2] for item in updates)), 1e-12)
+            local_max_weight = max(
+                float(item[2]) / local_total for item in updates
+            )
+            local_sensitivity = 2.0 * _update_clip_norm(train_config) * local_max_weight
+            if local_sensitivity <= 0.0:
+                raise RuntimeError("LIIEIIIC secure aggregation has zero local sensitivity")
+            effective_edge_sigma = desired_edge_noise_std / local_sensitivity
+            noisy_edge_update, secagg_audit = streaming_secure_aggregate_exact_target(
+                relative_updates,
+                [item[2] for item in updates],
+                clip_norm=_update_clip_norm(train_config),
+                noise_multiplier=effective_edge_sigma,
+                round_seed=_dp_noise_seed(
+                    selection.seed,
+                    round_idx,
+                    ("liieiiic_streaming_secagg", int(client_by_id[updates[0][0]].edge_id)),
+                    50_000,
+                ),
+            )
+            cloud_updates[cloud_index] = (
+                noisy_edge_update,
+                sample_count,
+                candidate,
+                client_ids,
+            )
+            edge_noise: dict[str, dict[str, torch.Tensor]] = {}
+            _accumulate_scaled_state_difference(edge_noise, noisy_edge_update, 1.0)
+            _accumulate_scaled_state_difference(edge_noise, clean_edge_update, -1.0)
+            _accumulate_scaled_state_difference(
+                aggregate_dp_noise_accumulator,
+                edge_noise,
+                normalized_global_weights[cloud_index],
+            )
+            update_dp_component_noise_norms.append(
+                _state_difference_l2_norm(edge_noise)
+            )
+            aggregate_dp_noise_share_count += int(secagg_audit.cohort_size)
+            hierarchical_secagg_indices.add(cloud_index)
+            hierarchical_secagg_release_records.append({
+                "client_ids": [int(item[0]) for item in updates],
+                "edge_id": int(client_by_id[updates[0][0]].edge_id),
+                "candidate": candidate,
+                "cohort_size": int(secagg_audit.cohort_size),
+                "local_max_client_weight": float(secagg_audit.max_client_weight),
+                "edge_packet_noise_std": float(secagg_audit.target_noise_std),
+                "cloud_weight": float(normalized_global_weights[cloud_index]),
+                "weighted_cloud_noise_std": float(
+                    normalized_global_weights[cloud_index] * secagg_audit.target_noise_std
+                ),
+                "global_target_noise_std": float(aggregate_dp_noise_std),
+            })
+
         aggregate_share_stds_for_packets = (
             [0.0] * len(aggregate_dp_share_stds)
             if liic_streaming_secagg
-            else aggregate_dp_share_stds
+            else [
+                0.0 if index in hierarchical_secagg_indices else share_std
+                for index, share_std in enumerate(aggregate_dp_share_stds)
+            ]
         )
         for cloud_index, share_std in enumerate(aggregate_share_stds_for_packets):
             if share_std <= 0.0:
@@ -2603,6 +2692,7 @@ def _run_lenet5_policy(
             len(local_dp_pending_components)
             + len(edge_only_dp_release_records)
             + len(edge_only_secagg_release_records)
+            + len(hierarchical_secagg_release_records)
             + int(aggregate_dp_noise_share_count > 0)
         )
         update_dp_release = update_dp_release_count > 0
@@ -3072,6 +3162,7 @@ def _run_lenet5_policy(
                     len(edge_only_dp_release_records) + len(edge_only_secagg_release_records)
                 ),
                 "edge_only_secagg_release_count": len(edge_only_secagg_release_records),
+                "hierarchical_secagg_release_count": len(hierarchical_secagg_release_records),
                 "edge_only_dp_noise_norm": (
                     float(np.sqrt(np.sum(np.square(edge_only_dp_noise_norms))))
                     if edge_only_dp_noise_norms else 0.0
@@ -4632,6 +4723,23 @@ def _state_with_applied_difference(
             else:
                 target[name].add_(value.detach().to("cpu", dtype=target[name].dtype))
     return result
+
+
+def _liieiiic_streaming_secagg_eligible(
+    updates: list[tuple[int, Any, int, Candidate | None]],
+    *,
+    execute_real_he: bool,
+) -> bool:
+    """Whether one hierarchical full-local edge cohort can release only SecAgg output."""
+    if execute_real_he or len(updates) < 2:
+        return False
+    for _client_id, _state_diff, _sample_count, candidate in updates:
+        if candidate is None or candidate.mode != "LIIEIIIC":
+            return False
+        cloud_mechanism = _candidate_cloud_update_mechanism(candidate)
+        if not mechanism_uses_dp(cloud_mechanism) or mechanism_uses_he(cloud_mechanism):
+            return False
+    return True
 
 
 def _liic_streaming_secagg_eligible(
