@@ -1,0 +1,198 @@
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -77,7 +77,6 @@
+     resolved_privacy_parameters,
+     mode_aware_feature_noise_multiplier,
+     _local_omega_proxy as selection_local_omega_proxy,
+-    _candidate_reaches_cloud as selection_candidate_reaches_cloud,
+ )
+ from .training import MODE_SPECS
+ from .version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
+@@ -1082,10 +1081,10 @@
+     round_rows: list[dict[str, Any]] = []
+     completed_wall_time_offset_sec = 0.0
+     decision_rows: list[dict[str, Any]] = []
+-    flow_event_rows: list[dict[str, Any]] = []
+-    link_state_rows: list[dict[str, Any]] = []
+     candidate_mode_audit_rows: list[dict[str, Any]] = []
+     pareto_profile_audit_rows: list[dict[str, Any]] = []
++    flow_event_rows: list[dict[str, Any]] = []
++    link_state_rows: list[dict[str, Any]] = []
+     best_accuracy = 0.0
+     logical_time = 0.0
+     client_by_id = {c.client_id: c for c in clients}
+@@ -1301,7 +1300,6 @@
+             for candidate_index, audit_candidate in enumerate(candidates):
+                 candidate_mode_audit_rows.append(
+                     {
+-                        "policy": policy,
+                         "round": round_idx,
+                         "client_id": client.client_id,
+                         "edge_id": client.edge_id,
+@@ -1316,6 +1314,7 @@
+                         "feasible_time": audit_candidate.feasible_time,
+                         "feasible_edge": audit_candidate.feasible_edge,
+                         "feasible_cloud": audit_candidate.feasible_cloud,
++                        "budget_ok": audit_candidate.epsilon_used <= rem + 1e-12,
+                         "time": audit_candidate.time,
+                         "pre_aggregation_time": audit_candidate.pre_aggregation_time,
+                         "communication_volume": audit_candidate.communication_volume,
+@@ -1325,17 +1324,33 @@
+                         "epsilon_used": audit_candidate.epsilon_used,
+                         "feature_dp_events": audit_candidate.feature_dp_events,
+                         "update_dp_events": audit_candidate.update_dp_events,
+-                        "feature_noise_multiplier": audit_candidate.feature_noise_multiplier,
+-                        "update_noise_multiplier": audit_candidate.update_noise_multiplier,
++                        "selected_feature_noise_multiplier": (
++                            audit_candidate.feature_noise_multiplier
++                            if audit_candidate.feature_noise_multiplier is not None
++                            else ""
++                        ),
++                        "selected_update_noise_multiplier": (
++                            audit_candidate.update_noise_multiplier
++                            if audit_candidate.update_noise_multiplier is not None
++                            else ""
++                        ),
+                         "projected_feature_epsilon": audit_candidate.feature_epsilon_after,
+                         "projected_update_epsilon": audit_candidate.update_epsilon_after,
+-                        "reaches_cloud": selection_candidate_reaches_cloud(audit_candidate),
+-                        "global_release_required": audit_candidate.global_release_required,
++                        "omega_feature_clip_excess_sq": (
++                            audit_candidate.omega_feature_clip_excess_sq
++                            if audit_candidate.omega_feature_clip_excess_sq is not None
++                            else ""
++                        ),
++                        "global_release_required": int(audit_candidate.global_release_required),
++                        "reaches_cloud": _mode_reaches_cloud(audit_candidate.mode),
+                         "local_omega_proxy": selection_local_omega_proxy(
+-                            audit_candidate, config=effective_selection
++                            audit_candidate,
++                            aggregation_size=1,
++                            config=effective_selection,
+                         ),
+                     }
+                 )
++
+             should_update = round_idx == 0 or round_idx % selection_period == 0
+             candidate = None
+             if not should_update:
+@@ -1474,61 +1489,70 @@
+                 previous_client_updates=previous_client_updates,
+                 fusion_objective_enabled=False,
+             )
+-            seed_evaluations = list(selection_diagnostics.get("seed_evaluations", ()))
+-            archive_evaluations = list(selection_diagnostics.get("archive", ()))
++            if policy in {"ours", "full_dynfl"}:
++                global_pareto_selection_rounds += 1
+ 
+-            def append_profile_audit(stage: str, evaluations: list[ProfileEvaluation]) -> None:
++            audit_archive = list(selection_diagnostics.get("archive", ()))
++            audit_seeds = list(selection_diagnostics.get("seed_evaluations", ()))
++            audit_reference = audit_archive or ([profile_evaluation] if profile_evaluation else [])
++
++            def append_profile_audit_stage(
++                stage: str,
++                evaluations: list[ProfileEvaluation],
++            ) -> None:
+                 if not evaluations:
+                     return
+-                latency_values = [item.system_latency for item in evaluations]
+-                learning_values = [item.system_learning_error for item in evaluations]
+-                latency_min, latency_max = min(latency_values), max(latency_values)
+-                learning_min, learning_max = min(learning_values), max(learning_values)
+-                norm_eps = max(float(effective_selection.pareto_norm_eps), 1e-15)
++                reference = audit_reference or evaluations
++                t_values = [item.system_latency for item in reference]
++                j_values = [item.system_learning_error for item in reference]
++                t_min, t_max = min(t_values), max(t_values)
++                j_min, j_max = min(j_values), max(j_values)
++                norm_eps = float(effective_selection.pareto_norm_eps)
+                 for profile_index, evaluation in enumerate(evaluations):
+-                    mode_counts = {
+-                        mode: sum(candidate.mode == mode for candidate in evaluation.profile.values())
+-                        for mode in MODE_SPECS
+-                    }
+-                    normalized_latency = (
+-                        evaluation.system_latency - latency_min
+-                    ) / (latency_max - latency_min + norm_eps)
+-                    normalized_learning = (
+-                        evaluation.system_learning_error - learning_min
+-                    ) / (learning_max - learning_min + norm_eps)
+-                    pareto_profile_audit_rows.append(
+-                        {
+-                            "policy": policy,
+-                            "round": round_idx,
+-                            "stage": stage,
+-                            "profile_index": profile_index,
+-                            "selected": (
+-                                evaluation.profile_signature
+-                                == profile_evaluation.profile_signature
+-                            ),
+-                            **{f"{mode}_count": mode_counts[mode] for mode in MODE_SPECS},
+-                            "system_latency_objective": evaluation.system_latency,
+-                            "fusion_bound_objective": evaluation.fusion_bound,
+-                            "feature_perturbation_objective": evaluation.feature_perturbation,
+-                            "dp_perturbation_objective": evaluation.system_dp,
+-                            "learning_error_objective": evaluation.system_learning_error,
+-                            "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
+-                            "normalized_latency_within_stage": normalized_latency,
+-                            "normalized_learning_within_stage": normalized_learning,
+-                            "tchebycheff_score_within_stage": max(
+-                                abs(normalized_latency), abs(normalized_learning)
+-                            ),
+-                            "evaluated_profile_count": selection_diagnostics.get(
+-                                "evaluated_profile_count", 0
+-                            ),
+-                        }
++                    profile_candidates = tuple(evaluation.profile.values())
++                    norm_latency = (
++                        (evaluation.system_latency - t_min)
++                        / (t_max - t_min + norm_eps)
+                     )
++                    norm_learning = (
++                        (evaluation.system_learning_error - j_min)
++                        / (j_max - j_min + norm_eps)
++                    )
++                    row = {
++                        "round": round_idx,
++                        "stage": stage,
++                        "profile_index": profile_index,
++                        "selected": bool(
++                            profile_evaluation is not None
++                            and evaluation.profile_signature
++                            == profile_evaluation.profile_signature
++                        ),
++                        "system_latency_objective": evaluation.system_latency,
++                        "fusion_bound_objective": evaluation.fusion_bound,
++                        "feature_perturbation_objective": evaluation.feature_perturbation,
++                        "dp_perturbation_objective": evaluation.system_dp,
++                        "learning_error_objective": evaluation.system_learning_error,
++                        "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
++                        "normalized_latency": norm_latency,
++                        "normalized_learning": norm_learning,
++                        "tchebycheff_score_within_archive": max(
++                            abs(norm_latency), abs(norm_learning)
++                        ),
++                        "evaluated_profile_count": selection_diagnostics.get(
++                            "evaluated_profile_count", 0
++                        ),
++                    }
++                    for mode in MODE_SPECS:
++                        row[f"{mode}_count"] = sum(
++                            candidate.mode == mode
++                            for candidate in profile_candidates
++                        )
++                    pareto_profile_audit_rows.append(row)
+ 
+-            append_profile_audit("seed", seed_evaluations)
+-            append_profile_audit("archive", archive_evaluations)
+-
+-            if policy in {"ours", "full_dynfl"}:
+-                global_pareto_selection_rounds += 1
++            append_profile_audit_stage("seed", audit_seeds)
++            append_profile_audit_stage("archive", audit_archive)
++            if profile_evaluation is not None:
++                append_profile_audit_stage("final", [profile_evaluation])
+ 
+         if policy in {
+             "ours",

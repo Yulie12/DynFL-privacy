@@ -1,0 +1,217 @@
+--- a/experiments/run_fmnist_lenet5.py	2026-10-01 02:42:14.000000000 +0000
++++ b/experiments/run_fmnist_lenet5.py	2026-10-01 03:25:59.605612770 +0000
+@@ -110,6 +110,14 @@
+     parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
+     parser.add_argument("--dp-upd-epsilon", type=float, default=8.0)
+     parser.add_argument("--dp-clip-norm", type=float, default=1.0)
++    parser.add_argument(
++        "--dp-feature-clip-norm", type=float, default=None,
++        help="Feature/embedding clipping norm C_f. Defaults to --dp-clip-norm for backward compatibility.",
++    )
++    parser.add_argument(
++        "--dp-update-clip-norm", type=float, default=None,
++        help="Model-update clipping norm C_u. Defaults to --dp-clip-norm for backward compatibility.",
++    )
+     parser.add_argument("--dp-noise-multiplier", type=float, default=0.0002)
+     parser.add_argument(
+         "--dp-accounting-mode",
+@@ -228,6 +236,16 @@
+             "--trusted-edge-split-execution has been removed; use exposure-aware privacy requirements instead"
+         )
+     policies = _resolved_policies(args)
++    feature_clip_norm = float(
++        args.dp_feature_clip_norm if args.dp_feature_clip_norm is not None else args.dp_clip_norm
++    )
++    update_clip_norm = float(
++        args.dp_update_clip_norm if args.dp_update_clip_norm is not None else args.dp_clip_norm
++    )
++    if feature_clip_norm <= 0.0:
++        raise ValueError("--dp-feature-clip-norm must be positive")
++    if update_clip_norm <= 0.0:
++        raise ValueError("--dp-update-clip-norm must be positive")
+     if args.max_new_rounds is not None and args.max_new_rounds < 1:
+         raise ValueError("--max-new-rounds must be positive")
+     output_root = timestamped_dir(args.output_root, "lenet5_dynamic_newtex202608")
+@@ -275,8 +293,8 @@
+         dp_update_noise_multiplier=args.dp_update_noise_multiplier,
+         dp_delta=args.dp_delta,
+         omega_learning_rate=args.lr,
+-        omega_feature_clip_norm=args.dp_clip_norm,
+-        omega_update_clip_norm=args.dp_clip_norm,
++        omega_feature_clip_norm=feature_clip_norm,
++        omega_update_clip_norm=update_clip_norm,
+         resource_limit=args.resource_limit,
+         memory_limit=args.memory_limit,
+         time_limit=args.time_limit,
+@@ -338,6 +356,8 @@
+         dirichlet_alpha=args.dirichlet_alpha,
+         selection_period=args.selection_period,
+         dp_clip_norm=args.dp_clip_norm,
++        dp_feature_clip_norm=feature_clip_norm,
++        dp_update_clip_norm=update_clip_norm,
+         dp_noise_multiplier=args.dp_noise_multiplier,
+         dp_update_mode=args.dp_update_mode,
+         dp_release_calibration=args.dp_release_calibration,
+--- a/dynfed/fmnist_lenet5_dynamic.py	2026-10-01 03:25:01.704284290 +0000
++++ b/dynfed/fmnist_lenet5_dynamic.py	2026-10-01 03:26:26.954866164 +0000
+@@ -112,6 +112,8 @@
+     dirichlet_alpha: float = 0.5
+     selection_period: int = 5
+     dp_clip_norm: float = 1.0
++    dp_feature_clip_norm: float | None = None
++    dp_update_clip_norm: float | None = None
+     dp_noise_multiplier: float = 0.0002
+     dp_update_mode: str = "upd_only"
+     dp_release_calibration: str = "tex_packet"
+@@ -127,6 +129,14 @@
+     executor_workers: int | None = None
+ 
+ 
++def _feature_clip_norm(config: Lenet5Config) -> float:
++    return float(config.dp_feature_clip_norm if config.dp_feature_clip_norm is not None else config.dp_clip_norm)
++
++
++def _update_clip_norm(config: Lenet5Config) -> float:
++    return float(config.dp_update_clip_norm if config.dp_update_clip_norm is not None else config.dp_clip_norm)
++
++
+ def _validate_mainline_fusion(selection: SelectionConfig, train_config: Lenet5Config) -> None:
+     if not selection.mainline_fusion:
+         return
+@@ -355,7 +365,7 @@
+         input_shape=payload["input_shape"],
+         num_classes=payload["num_classes"],
+         mechanisms=payload["mechanisms"],
+-        dp_clip_norm=payload["dp_clip_norm"],
++        dp_clip_norm=payload.get("dp_feature_clip_norm", payload["dp_clip_norm"]),
+         dp_noise_multiplier=payload["dp_feature_noise_multiplier"],
+         dp_rng=rng,
+         dp_epsilon=payload["dp_epsilon"],
+@@ -372,7 +382,7 @@
+     state_diff = apply_unified_dp(
+         state_diff,
+         mechanism="dp" if has_dp else "none",
+-        clip_norm=payload["dp_clip_norm"],
++        clip_norm=payload.get("dp_update_clip_norm", payload["dp_clip_norm"]),
+         noise_multiplier=payload["dp_update_noise_multiplier"],
+         rng=rng,
+         device=worker_device,
+@@ -990,8 +1000,8 @@
+     effective_selection = replace(
+         selection,
+         allow_he=real_he_available,
+-        omega_feature_clip_norm=train_config.dp_clip_norm,
+-        omega_update_clip_norm=train_config.dp_clip_norm,
++        omega_feature_clip_norm=_feature_clip_norm(train_config),
++        omega_update_clip_norm=_update_clip_norm(train_config),
+     )
+     _validate_mainline_fusion(effective_selection, train_config)
+     diagnostic_update_ablation = os.environ.get(
+@@ -1043,7 +1053,7 @@
+             raise ValueError("Mainline fusion requires a non-empty fixed client roster")
+         release_account = IndependentReleaseAccount(
+             release_counts,
+-            train_config.dp_clip_norm,
++            _update_clip_norm(train_config),
+             float(privacy_parameters["update_budget"]),
+             float(privacy_parameters["delta"]),
+             int(selection.rounds),
+@@ -2085,7 +2095,7 @@
+                 if mainline_clip_enabled:
+                     relative_update, original_norm, clip_scale = clip_state_difference(
+                         relative_update,
+-                        train_config.dp_clip_norm,
++                        _update_clip_norm(train_config),
+                         torch.device("cpu"),
+                     )
+                     update_dp_clip_scales.append(clip_scale)
+@@ -2128,7 +2138,7 @@
+                     if local_packet_dp or secure_aggregate_dp:
+                         relative_update, _original_norm, clip_scale = clip_state_difference(
+                             relative_update,
+-                            train_config.dp_clip_norm,
++                            _update_clip_norm(train_config),
+                             torch.device("cpu"),
+                         )
+                         update_dp_clip_scales.append(clip_scale)
+@@ -2139,7 +2149,7 @@
+                     if local_packet_dp:
+                         sensitivity, noise_std = _dp_update_release_parameters(
+                             1.0,
+-                            clip_norm=train_config.dp_clip_norm,
++                            clip_norm=_update_clip_norm(train_config),
+                             noise_multiplier=float(
+                                 candidate.update_noise_multiplier
+                                 if candidate.update_noise_multiplier is not None
+@@ -2199,7 +2209,7 @@
+                             device=torch.device("cpu"),
+                         )
+                         clipped, _original_norm, clip_scale = clip_state_difference(
+-                            relative_update, train_config.dp_clip_norm, torch.device("cpu"),
++                            relative_update, _update_clip_norm(train_config), torch.device("cpu"),
+                         )
+                         update_dp_clip_scales.append(clip_scale)
+                         update_dp_preclip_norms.append(float(_original_norm))
+@@ -2228,7 +2238,7 @@
+                         )
+                         sensitivity, noise_std = _dp_update_release_parameters(
+                             max_client_fraction,
+-                            clip_norm=train_config.dp_clip_norm,
++                            clip_norm=_update_clip_norm(train_config),
+                             noise_multiplier=group_sigma,
+                         )
+                         local_dp_packet_client_fractions.append(max_client_fraction)
+@@ -2313,7 +2323,7 @@
+         ) = _distributed_aggregate_dp_parameters(
+             global_aggregation_weights,
+             secure_aggregate_dp_client_fractions,
+-            clip_norm=train_config.dp_clip_norm,
++            clip_norm=_update_clip_norm(train_config),
+             noise_multiplier=aggregate_noise_multiplier,
+         )
+         cloud_signal_updates.clear()
+@@ -2412,7 +2422,7 @@
+                     _protect_edge_only_client_update_dp(
+                         state_diff,
+                         candidate=candidate,
+-                        clip_norm=train_config.dp_clip_norm,
++                        clip_norm=_update_clip_norm(train_config),
+                         fallback_noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
+                         noise_seed=_dp_noise_seed(selection.seed, round_idx, client_id, 20_000),
+                     )
+@@ -2474,7 +2484,7 @@
+         update_dp_sensitivity = max(
+             local_dp_packet_sensitivities
+             + [aggregate_dp_sensitivity]
+-            + ([2.0 * train_config.dp_clip_norm] if edge_only_dp_release_records else []),
++            + ([2.0 * _update_clip_norm(train_config)] if edge_only_dp_release_records else []),
+             default=0.0,
+         )
+         update_dp_noise_std = float(
+@@ -3737,6 +3747,8 @@
+                 aggregate_cloud_update_dp=True,
+             ),
+             "dp_clip_norm": train_config.dp_clip_norm,
++            "dp_feature_clip_norm": _feature_clip_norm(train_config),
++            "dp_update_clip_norm": _update_clip_norm(train_config),
+             "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
+             "dp_update_noise_multiplier": float(
+                 candidate.update_noise_multiplier
+@@ -4663,7 +4675,7 @@
+                     candidate,
+                     aggregate_cloud_update_dp=True,
+                 ),
+-                dp_clip_norm=train_config.dp_clip_norm,
++                dp_clip_norm=_feature_clip_norm(train_config),
+                 dp_noise_multiplier=float(privacy_parameters["feature_noise_multiplier"]),
+                 dp_rng=eval_rng,
+                 dp_epsilon=max(selection_config.dp_emb_epsilon, 1e-6),
+@@ -4686,7 +4698,7 @@
+                 state_diff = apply_unified_dp(
+                     state_diff,
+                     mechanism="dp",
+-                    clip_norm=train_config.dp_clip_norm,
++                    clip_norm=_update_clip_norm(train_config),
+                     noise_multiplier=float(
+                         candidate.update_noise_multiplier
+                         if candidate.update_noise_multiplier is not None

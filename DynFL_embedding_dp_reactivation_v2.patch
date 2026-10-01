@@ -1,0 +1,161 @@
+--- a/dynfed/privacy.py
++++ b/dynfed/privacy.py
+@@ -255,11 +255,11 @@
+ 
+ 
+ class ClientPrivacyLedger:
+-    """Client-level update-DP ledger with inert feature-accounting compatibility.
++    """Per-client RDP ledgers for feature and update releases.
+ 
+-    The paper mainline charges only update events.  The feature accountant is
+-    retained temporarily so older checkpoints/result readers remain loadable;
+-    formal selection passes zero feature events.
++    Split modes may release a DP-protected intermediate embedding, while
++    Cloud-facing model updates may independently use update-level DP. The two
++    channels keep separate accounting states and feasibility budgets.
+     """
+ 
+     def __init__(
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -34,7 +34,7 @@
+ 
+ 
+ MECHANISMS_BY_OBJECT = {
+-    "emb": ("none",),
++    "emb": ("none", "dp"),
+     "logits": ("none",),
+     "grad": ("none",),
+     "emb_grad": ("none",),
+@@ -93,9 +93,10 @@
+     """
+ 
+     cloud_update_links = frozenset({"L_C_upd", "E_C_upd"})
++    split_embedding_links = frozenset({"L_E_emb", "L_C_emb"})
+     return ExposurePrivacyRequirement(
+         plaintext_forbidden_links=cloud_update_links,
+-        dp_required_links=cloud_update_links,
++        dp_required_links=cloud_update_links | split_embedding_links,
+     )
+ 
+ 
+@@ -329,8 +330,13 @@
+         )
+         feature_events = sum(
+             _record_dp_event_count(config, mode, count)
+-            for _link_id, obj, count, privacy_eligible in events
+-            if privacy_eligible and obj != "upd"
++            for link_id, obj, count, privacy_eligible in events
++            if privacy_eligible
++            and obj == "emb"
++            and not (
++                config.trusted_edge_split_execution
++                and link_id.startswith("L_E_")
++            )
+         )
+         update_events = sum(
+             count
+@@ -344,7 +350,7 @@
+         )
+         per_mode_counts.append((feature_events, update_events))
+ 
+-    max_feature_events_per_round = 0
++    max_feature_events_per_round = max((item[0] for item in per_mode_counts), default=0)
+     max_update_events_per_round = max((item[1] for item in per_mode_counts), default=0)
+     feature_horizon_events = config.rounds * max_feature_events_per_round
+     update_horizon_events = max(1, config.rounds * max_update_events_per_round)
+@@ -391,7 +397,7 @@
+         "max_update_events_per_round": max_update_events_per_round,
+         "feature_horizon_events": feature_horizon_events,
+         "update_horizon_events": update_horizon_events,
+-        "feature_dp_enabled": False,
++        "feature_dp_enabled": feature_horizon_events > 0,
+     }
+ 
+ 
+@@ -4314,10 +4320,17 @@
+     )
+     pre_aggregation_time = first_aggregation_arrival_time
+ 
+-    # Formal accounting is update-level client DP only (Q12/Q21/Q22).
+-    # Keep the feature fields in Candidate/PrivacyProjection as compatibility
+-    # shims for old result readers, but formal candidates never charge them.
+-    feature_dp_events = 0
++    # Split modes release an intermediate embedding outside the client. When
++    # that embedding link is assigned DP, charge one record-level feature-DP
++    # event per local epoch (and per explicit edge loop for repeated split
++    # execution), consistently with _record_dp_event_count().
++    feature_dp_events = sum(
++        _record_dp_event_count(config, mode, count)
++        for link_id, obj, count, privacy_eligible in link_events
++        if privacy_eligible
++        and obj == "emb"
++        and mechanism_uses_dp(actual_link_mechanisms[link_id])
++    )
+     update_dp_events = sum(
+         count
+         for link_id, obj, count, privacy_eligible in link_events
+@@ -4333,7 +4346,12 @@
+             update_dp_events,
+             update_noise_multiplier=update_noise_multiplier,
+         )
+-        epsilon_used = projection.update_epsilon_increment
++        # Legacy scalar used only for diagnostics/old local policies. The
++        # formal feasibility test remains two-ledger (feature, update).
++        epsilon_used = max(
++            projection.feature_epsilon_increment,
++            projection.update_epsilon_increment,
++        )
+         feature_epsilon_after = projection.feature_epsilon_after
+         update_epsilon_after = projection.update_epsilon_after
+         feasible_privacy = privacy_ledger.can_apply(projection)
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -634,6 +634,13 @@
+         assert mode_candidates
+         assert all("label" not in candidate.mechanisms for candidate in mode_candidates)
+         assert all(candidate.feasible_risk for candidate in mode_candidates)
++        assert all(
++            candidate.link_mechanisms.get(
++                "L_C_emb" if mode == "LIC" else "L_E_emb"
++            ) == "dp"
++            for candidate in mode_candidates
++        )
++        assert all(candidate.feature_dp_events > 0 for candidate in mode_candidates)
+         objects = {obj for obj, _count, _eligible in _mode_link_events(mode, 5, 3)}
+         assert "label" not in objects
+         assert {"emb", "logits", "grad", "emb_grad"}.issubset(objects)
+@@ -653,12 +660,16 @@
+     torch.testing.assert_close(actual, expected)
+ 
+ 
+-def test_formal_feature_dp_horizon_is_disabled() -> None:
++def test_formal_feature_dp_horizon_matches_split_embedding_releases() -> None:
+     resolved = resolved_privacy_parameters(
+         SelectionConfig(rounds=200, L_block_cycles=5, privacy_local_epochs=3)
+     )
+-    assert resolved["max_feature_events_per_round"] == 0
+-    assert resolved["feature_horizon_events"] == 0
++    # LIEIIIC is the maximum: 3 local epochs x 3 explicit edge loops.
++    # Only the released embedding is feature-DP; the returned/label gradients
++    # are not counted as feature-DP events.
++    assert resolved["max_feature_events_per_round"] == 9
++    assert resolved["feature_horizon_events"] == 1800
++    assert resolved["feature_dp_enabled"]
+ 
+ 
+ def test_trusted_edge_splitfed_uses_he_without_feature_dp() -> None:
+--- a/tests/test_privacy_accounting.py
++++ b/tests/test_privacy_accounting.py
+@@ -46,8 +46,9 @@
+     hundred = resolved_privacy_parameters(SelectionConfig(rounds=100, initial_epsilon=8.0))
+     assert fifty["feature_budget"] == hundred["feature_budget"] == 8.0
+     assert fifty["update_budget"] == hundred["update_budget"] == 8.0
+-    assert fifty["feature_horizon_events"] == hundred["feature_horizon_events"] == 0
+-    assert fifty["feature_noise_multiplier"] == hundred["feature_noise_multiplier"] == 1.0
++    assert fifty["feature_horizon_events"] == 150
++    assert hundred["feature_horizon_events"] == 300
++    assert hundred["feature_noise_multiplier"] > fifty["feature_noise_multiplier"]
+     assert hundred["update_noise_multiplier"] > fifty["update_noise_multiplier"]
+ 
+ 

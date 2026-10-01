@@ -1,0 +1,423 @@
+diff --git a/experiments/diagnose_risk_adjusted_privacy_frontier.py b/experiments/diagnose_risk_adjusted_privacy_frontier.py
+new file mode 100644
+index 0000000..b9e8efd
+--- /dev/null
++++ b/experiments/diagnose_risk_adjusted_privacy_frontier.py
+@@ -0,0 +1,417 @@
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++import math
++import subprocess
++import sys
++from pathlib import Path
++from typing import Any
++
++ROOT = Path(__file__).resolve().parents[1]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++import torch
++
++from diagnose_hierarchical_state_fidelity import (  # noqa: E402
++    _client_edge_map,
++    _edge_states,
++    _global_nested,
++    _load_checkpoint,
++    _nested_vector,
++    _sq_norm,
++)
++from diagnose_privacy_injection_distortion import (  # noqa: E402
++    _clean_checkpoint_paths,
++    _protection_summary,
++    _round_accuracy,
++    _state_privacy_metric,
++)
++
++RUNNER = ROOT / "experiments" / "run_forced_homogeneous_profile.py"
++PAIR_MODES = ("LIE", "LIIE", "LIC", "LIIC")
++EDGE_PRIMARY_MODES = {"LIE", "LIIE"}
++FEATURE_MODES = {"LIE", "LIC"}
++UPDATE_MODES = {"LIIE", "LIIC"}
++
++
++def parse_args() -> argparse.Namespace:
++    p = argparse.ArgumentParser(
++        description=(
++            "Sweep formal DP epsilon for feature-release and update-release modes, "
++            "measure protected-vs-clean update distortion, and derive risk-adjusted "
++            "feature/update frontiers for kappa = R_feature / R_update."
++        )
++    )
++    p.add_argument(
++        "--clean-root",
++        default="out/hierarchical_state_fidelity_v65",
++        help="Stage-0 clean calibration root.",
++    )
++    p.add_argument(
++        "--output-root",
++        default="out/risk_adjusted_privacy_frontier_v65",
++    )
++    p.add_argument(
++        "--epsilons",
++        nargs="+",
++        type=float,
++        default=[1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
++        help="Formal per-release-type epsilon budgets to sweep.",
++    )
++    p.add_argument(
++        "--kappas",
++        nargs="+",
++        type=float,
++        default=[1.0, 2.0, 4.0, 8.0],
++        help="Risk ratios kappa = R_feature / R_update for post-hoc equal-risk comparison.",
++    )
++    p.add_argument(
++        "--modes",
++        nargs="+",
++        choices=list(PAIR_MODES),
++        default=list(PAIR_MODES),
++        help="Modes to sweep. Default: LIE LIIE LIC LIIC.",
++    )
++    p.add_argument(
++        "--reuse-existing",
++        action="store_true",
++        help="Reuse the newest checkpoint under each mode/epsilon directory.",
++    )
++    p.add_argument(
++        "runner_args",
++        nargs=argparse.REMAINDER,
++        help="Arguments forwarded to run_fmnist_lenet5.py after '--'.",
++    )
++    return p.parse_args()
++
++
++def _strip_separator(values: list[str]) -> list[str]:
++    return values[1:] if values and values[0] == "--" else values
++
++
++def _remove_options(values: list[str], names: set[str]) -> list[str]:
++    """Remove scalar --name value pairs so this diagnostic can override them once."""
++    out: list[str] = []
++    i = 0
++    while i < len(values):
++        token = values[i]
++        if token in names:
++            i += 2
++            continue
++        out.append(token)
++        i += 1
++    return out
++
++
++def _latest_checkpoint(root: Path) -> Path | None:
++    paths = list(root.rglob("checkpoint.pt")) if root.exists() else []
++    if not paths:
++        return None
++    return max(paths, key=lambda p: p.stat().st_mtime)
++
++
++def _eps_tag(value: float) -> str:
++    return (f"{value:g}").replace(".", "p")
++
++
++def _run_mode_epsilon(
++    mode: str,
++    epsilon: float,
++    output_root: Path,
++    forwarded: list[str],
++    reuse: bool,
++) -> Path:
++    run_root = output_root / mode / f"eps_{_eps_tag(epsilon)}"
++    if reuse:
++        existing = _latest_checkpoint(run_root)
++        if existing is not None:
++            print(f"[{mode} eps={epsilon:g}] reuse {existing}")
++            return existing
++
++    all_modes = ["LIE", "LIC", "LIIE", "LIIC", "LIEIIC", "LIEIIIC", "LIIEIIIC"]
++    excluded = [item for item in all_modes if item != mode]
++    clean_forwarded = _remove_options(
++        forwarded,
++        {
++            "--dp-feature-epsilon-budget",
++            "--dp-update-epsilon-budget",
++            "--rounds",
++            "--policies",
++            "--resource-limit",
++            "--memory-limit",
++            "--risk-limit",
++            "--aggregation-fraction",
++            "--min-edge-cloud-fusion-ratio",
++            "--he-backend",
++            "--output-root",
++        },
++    )
++    cmd = [
++        sys.executable,
++        str(RUNNER),
++        *clean_forwarded,
++        "--rounds", "1",
++        "--policies", "fixed_dp",
++        "--exclude-modes", *excluded,
++        "--resource-limit", "100",
++        "--memory-limit", "100",
++        "--risk-limit", "1.0",
++        "--aggregation-fraction", "1.0",
++        "--min-edge-cloud-fusion-ratio", "0.0",
++        "--he-backend", "none",
++        "--dp-feature-epsilon-budget", str(epsilon),
++        "--dp-update-epsilon-budget", str(epsilon),
++        "--output-root", str(run_root),
++    ]
++    print(f"[{mode} eps={epsilon:g}] protected homogeneous run")
++    subprocess.run(cmd, cwd=ROOT, check=True)
++    checkpoint = _latest_checkpoint(run_root)
++    if checkpoint is None:
++        raise FileNotFoundError(f"[{mode} eps={epsilon:g}] no checkpoint under {run_root}")
++    return checkpoint
++
++
++def _edge_metric(
++    protected: dict[str, Any],
++    clean: dict[str, Any],
++    initial_state: dict[str, Any],
++) -> dict[str, float | int | None]:
++    initial_vec = _nested_vector(initial_state)
++    mapping = _client_edge_map(clean)
++    canonical_edges = set(mapping.values())
++    clean_edges = _edge_states(clean, initial_state, canonical_edges)
++    protected_edges = _edge_states(protected, initial_state, canonical_edges)
++    edge_counts = {
++        edge_id: sum(1 for e in mapping.values() if e == edge_id)
++        for edge_id in canonical_edges
++    }
++    total_clients = max(sum(edge_counts.values()), 1)
++
++    clean_energy = 0.0
++    protected_energy = 0.0
++    privacy_energy = 0.0
++    cosine_weighted = 0.0
++    cosine_weight = 0.0
++    for edge_id in sorted(canonical_edges):
++        weight = edge_counts.get(edge_id, 0) / total_clients
++        clean_vec = _nested_vector(clean_edges[edge_id])
++        protected_vec = _nested_vector(protected_edges[edge_id])
++        clean_update = clean_vec - initial_vec
++        protected_update = protected_vec - initial_vec
++        delta = protected_update - clean_update
++        ce = _sq_norm(clean_update)
++        pe = _sq_norm(protected_update)
++        de = _sq_norm(delta)
++        clean_energy += weight * ce
++        protected_energy += weight * pe
++        privacy_energy += weight * de
++        if ce > 1e-24 and pe > 1e-24:
++            cos = float(torch.dot(clean_update, protected_update) / math.sqrt(ce * pe))
++            cosine_weighted += weight * max(-1.0, min(1.0, cos))
++            cosine_weight += weight
++
++    active = int(clean_energy > 1e-24)
++    relative = privacy_energy / clean_energy if active else None
++    return {
++        "active": active,
++        "clean_update_norm": math.sqrt(max(clean_energy, 0.0)),
++        "protected_update_norm": math.sqrt(max(protected_energy, 0.0)),
++        "privacy_delta_norm": math.sqrt(max(privacy_energy, 0.0)),
++        "relative_distortion": relative,
++        "relative_noise_norm": math.sqrt(relative) if relative is not None else None,
++        "protected_clean_cosine": (
++            cosine_weighted / cosine_weight if cosine_weight > 0 else None
++        ),
++    }
++
++
++def _linear_interp_logx(points: list[tuple[float, float]], epsilon: float) -> float | None:
++    """Interpolate distortion on log(epsilon), never extrapolate."""
++    if epsilon <= 0 or not points:
++        return None
++    pts = sorted(points)
++    for x, y in pts:
++        if math.isclose(x, epsilon, rel_tol=1e-12, abs_tol=1e-12):
++            return y
++    if epsilon < pts[0][0] or epsilon > pts[-1][0]:
++        return None
++    lx = math.log(epsilon)
++    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
++        if x0 <= epsilon <= x1:
++            t = (lx - math.log(x0)) / (math.log(x1) - math.log(x0))
++            return y0 + t * (y1 - y0)
++    return None
++
++
++def _risk_rows(
++    measured: list[dict[str, Any]],
++    kappas: list[float],
++) -> list[dict[str, Any]]:
++    by_mode: dict[str, list[tuple[float, float]]] = {}
++    for row in measured:
++        value = row.get("primary_relative_distortion")
++        if value is None:
++            continue
++        by_mode.setdefault(str(row["mode"]), []).append((float(row["epsilon"]), float(value)))
++
++    pairs = [("LIE", "LIIE", "edge"), ("LIC", "LIIC", "cloud")]
++    out: list[dict[str, Any]] = []
++    for feature_mode, update_mode, target in pairs:
++        if feature_mode not in by_mode or update_mode not in by_mode:
++            continue
++        feature_points = by_mode[feature_mode]
++        update_points = by_mode[update_mode]
++        update_epsilons = sorted({x for x, _ in update_points})
++        for kappa in sorted(kappas):
++            if kappa <= 0:
++                continue
++            for eps_u in update_epsilons:
++                eps_f = eps_u / kappa
++                d_f = _linear_interp_logx(feature_points, eps_f)
++                d_u = _linear_interp_logx(update_points, eps_u)
++                if d_f is None or d_u is None:
++                    continue
++                out.append({
++                    "target": target,
++                    "feature_mode": feature_mode,
++                    "update_mode": update_mode,
++                    "kappa_feature_over_update": kappa,
++                    "risk_budget_proxy": eps_u,
++                    "feature_epsilon_equal_risk": eps_f,
++                    "update_epsilon_equal_risk": eps_u,
++                    "feature_relative_distortion": d_f,
++                    "update_relative_distortion": d_u,
++                    "distortion_ratio_update_over_feature": (
++                        d_u / d_f if d_f > 0 else None
++                    ),
++                    "preferred_by_distortion": (
++                        "feature" if d_f < d_u else "update" if d_u < d_f else "tie"
++                    ),
++                })
++    return out
++
++
++def main() -> None:
++    args = parse_args()
++    forwarded = _strip_separator(list(args.runner_args))
++    clean_root = Path(args.clean_root).resolve()
++    output_root = Path(args.output_root).resolve()
++    output_root.mkdir(parents=True, exist_ok=True)
++
++    epsilons = sorted({float(x) for x in args.epsilons if float(x) > 0})
++    kappas = sorted({float(x) for x in args.kappas if float(x) > 0})
++    if not epsilons:
++        raise ValueError("--epsilons must contain at least one positive value")
++    if not kappas:
++        raise ValueError("--kappas must contain at least one positive value")
++
++    clean_paths = _clean_checkpoint_paths(clean_root)
++    clean_checkpoints = {mode: _load_checkpoint(path) for mode, path in clean_paths.items()}
++    initial_state = _global_nested(clean_checkpoints["LIIE"])
++    initial_vec = _nested_vector(initial_state)
++
++    rows: list[dict[str, Any]] = []
++    for mode in args.modes:
++        clean = clean_checkpoints[mode]
++        clean_acc = _round_accuracy(clean)
++        for epsilon in epsilons:
++            protected_path = _run_mode_epsilon(
++                mode, epsilon, output_root, forwarded, args.reuse_existing
++            )
++            protected = _load_checkpoint(protected_path)
++            protection = _protection_summary(protected, mode)
++
++            clean_cloud = _nested_vector(_global_nested(clean))
++            protected_cloud = _nested_vector(_global_nested(protected))
++            cloud = _state_privacy_metric(protected_cloud, clean_cloud, initial_vec)
++            edge = _edge_metric(protected, clean, initial_state)
++
++            primary_name = "edge" if mode in EDGE_PRIMARY_MODES else "cloud"
++            primary = edge if primary_name == "edge" else cloud
++            protected_acc = _round_accuracy(protected)
++            release_type = "feature" if mode in FEATURE_MODES else "update"
++            rows.append({
++                "mode": mode,
++                "target": primary_name,
++                "release_type": release_type,
++                "epsilon": epsilon,
++                **protection,
++                "clean_checkpoint": str(clean_paths[mode]),
++                "protected_checkpoint": str(protected_path),
++                "clean_test_accuracy": clean_acc,
++                "protected_test_accuracy": protected_acc,
++                "accuracy_delta": (
++                    protected_acc - clean_acc
++                    if clean_acc is not None and protected_acc is not None
++                    else None
++                ),
++                "primary_clean_update_norm": primary["clean_update_norm"],
++                "primary_protected_update_norm": primary["protected_update_norm"],
++                "primary_privacy_delta_norm": primary["privacy_delta_norm"],
++                "primary_relative_distortion": primary["relative_distortion"],
++                "primary_relative_noise_norm": primary["relative_noise_norm"],
++                "primary_protected_clean_cosine": primary["protected_clean_cosine"],
++            })
++
++    rows.sort(key=lambda r: (PAIR_MODES.index(str(r["mode"])), float(r["epsilon"])))
++    frontier_rows = _risk_rows(rows, kappas)
++
++    measured_csv = output_root / "privacy_distortion_sweep.csv"
++    measured_json = output_root / "privacy_distortion_sweep.json"
++    risk_csv = output_root / "risk_adjusted_frontier.csv"
++    risk_json = output_root / "risk_adjusted_frontier.json"
++
++    with measured_csv.open("w", newline="", encoding="utf-8-sig") as handle:
++        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
++        writer.writeheader()
++        writer.writerows(rows)
++    measured_json.write_text(json.dumps(rows, indent=2), encoding="utf-8")
++
++    if frontier_rows:
++        with risk_csv.open("w", newline="", encoding="utf-8-sig") as handle:
++            writer = csv.DictWriter(handle, fieldnames=list(frontier_rows[0].keys()))
++            writer.writeheader()
++            writer.writerows(frontier_rows)
++    else:
++        risk_csv.write_text("", encoding="utf-8")
++    risk_json.write_text(json.dumps(frontier_rows, indent=2), encoding="utf-8")
++
++    print("\nMeasured privacy-distortion curves")
++    for row in rows:
++        d = row["primary_relative_distortion"]
++        d_text = "NA" if d is None else f"{float(d):.6g}"
++        rel = row["primary_relative_noise_norm"]
++        rel_text = "NA" if rel is None else f"{float(rel):.6g}"
++        cos = row["primary_protected_clean_cosine"]
++        cos_text = "NA" if cos is None else f"{float(cos):.4f}"
++        print(
++            f"{row['mode']:<5} eps={float(row['epsilon']):>6g} type={row['release_type']:<7} "
++            f"Dpriv={d_text:<11} relNorm={rel_text:<10} cos={cos_text:<7} "
++            f"dAcc={row['accuracy_delta']}"
++        )
++
++    print("\nRisk-adjusted equal-risk comparison")
++    for item in frontier_rows:
++        print(
++            f"{item['target']:<5} kappa={item['kappa_feature_over_update']:<4g} "
++            f"P={item['risk_budget_proxy']:<6g} "
++            f"epsF={item['feature_epsilon_equal_risk']:<8g} "
++            f"epsU={item['update_epsilon_equal_risk']:<8g} "
++            f"Df={item['feature_relative_distortion']:<11.6g} "
++            f"Du={item['update_relative_distortion']:<11.6g} "
++            f"winner={item['preferred_by_distortion']}"
++        )
++
++    print(f"Measured CSV: {measured_csv}")
++    print(f"Risk CSV:     {risk_csv}")
++    print(
++        "Note: kappa is a system-level risk weight, not a modification of the formal "
++        "DP guarantee. Equal-risk rows use eps_feature = eps_update / kappa."
++    )
++
++
++if __name__ == "__main__":
++    main()

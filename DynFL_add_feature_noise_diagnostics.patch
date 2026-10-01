@@ -1,0 +1,189 @@
+--- a/dynfed/split_learning.py
++++ b/dynfed/split_learning.py
+@@ -739,7 +739,19 @@
+         For no-split modes, only "end" contains the full model diff.
+     """
+     diagnostics = training_diagnostics if training_diagnostics is not None else {}
+-    diagnostics.update(actual_local_batches=0, actual_optimizer_steps=0)
++    diagnostics.update(
++        actual_local_batches=0,
++        actual_optimizer_steps=0,
++        feature_dp_release_batches=0,
++        feature_dp_sample_count=0,
++        feature_raw_norm_sum=0.0,
++        feature_clipped_norm_sum=0.0,
++        feature_noise_norm_sum=0.0,
++        feature_distortion_norm_sum=0.0,
++        feature_noise_l2_sq_sum=0.0,
++        feature_distortion_l2_sq_sum=0.0,
++        feature_clipped_sample_count=0,
++    )
+     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
+         "resnet18pretrainedadapter",
+         "resnet18pretrainedhead",
+@@ -859,6 +871,7 @@
+             dp_rng,
+             device,
+             dp_epsilon,
++            diagnostics=diagnostics,
+         )
+         edge_input = transmitted_emb.detach().requires_grad_(True)
+         logits = edge(edge_input)
+@@ -1069,6 +1082,7 @@
+     rng: np.random.Generator,
+     device: torch.device,
+     epsilon: float,
++    diagnostics: dict[str, Any] | None = None,
+ ) -> torch.Tensor:
+     if mechanism != "dp":
+         return tensor
+@@ -1091,8 +1105,59 @@
+     sigma = noise_multiplier * 2.0 * clip_norm
+     noise = torch.from_numpy(
+         rng.normal(0.0, sigma, size=tuple(tensor.shape)).astype(np.float32)
+-    ).to(device)
+-    return protected + noise
++    ).to(device=device, dtype=tensor.dtype)
++    released = protected + noise
++
++    if diagnostics is not None:
++        with torch.no_grad():
++            if tensor.ndim >= 2:
++                batch_size = int(tensor.shape[0])
++                raw_flat = tensor.detach().reshape(batch_size, -1)
++                clipped_flat = protected.detach().reshape(batch_size, -1)
++                noise_flat = noise.detach().reshape(batch_size, -1)
++                distortion_flat = (released.detach() - tensor.detach()).reshape(batch_size, -1)
++                raw_norms = torch.linalg.vector_norm(raw_flat, dim=1)
++                clipped_norms = torch.linalg.vector_norm(clipped_flat, dim=1)
++                noise_norms = torch.linalg.vector_norm(noise_flat, dim=1)
++                distortion_norms = torch.linalg.vector_norm(distortion_flat, dim=1)
++                clipped_count = int((raw_norms > float(clip_norm) + 1e-12).sum().item())
++            else:
++                batch_size = 1
++                raw_norms = torch.linalg.vector_norm(tensor.detach()).reshape(1)
++                clipped_norms = torch.linalg.vector_norm(protected.detach()).reshape(1)
++                noise_norms = torch.linalg.vector_norm(noise.detach()).reshape(1)
++                distortion_norms = torch.linalg.vector_norm(released.detach() - tensor.detach()).reshape(1)
++                clipped_count = int(float(raw_norms.item()) > float(clip_norm) + 1e-12)
++
++            diagnostics["feature_dp_release_batches"] = int(
++                diagnostics.get("feature_dp_release_batches", 0)
++            ) + 1
++            diagnostics["feature_dp_sample_count"] = int(
++                diagnostics.get("feature_dp_sample_count", 0)
++            ) + batch_size
++            diagnostics["feature_raw_norm_sum"] = float(
++                diagnostics.get("feature_raw_norm_sum", 0.0)
++            ) + float(raw_norms.sum().item())
++            diagnostics["feature_clipped_norm_sum"] = float(
++                diagnostics.get("feature_clipped_norm_sum", 0.0)
++            ) + float(clipped_norms.sum().item())
++            diagnostics["feature_noise_norm_sum"] = float(
++                diagnostics.get("feature_noise_norm_sum", 0.0)
++            ) + float(noise_norms.sum().item())
++            diagnostics["feature_distortion_norm_sum"] = float(
++                diagnostics.get("feature_distortion_norm_sum", 0.0)
++            ) + float(distortion_norms.sum().item())
++            diagnostics["feature_noise_l2_sq_sum"] = float(
++                diagnostics.get("feature_noise_l2_sq_sum", 0.0)
++            ) + float((noise_norms * noise_norms).sum().item())
++            diagnostics["feature_distortion_l2_sq_sum"] = float(
++                diagnostics.get("feature_distortion_l2_sq_sum", 0.0)
++            ) + float((distortion_norms * distortion_norms).sum().item())
++            diagnostics["feature_clipped_sample_count"] = int(
++                diagnostics.get("feature_clipped_sample_count", 0)
++            ) + clipped_count
++
++    return released
+ 
+ 
+ def fedavg_split(
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -1663,8 +1663,36 @@
+         for row in decision_rows:
+             if row.get("round") == round_idx and row.get("client_id") in worker_results:
+                 result = worker_results[row["client_id"]]
+-                for field in ("actual_local_batches", "actual_optimizer_steps"):
++                for field in (
++                    "actual_local_batches",
++                    "actual_optimizer_steps",
++                    "feature_dp_release_batches",
++                    "feature_dp_sample_count",
++                    "feature_raw_norm_sum",
++                    "feature_clipped_norm_sum",
++                    "feature_noise_norm_sum",
++                    "feature_distortion_norm_sum",
++                    "feature_noise_l2_sq_sum",
++                    "feature_distortion_l2_sq_sum",
++                    "feature_clipped_sample_count",
++                ):
+                     row[field] = result.get(field, 0)
++                feature_samples = max(float(result.get("feature_dp_sample_count", 0)), 0.0)
++                if feature_samples > 0.0:
++                    clipped_sum = float(result.get("feature_clipped_norm_sum", 0.0))
++                    row["feature_raw_norm_mean"] = float(result.get("feature_raw_norm_sum", 0.0)) / feature_samples
++                    row["feature_clipped_norm_mean"] = clipped_sum / feature_samples
++                    row["feature_noise_norm_mean"] = float(result.get("feature_noise_norm_sum", 0.0)) / feature_samples
++                    row["feature_distortion_norm_mean"] = float(result.get("feature_distortion_norm_sum", 0.0)) / feature_samples
++                    row["feature_noise_to_clipped_ratio"] = float(result.get("feature_noise_norm_sum", 0.0)) / max(clipped_sum, 1e-12)
++                    row["feature_clipping_fraction"] = float(result.get("feature_clipped_sample_count", 0)) / feature_samples
++                else:
++                    row["feature_raw_norm_mean"] = 0.0
++                    row["feature_clipped_norm_mean"] = 0.0
++                    row["feature_noise_norm_mean"] = 0.0
++                    row["feature_distortion_norm_mean"] = 0.0
++                    row["feature_noise_to_clipped_ratio"] = 0.0
++                    row["feature_clipping_fraction"] = 0.0
+ 
+         round_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
+         for client_id, candidate, idx, sequence in train_tasks:
+@@ -2717,6 +2745,30 @@
+             + evaluation_wall_time_sec
+         )
+         best_accuracy = max(best_accuracy, test_accuracy)
++        feature_dp_sample_count = sum(
++            float(r.get("feature_dp_sample_count", 0.0)) for r in worker_results.values()
++        )
++        feature_raw_norm_sum = sum(
++            float(r.get("feature_raw_norm_sum", 0.0)) for r in worker_results.values()
++        )
++        feature_clipped_norm_sum = sum(
++            float(r.get("feature_clipped_norm_sum", 0.0)) for r in worker_results.values()
++        )
++        feature_noise_norm_sum = sum(
++            float(r.get("feature_noise_norm_sum", 0.0)) for r in worker_results.values()
++        )
++        feature_distortion_norm_sum = sum(
++            float(r.get("feature_distortion_norm_sum", 0.0)) for r in worker_results.values()
++        )
++        feature_noise_l2_sq_sum = sum(
++            float(r.get("feature_noise_l2_sq_sum", 0.0)) for r in worker_results.values()
++        )
++        feature_distortion_l2_sq_sum = sum(
++            float(r.get("feature_distortion_l2_sq_sum", 0.0)) for r in worker_results.values()
++        )
++        feature_clipped_sample_count = sum(
++            float(r.get("feature_clipped_sample_count", 0.0)) for r in worker_results.values()
++        )
+         round_rows.append(
+             {
+                 "policy": policy,
+@@ -2730,6 +2782,16 @@
+                 "training_wall_time_sec": training_wall_time_sec,
+                 "actual_local_batches": sum(r.get("actual_local_batches", 0) for r in worker_results.values()),
+                 "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
++                "feature_dp_release_batches": sum(r.get("feature_dp_release_batches", 0) for r in worker_results.values()),
++                "feature_dp_sample_count": feature_dp_sample_count,
++                "feature_raw_norm_mean": feature_raw_norm_sum / max(feature_dp_sample_count, 1.0),
++                "feature_clipped_norm_mean": feature_clipped_norm_sum / max(feature_dp_sample_count, 1.0),
++                "feature_noise_norm_mean": feature_noise_norm_sum / max(feature_dp_sample_count, 1.0),
++                "feature_distortion_norm_mean": feature_distortion_norm_sum / max(feature_dp_sample_count, 1.0),
++                "feature_noise_to_clipped_ratio": feature_noise_norm_sum / max(feature_clipped_norm_sum, 1e-12),
++                "feature_clipping_fraction": feature_clipped_sample_count / max(feature_dp_sample_count, 1.0),
++                "feature_noise_l2_sq_mean": feature_noise_l2_sq_sum / max(feature_dp_sample_count, 1.0),
++                "feature_distortion_l2_sq_mean": feature_distortion_l2_sq_sum / max(feature_dp_sample_count, 1.0),
+                 "flow_wall_time_sec": flow_wall_time_sec,
+                 "aggregation_wall_time_sec": aggregation_wall_time_sec,
+                 "evaluation_wall_time_sec": evaluation_wall_time_sec,

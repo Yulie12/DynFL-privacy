@@ -1,0 +1,18 @@
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -2584,6 +2584,12 @@
+                 "noise_location": "packet",
+             })
+         for packet_index, (_diff, _samples, candidate, client_ids) in enumerate(cloud_updates):
++            # LIC is split training directly with the Cloud:
++            # S_LC(L_B) -> A_C.  Its contribution is produced inside the
++            # split-training path at the Cloud and is not a separate
++            # cross-domain model-update release.  cloud_updates is also used
++            # as an internal aggregation container, so do not audit LIC as
++            # an End->Cloud update packet.
++            if candidate is not None and candidate.mode == "LIC":
++                continue
+             mechanism = _reported_release_mechanism(
+                 candidate,
+                 mainline_fusion=effective_selection.mainline_fusion,

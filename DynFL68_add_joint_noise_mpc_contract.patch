@@ -1,0 +1,454 @@
+diff --git a/MPC_JOINT_NOISE_DESIGN_ZH.md b/MPC_JOINT_NOISE_DESIGN_ZH.md
+new file mode 100644
+index 0000000..8ba1c17
+--- /dev/null
++++ b/MPC_JOINT_NOISE_DESIGN_ZH.md
+@@ -0,0 +1,33 @@
++# Untrusted Edge 下的 Joint Noise：下一阶段设计边界
++
++## 当前结论
++
++现有 `client_secure_aggregate_common.py` 的独立 Gaussian share 路线有一个不可回避的方差边界。若 K 个 iid share 在完整 cohort 下恰好产生目标方差，则只剩 H 个 share 对 Edge/串谋方未知时，条件剩余方差只有 H/K 倍目标值。反之，若要求任意 H 个未知 share 单独仍具有完整目标方差，则完整 K 客户端释放的噪声能量膨胀为 K/H。
++
++因此，“完整 cohort 恰好 1x 目标噪声”与“最多 K-H 个客户端与 Edge 串谋后仍保留同一目标方差”不能由普通 iid client shares 同时得到（H<K）。
++
++## 本 patch 做什么
++
++新增一个 `external_joint_noise_share` 接口，使 SecAgg packet 路径不再绑定于当前独立噪声生成方式。诊断中的 ideal functionality 会先生成一个目标 Gaussian 向量，再生成 K 个 additive shares，使它们严格求和为该目标向量。这样可以验证：未来真实 MPC/threshold backend 只要提供同样的 client-local share 接口，现有 X25519 pairwise masking 与 fixed-cohort Edge sum 无需重新设计。
++
++## 本 patch 不做什么
++
++`ideal_joint_gaussian_shares` 是集中式模拟器：同一 Python 进程见到完整目标噪声和全部 shares，因此它不提供任何针对 untrusted Edge 或 Client–Edge collusion 的密码学保证。测试通过只能证明协议 plumbing 和目标噪声代数正确，不能在论文中写成“threshold/MPC 已实现”。
++
++真正闭环所需 backend 至少要满足：
++
++1. 目标噪声在 secret-shared 状态下共同采样；
++2. Edge 和允许范围内的 colluding clients 不能恢复完整噪声；
++3. 每个 client 只能取得自己的 additive share；
++4. 所有有效 shares 的和具有经过证明的目标分布；
++5. cohort/round/model version 被密码学绑定；
++6. fixed-cohort 阶段任何 dropout 均 abort，无 release；
++7. 有明确的 malicious-client / biasing-noise 防护或明确限定 honest-but-curious client 模型。
++
++## 文献路线
++
++Kairouz, Liu, Steinke (ICML 2021) 的 Distributed Discrete Gaussian 证明了将每个客户端的离散 Gaussian 与 SecAgg 组合是可分析路线，并明确讨论恶意/掉线客户端比例导致保证退化。它不是“任意大串谋下固定 1x 连续 Gaussian”的免费实现。
++
++Sabater, Bellet, Ramon (Machine Learning 2022) 使用图上的相关 Gaussian noise 加独立噪声，在串谋/恶意参与者下取得接近 trusted-curator utility，并指出这是 privacy/utility/communication 的协议设计问题，而非简单修改一个 sigma 即可解决。
++
++若要求由秘密共享参与方直接共同生成 DP noise，则需要真正的 MPC random sampling / distributed coin-flipping 类协议；当前仓库的 `cryptography`、TenSEAL/SEAL 并不自动提供该功能。
+diff --git a/experiments/client_secure_aggregate_common.py b/experiments/client_secure_aggregate_common.py
+index 4fcefec..3dc43f9 100644
+--- a/experiments/client_secure_aggregate_common.py
++++ b/experiments/client_secure_aggregate_common.py
+@@ -257,3 +257,57 @@ def protocol_audit(
+             "no_dropout_recovery_or_malicious_client_proofs"
+         ),
+     }
++
++
++def make_masked_client_packet_with_external_noise(
++    *,
++    context: ClientMaskingContext,
++    update: torch.Tensor,
++    external_noise_share: torch.Tensor,
++    public_keys: Mapping[int, bytes],
++    plan: ClientSecureAggregatePlan,
++    round_idx: int,
++    mask_std: float = 1.0,
++) -> tuple[torch.Tensor, dict[str, float | int | bool | str]]:
++    """Build a SecAgg packet using an externally supplied joint-noise share.
++
++    This is the integration seam for a future reviewed MPC/threshold noise
++    backend.  The function itself makes no claim about how ``external_noise_share``
++    was generated.  In particular, passing a share from the ideal simulator in
++    ``joint_noise_mpc_common`` is suitable only for diagnostics.
++    """
++    i = context.client_id
++    if i < 0 or i >= len(plan.weights) or set(public_keys) != set(range(len(plan.weights))):
++        raise ValueError("Public-key roster must exactly match the fixed cohort")
++    if public_keys[i] != context.public_key:
++        raise ValueError("Client public key does not match roster")
++    if not math.isfinite(mask_std) or mask_std <= 0.0:
++        raise ValueError("mask_std must be finite and positive")
++    clipped, preclip_norm, was_clipped = clip_l2(update, plan.clip_norm)
++    noise = external_noise_share.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
++    if noise.shape != clipped.shape or not bool(torch.isfinite(noise).all()):
++        raise ValueError("Finite external noise share matching update dimension required")
++    packet = clipped * plan.weights[i] + noise
++    dimension = clipped.numel()
++    for j in range(len(plan.weights)):
++        if j == i:
++            continue
++        shared = context.shared_secret(public_keys[j])
++        mask = _pairwise_mask(
++            shared,
++            round_idx=round_idx,
++            client_a=i,
++            client_b=j,
++            dimension=dimension,
++            mask_std=mask_std,
++        )
++        packet = packet + mask if i < j else packet - mask
++    return packet, {
++        "client_id": i,
++        "preclip_norm": preclip_norm,
++        "clipped": was_clipped,
++        "weight": plan.weights[i],
++        "noise_source": "external_joint_noise_share",
++        "pairwise_masks": len(plan.weights) - 1,
++        "individual_plaintext_sent_to_edge": False,
++    }
+diff --git a/experiments/joint_noise_mpc_common.py b/experiments/joint_noise_mpc_common.py
+new file mode 100644
+index 0000000..70744c4
+--- /dev/null
++++ b/experiments/joint_noise_mpc_common.py
+@@ -0,0 +1,155 @@
++"""Ideal joint-noise functionality and deployability contract.
++
++This module deliberately separates *functionality* from *cryptographic
++realization*.  ``ideal_joint_gaussian_shares`` is useful for plumbing and
++utility diagnostics: it samples one target Gaussian vector and secret-share-like
++additive pieces whose sum is exactly that vector.  It is NOT an MPC protocol;
++the process creating all shares is a trusted simulator and therefore cannot be
++used to claim protection against an untrusted edge or client-edge collusion.
++
++A future reviewed MPC/threshold backend can implement the same external-share
++interface without changing the secure-aggregation packet path.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++import math
++import os
++from typing import Mapping
++
++import torch
++
++
++@dataclass(frozen=True)
++class JointNoiseRequirement:
++    cohort_size: int
++    minimum_unknown_clients: int
++    target_noise_std: float
++
++
++def validate_joint_noise_requirement(
++    cohort_size: int, minimum_unknown_clients: int, target_noise_std: float
++) -> JointNoiseRequirement:
++    if type(cohort_size) is not int or cohort_size < 2:
++        raise ValueError("cohort_size must be an integer >= 2")
++    if (type(minimum_unknown_clients) is not int
++            or not 2 <= minimum_unknown_clients <= cohort_size):
++        raise ValueError("minimum_unknown_clients must be in [2, cohort_size]")
++    if not math.isfinite(target_noise_std) or target_noise_std <= 0.0:
++        raise ValueError("target_noise_std must be finite and positive")
++    return JointNoiseRequirement(
++        cohort_size=cohort_size,
++        minimum_unknown_clients=minimum_unknown_clients,
++        target_noise_std=float(target_noise_std),
++    )
++
++
++def independent_share_exact_target_conditional_variance_ratio(
++    requirement: JointNoiseRequirement,
++) -> float:
++    """Residual variance ratio after conditioning to Hmin unknown iid shares.
++
++    If iid client shares are calibrated so that *all K* shares sum to exactly
++    the target variance, each has variance target^2/K.  Once all but Hmin
++    shares are known to a colluding adversary, only Hmin/K of the target
++    variance remains.  Thus iid shares cannot simultaneously provide exact
++    full-cohort variance and the same target variance after such conditioning,
++    unless Hmin == K.
++    """
++    return requirement.minimum_unknown_clients / requirement.cohort_size
++
++
++def independent_share_robust_energy_inflation(
++    requirement: JointNoiseRequirement,
++) -> float:
++    """Full-cohort energy inflation needed by iid shares for Hmin robustness."""
++    return requirement.cohort_size / requirement.minimum_unknown_clients
++
++
++def _private_generator() -> torch.Generator:
++    seed = int.from_bytes(os.urandom(8), "little", signed=False) & ((1 << 63) - 1)
++    generator = torch.Generator(device="cpu")
++    generator.manual_seed(seed)
++    return generator
++
++
++def ideal_joint_gaussian_shares(
++    *,
++    requirement: JointNoiseRequirement,
++    dimension: int,
++    share_mask_std: float | None = None,
++) -> tuple[dict[int, torch.Tensor], torch.Tensor, dict[str, object]]:
++    """Return additive shares that sum *exactly* to one target Gaussian draw.
++
++    This is an IDEAL FUNCTIONALITY SIMULATOR.  One process samples the complete
++    target noise and all shares.  It proves only that the downstream packet and
++    aggregation plumbing can consume externally generated joint-noise shares.
++    It provides no cryptographic secrecy against the process hosting it.
++    """
++    if type(dimension) is not int or dimension <= 0:
++        raise ValueError("dimension must be a positive integer")
++    if share_mask_std is None:
++        share_mask_std = requirement.target_noise_std
++    if not math.isfinite(share_mask_std) or share_mask_std <= 0.0:
++        raise ValueError("share_mask_std must be finite and positive")
++
++    target = torch.randn(
++        dimension, generator=_private_generator(), dtype=torch.float64
++    ) * requirement.target_noise_std
++
++    shares: dict[int, torch.Tensor] = {}
++    running = torch.zeros(dimension, dtype=torch.float64)
++    # K-1 random additive masks; final share closes the sum exactly.  The
++    # marginal distribution of individual shares is irrelevant here because
++    # this simulator is not itself a privacy mechanism.
++    for i in range(requirement.cohort_size - 1):
++        share = torch.randn(
++            dimension, generator=_private_generator(), dtype=torch.float64
++        ) * float(share_mask_std)
++        shares[i] = share
++        running = running + share
++    shares[requirement.cohort_size - 1] = target - running
++
++    residual = torch.stack([shares[i] for i in range(requirement.cohort_size)]).sum(0) - target
++    max_abs_error = float(residual.abs().max())
++    return shares, target, {
++        "backend": "ideal_joint_gaussian_functionality_simulator",
++        "cryptographic_realization": False,
++        "deployable_under_untrusted_edge": False,
++        "collusion_resistance_established": False,
++        "exact_target_sum": max_abs_error <= 1e-10,
++        "max_abs_share_sum_error": max_abs_error,
++        "required_real_backend": (
++            "reviewed_MPC_or_threshold_secret_shared_noise_sampler"
++        ),
++    }
++
++
++def joint_noise_contract_audit(
++    requirement: JointNoiseRequirement,
++    *,
++    backend_metadata: Mapping[str, object] | None = None,
++) -> dict[str, object]:
++    metadata = dict(backend_metadata or {})
++    cryptographic = metadata.get("cryptographic_realization") is True
++    collusion = metadata.get("collusion_resistance_established") is True
++    exact = metadata.get("exact_target_sum") is True
++    closed = bool(cryptographic and collusion and exact)
++    return {
++        "cohort_size": requirement.cohort_size,
++        "minimum_unknown_clients": requirement.minimum_unknown_clients,
++        "target_noise_std": requirement.target_noise_std,
++        "iid_exact_conditional_variance_ratio": (
++            independent_share_exact_target_conditional_variance_ratio(requirement)
++        ),
++        "iid_robust_energy_inflation": (
++            independent_share_robust_energy_inflation(requirement)
++        ),
++        "exact_target_aggregate_noise": exact,
++        "cryptographic_realization": cryptographic,
++        "collusion_resistance_established": collusion,
++        "protocol_status": (
++            "joint_noise_crypto_closed" if closed
++            else "ideal_functionality_only_not_a_security_closure"
++        ),
++    }
+diff --git a/experiments/validate_joint_noise_mpc_contract.py b/experiments/validate_joint_noise_mpc_contract.py
+new file mode 100644
+index 0000000..401728f
+--- /dev/null
++++ b/experiments/validate_joint_noise_mpc_contract.py
+@@ -0,0 +1,107 @@
++"""Validate the exact-noise *functionality* seam without overstating security."""
++from __future__ import annotations
++
++import argparse
++import json
++import math
++from pathlib import Path
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++import torch
++
++from dynfed.privacy import calibrate_gaussian_noise
++from experiments.client_secure_aggregate_common import (
++    ClientMaskingContext,
++    client_secure_aggregate_plan,
++    clip_l2,
++    make_masked_client_packet_with_external_noise,
++    untrusted_edge_fixed_cohort_sum,
++)
++from experiments.joint_noise_mpc_common import (
++    ideal_joint_gaussian_shares,
++    joint_noise_contract_audit,
++    validate_joint_noise_requirement,
++)
++
++
++def parse_args() -> argparse.Namespace:
++    p = argparse.ArgumentParser()
++    p.add_argument("--clients", type=int, default=10)
++    p.add_argument("--dimension", type=int, default=4096)
++    p.add_argument("--clip-norm", type=float, default=0.25)
++    p.add_argument("--epsilon", type=float, default=8.0)
++    p.add_argument("--delta", type=float, default=1e-5)
++    p.add_argument("--privacy-horizon", type=int, default=1)
++    p.add_argument("--minimum-unknown-clients", type=int, default=2)
++    p.add_argument("--seed", type=int, default=42)
++    return p.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    if args.clients < 2 or args.dimension <= 0:
++        raise ValueError("Need at least two clients and positive dimension")
++    torch.manual_seed(args.seed)
++    weights = [1.0 / args.clients] * args.clients
++    sigma = calibrate_gaussian_noise(
++        args.epsilon, args.delta, args.privacy_horizon
++    )
++    plan = client_secure_aggregate_plan(
++        weights, args.clip_norm, sigma, args.minimum_unknown_clients
++    )
++    requirement = validate_joint_noise_requirement(
++        args.clients, args.minimum_unknown_clients, plan.target_noise_std
++    )
++    shares, target_noise, backend = ideal_joint_gaussian_shares(
++        requirement=requirement, dimension=args.dimension
++    )
++
++    contexts = [ClientMaskingContext(i) for i in range(args.clients)]
++    public_keys = {c.client_id: c.public_key for c in contexts}
++    updates = {
++        i: torch.randn(args.dimension, dtype=torch.float64) / math.sqrt(args.dimension)
++        for i in range(args.clients)
++    }
++    packets = {}
++    clipped_weighted = []
++    for i, context in enumerate(contexts):
++        clipped, _, _ = clip_l2(updates[i], plan.clip_norm)
++        clipped_weighted.append(clipped * weights[i])
++        packets[i], _ = make_masked_client_packet_with_external_noise(
++            context=context,
++            update=updates[i],
++            external_noise_share=shares[i],
++            public_keys=public_keys,
++            plan=plan,
++            round_idx=0,
++        )
++    clean = torch.stack(clipped_weighted).sum(0)
++    released = untrusted_edge_fixed_cohort_sum(packets, cohort_size=args.clients)
++    observed_noise = released - clean
++    max_noise_error = float((observed_noise - target_noise).abs().max())
++
++    report = joint_noise_contract_audit(requirement, backend_metadata=backend)
++    report.update({
++        "dimension": args.dimension,
++        "epsilon_target": args.epsilon,
++        "delta": args.delta,
++        "privacy_horizon": args.privacy_horizon,
++        "aggregate_dp_sensitivity": plan.aggregate_sensitivity,
++        "measured_target_noise_norm": float(torch.linalg.vector_norm(target_noise)),
++        "measured_released_noise_norm": float(torch.linalg.vector_norm(observed_noise)),
++        "release_matches_ideal_target_max_abs_error": max_noise_error,
++        "secagg_external_noise_plumbing_exact": max_noise_error <= 1e-9,
++        "security_warning": (
++            "The ideal joint-noise generator is centralized diagnostic code. "
++            "Do not use this result as an MPC/threshold security claim."
++        ),
++    })
++    print(json.dumps(report, indent=2, sort_keys=True))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_joint_noise_mpc_contract.py b/tests/test_joint_noise_mpc_contract.py
+new file mode 100644
+index 0000000..5294ad4
+--- /dev/null
++++ b/tests/test_joint_noise_mpc_contract.py
+@@ -0,0 +1,73 @@
++import torch
++
++from experiments.client_secure_aggregate_common import (
++    ClientMaskingContext,
++    client_secure_aggregate_plan,
++    make_masked_client_packet_with_external_noise,
++    untrusted_edge_fixed_cohort_sum,
++)
++from experiments.joint_noise_mpc_common import (
++    ideal_joint_gaussian_shares,
++    joint_noise_contract_audit,
++    validate_joint_noise_requirement,
++)
++
++
++def test_iid_exact_and_collusion_robust_tradeoff_is_explicit():
++    req = validate_joint_noise_requirement(100, 2, 0.5)
++    report = joint_noise_contract_audit(req)
++    assert report["iid_exact_conditional_variance_ratio"] == 0.02
++    assert report["iid_robust_energy_inflation"] == 50.0
++    assert report["protocol_status"] == "ideal_functionality_only_not_a_security_closure"
++
++
++def test_ideal_joint_shares_sum_exactly_but_are_not_crypto_backend():
++    req = validate_joint_noise_requirement(10, 2, 0.2)
++    shares, target, meta = ideal_joint_gaussian_shares(requirement=req, dimension=257)
++    total = torch.stack([shares[i] for i in range(10)]).sum(0)
++    assert torch.allclose(total, target, rtol=0.0, atol=1e-10)
++    assert meta["exact_target_sum"]
++    assert not meta["cryptographic_realization"]
++    assert not meta["collusion_resistance_established"]
++
++
++def test_secagg_accepts_external_joint_noise_share_and_preserves_exact_sum():
++    k, d = 4, 64
++    plan = client_secure_aggregate_plan([0.25] * k, 1.0, 0.5, 2)
++    req = validate_joint_noise_requirement(k, 2, plan.target_noise_std)
++    shares, target, _ = ideal_joint_gaussian_shares(requirement=req, dimension=d)
++    contexts = [ClientMaskingContext(i) for i in range(k)]
++    public_keys = {c.client_id: c.public_key for c in contexts}
++    zero = torch.zeros(d, dtype=torch.float64)
++    packets = {}
++    for i, context in enumerate(contexts):
++        packets[i], meta = make_masked_client_packet_with_external_noise(
++            context=context,
++            update=zero,
++            external_noise_share=shares[i],
++            public_keys=public_keys,
++            plan=plan,
++            round_idx=7,
++        )
++        assert meta["noise_source"] == "external_joint_noise_share"
++    released = untrusted_edge_fixed_cohort_sum(packets, cohort_size=k)
++    assert torch.allclose(released, target, rtol=0.0, atol=1e-9)
++
++
++def test_external_noise_dimension_mismatch_fails_closed():
++    plan = client_secure_aggregate_plan([0.5, 0.5], 1.0, 0.5, 2)
++    contexts = [ClientMaskingContext(i) for i in range(2)]
++    public_keys = {c.client_id: c.public_key for c in contexts}
++    try:
++        make_masked_client_packet_with_external_noise(
++            context=contexts[0],
++            update=torch.zeros(8),
++            external_noise_share=torch.zeros(7),
++            public_keys=public_keys,
++            plan=plan,
++            round_idx=0,
++        )
++    except ValueError as exc:
++        assert "matching update dimension" in str(exc)
++    else:
++        raise AssertionError("dimension mismatch must fail closed")

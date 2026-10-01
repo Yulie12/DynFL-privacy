@@ -1,0 +1,397 @@
+diff --git a/configs/paper_v30_cifar10_resnet18.json b/configs/paper_v30_cifar10_resnet18.json
+index e3dbd28..390ba7b 100644
+--- a/configs/paper_v30_cifar10_resnet18.json
++++ b/configs/paper_v30_cifar10_resnet18.json
+@@ -40,7 +40,10 @@
+     "require_edge_cloud_coverage": true,
+     "min_edge_cloud_fusion_ratio": 0.5,
+     "trusted_edge_split_execution": false,
+-    "mainline_fusion": false
++    "mainline_fusion": false,
++    "split_interaction_mode": "workload",
++    "split_batch_size": 128,
++    "fl_first_split_on_demand": true
+   },
+   "network": {
+     "end_edge_rate_mb_s": 5,
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index f050836..ad331a3 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -144,6 +144,9 @@ class SelectionConfig:
+     output_dir: str = "out/selection"
+     require_feasible: bool = False
+     L_block_cycles: int = 5
++    split_interaction_mode: str = "fixed"
++    split_batch_size: int = 128
++    fl_first_split_on_demand: bool = False
+     privacy_local_epochs: int = 1
+     trusted_edge_split_execution: bool = False
+     allow_he: bool = True
+@@ -828,7 +831,7 @@ def enumerate_candidates(
+             update_events = sum(
+                 count
+                 for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
+-                    mode, config.L_block_cycles, spec.E_edge_loops
++                    mode, _split_interaction_count(config, samples), spec.E_edge_loops
+                 )
+                 if privacy_eligible
+                 and obj == "upd"
+@@ -885,6 +888,15 @@ def enumerate_candidates(
+                         fast_response_deadline=fast_response_deadline,
+                     )
+                 )
++    if config.fl_first_split_on_demand and _policy_uses_dynamic_mode_selection(policy):
++        full_local_modes = {"LIIE", "LIIC", "LIIEIIIC"}
++        full_local_device_feasible = any(
++            candidate.mode in full_local_modes and candidate.feasible_device
++            for candidate in candidates
++        )
++        if full_local_device_feasible:
++            candidates = [candidate for candidate in candidates if candidate.mode in full_local_modes]
++
+     # Q72/Q73: fast-response QoS is a hard feasibility gate only for clients
+     # that explicitly carry a per-client deadline. Ordinary clients keep time
+     # in the latency objective and are not rejected by a universal time limit.
+@@ -4282,7 +4294,7 @@ def _estimate_candidate(
+     update_noise_multiplier: float | None = None,
+     fast_response_deadline: float | None = None,
+ ) -> Candidate:
+-    L = config.L_block_cycles
++    L = _split_interaction_count(config, samples)
+     E = spec.E_edge_loops
+ 
+     local_load = spec.local_work * samples / max(config.minibatch_reference_samples, 1e-9)
+@@ -4307,6 +4319,10 @@ def _estimate_candidate(
+         block_compute = L * (local_time + edge_time)
+ 
+     cloud_time = spec.cloud_work * 0.55
++    if mode == "LIC":
++        # Direct client-cloud split executes the remote partition once per
++        # split interaction, just as L-E split modes repeat edge work.
++        cloud_time *= L
+     link_events = (_fusion_link_transmissions(mode, L, E) if config.mainline_fusion
+                    else _mode_link_transmissions(mode, L, E))
+     actual_link_mechanisms = dict(link_mechanisms or {})
+@@ -4649,6 +4665,42 @@ def _fusion_link_transmissions(mode, local_block_cycles, edge_loops):
+                        ("E_L_upd_final_return", "upd", 1, False))
+ 
+ 
++_DYNAMIC_MODE_POLICIES = {
++    "ours",
++    "ours_no_omega",
++    "full_dynfl",
++    "full_dynfl_3obj_diag",
++    "dynamic_mode_fixed_privacy",
++    "nsga2",
++    "individual_optimal",
++    "random",
++}
++
++
++def _policy_uses_dynamic_mode_selection(policy: str) -> bool:
++    return policy in _DYNAMIC_MODE_POLICIES
++
++
++def _split_interaction_count(config: SelectionConfig, samples: int) -> int:
++    """Return communication interactions for one local split-training stage.
++
++    ``fixed`` preserves the historical L_block_cycles model. ``workload``
++    binds split communication to the actual local training workload: local
++    epochs times the number of minibatches. Privacy accounting remains
++    separate because record-level exposure is not the same as batch-level
++    communication multiplicity.
++    """
++    if config.split_interaction_mode == "fixed":
++        return max(1, int(config.L_block_cycles))
++    if config.split_interaction_mode != "workload":
++        raise ValueError(
++            "split_interaction_mode must be 'fixed' or 'workload'"
++        )
++    batch_size = max(1, int(config.split_batch_size))
++    batches_per_epoch = max(1, math.ceil(max(1, int(samples)) / batch_size))
++    return max(1, int(config.privacy_local_epochs)) * batches_per_epoch
++
++
+ def _mode_link_transmissions(
+     mode: str,
+     local_block_cycles: int,
+diff --git a/experiments/run_fmnist_lenet5.py b/experiments/run_fmnist_lenet5.py
+index f7fd0d3..8f411b6 100644
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -167,6 +167,21 @@ def parse_args() -> argparse.Namespace:
+     )
+     parser.add_argument("--resource-limit", type=float, default=1.35)
+     parser.add_argument("--memory-limit", type=float, default=1.35)
++    parser.add_argument(
++        "--split-interaction-mode", choices=["fixed", "workload"], default="fixed",
++        help="Use fixed L_block_cycles or workload-derived split minibatch interactions.",
++    )
++    parser.add_argument(
++        "--split-batch-size", type=int, default=128,
++        help="Batch size used to derive split interaction count in workload mode.",
++    )
++    parser.add_argument(
++        "--fl-first-split-on-demand", action="store_true",
++        help=(
++            "For dynamic mode selection, suppress split/I modes whenever at least one "
++            "full-local/update mode is device-feasible; fixed baselines are unchanged."
++        ),
++    )
+     parser.add_argument("--time-limit", type=float, default=8.0)
+     parser.add_argument(
+         "--fast-client-deadlines",
+@@ -297,6 +312,9 @@ def main() -> None:
+         omega_update_clip_norm=update_clip_norm,
+         resource_limit=args.resource_limit,
+         memory_limit=args.memory_limit,
++        split_interaction_mode=args.split_interaction_mode,
++        split_batch_size=args.split_batch_size,
++        fl_first_split_on_demand=args.fl_first_split_on_demand,
+         time_limit=args.time_limit,
+         fast_client_deadlines=tuple(fast_client_deadlines),
+         risk_limit=args.risk_limit,
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index 88e9858..b01fc9b 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -127,6 +127,8 @@ def build_command(
+         "edges": system["edges"],
+         "resource_limit": system["resource_limit"],
+         "memory_limit": system["memory_limit"],
++        "split_interaction_mode": system.get("split_interaction_mode", "fixed"),
++        "split_batch_size": system.get("split_batch_size", 128),
+         "time_limit": system["time_limit"],
+         "risk_limit": system["risk_limit"],
+         "aggregation_fraction": system["aggregation_fraction"],
+@@ -184,6 +186,8 @@ def build_command(
+             ["--fast-client-deadlines", *[f"{client_id}:{deadline}" for client_id, deadline in fast_deadlines.items()]]
+         )
+     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
++    if system.get("fl_first_split_on_demand", False):
++        command.append("--fl-first-split-on-demand")
+     if equal_optimizer_work_control:
+         command.append("--equal-optimizer-work-control")
+     if max_new_rounds is not None:
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 5552966..70ec21e 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -2686,3 +2686,72 @@ def test_step32_2_runtime_sigma_audit_fields_are_emitted() -> None:
+     assert '"sigma_execution_accounting_consistent"' in source
+     assert 'if noise_location == "packet" and selected_sigmas' in source
+     assert 'if noise_location == "aggregate_share"' in source
++
++
++def test_workload_split_interactions_follow_epochs_and_minibatches() -> None:
++    from dynfed.selection import _split_interaction_count
++
++    config = SelectionConfig(
++        split_interaction_mode="workload",
++        split_batch_size=128,
++        privacy_local_epochs=3,
++    )
++    assert _split_interaction_count(config, 120) == 3
++    assert _split_interaction_count(config, 600) == 15
++    assert _split_interaction_count(config, 1200) == 30
++
++
++def test_fl_first_split_on_demand_suppresses_split_when_full_local_is_device_feasible() -> None:
++    candidates = enumerate_candidates(
++        config=SelectionConfig(
++            fl_first_split_on_demand=True,
++            split_interaction_mode="workload",
++            split_batch_size=128,
++            privacy_local_epochs=3,
++            memory_limit=1.35,
++            resource_limit=1.35,
++        ),
++        client_id=0, edge_factor=1.0, compute_factor=1.0,
++        memory_capacity_factor=1.0, samples=120, remaining_epsilon=8.0,
++        round_idx=0, rng=random.Random(5), policy="full_dynfl",
++    )
++    assert candidates
++    assert {item.mode for item in candidates} <= {"LIIE", "LIIC", "LIIEIIIC"}
++
++
++def test_fl_first_split_on_demand_allows_split_when_full_local_is_device_infeasible() -> None:
++    candidates = enumerate_candidates(
++        config=SelectionConfig(
++            fl_first_split_on_demand=True,
++            split_interaction_mode="workload",
++            split_batch_size=128,
++            privacy_local_epochs=3,
++            memory_limit=0.75,
++            resource_limit=1.35,
++        ),
++        client_id=0, edge_factor=1.0, compute_factor=1.0,
++        memory_capacity_factor=1.0, samples=120, remaining_epsilon=8.0,
++        round_idx=0, rng=random.Random(5), policy="full_dynfl",
++    )
++    assert any(item.mode in {"LIE", "LIC", "LIEIIC", "LIEIIIC"} for item in candidates)
++
++
++def test_lic_cloud_split_compute_scales_with_workload_interactions() -> None:
++    base = dict(
++        client_id=0, edge_factor=1.0, compute_factor=1.0, samples=120,
++        remaining_epsilon=8.0, round_idx=0, rng=random.Random(7),
++        policy="fixed_dp",
++    )
++    fixed = enumerate_candidates(
++        config=SelectionConfig(split_interaction_mode="fixed", L_block_cycles=1),
++        **base,
++    )
++    workload = enumerate_candidates(
++        config=SelectionConfig(
++            split_interaction_mode="workload", split_batch_size=128, privacy_local_epochs=3
++        ),
++        **base,
++    )
++    fixed_lic = min((x for x in fixed if x.mode == "LIC"), key=lambda x: x.time)
++    workload_lic = min((x for x in workload if x.mode == "LIC"), key=lambda x: x.time)
++    assert workload_lic.time > fixed_lic.time
+diff --git a/tex/paper/main.tex b/tex/paper/main.tex
+index 488898e..14189f6 100644
+--- a/tex/paper/main.tex
++++ b/tex/paper/main.tex
+@@ -382,7 +382,28 @@ aggregation tier. Raw training samples remain on the end device in every mode.
+ \subsubsection{Collaborative Link Blocks and Mode Flows}
+ A collaborative link block represents the basic training unit performed by a
+ client within one collaboration stage. We consider two types of blocks.
+-A split training block \(S_{Lr}(L_B)\), \(r\in\{E,C\}\), performs \(L_B\) training steps jointly between the Local tier and tier \(r\) through split interaction. A local training block \(T_L(L_B)\) performs \(L_B\) training steps at the Local tier and produces a model update for subsequent aggregation. Thus \(L_B\) denotes the number of training steps within one collaborative link block.
++For client \(i\) in round \(t\), let
++\begin{equation}
++N_i^t
++=
++E_i^t
++\left\lceil
++\frac{|\mathcal D_i^t|}{B_i^t}
++\right\rceil,
++\label{eq:split_interaction_count}
++\end{equation}
++where \(E_i^t\) is the number of local epochs, \(|\mathcal D_i^t|\) is the
++number of local training samples, and \(B_i^t\) is the minibatch size. Thus
++\(N_i^t\) is the workload-derived number of optimizer steps and, for a split
++mode, the number of interactive split exchanges in one collaboration stage.
++A split training block \(S_{Lr}(N_i^t)\), \(r\in\{E,C\}\), performs these
++steps jointly between the Local tier and tier \(r\) through split interaction.
++A local training block \(T_L(N_i^t)\) performs the same local workload entirely
++at the Local tier and produces one model update for subsequent aggregation.
++The optimizer workload and the number of network releases are therefore kept
++conceptually separate: split modes communicate once per split step, whereas
++update-submission modes communicate the resulting update after the local
++training block.
+ 
+ A collaborative link flow describes how the training blocks, update
+ transmissions, and aggregation stages are connected under a collaboration
+@@ -394,22 +415,22 @@ With these definitions, the seven mode flows are
+ \begin{equation}
+ \begin{aligned}
+ \mathrm{LIE}:~~&
+-S_{LE}(L_B) \rightarrow A_E,\\
++S_{LE}(N_i^t) \rightarrow A_E,\\
+ \mathrm{LIIE}:~~&
+-T_L(L_B) \xrightarrow{L\to E:\mathrm{upd}} A_E,\\
++T_L(N_i^t) \xrightarrow{L\to E:\mathrm{upd}} A_E,\\
+ \mathrm{LIC}:~~&
+-S_{LC}(L_B) \rightarrow A_C,\\
++S_{LC}(N_i^t) \rightarrow A_C,\\
+ \mathrm{LIIC}:~~&
+-T_L(L_B) \xrightarrow{L\to C:\mathrm{upd}} A_C,\\
++T_L(N_i^t) \xrightarrow{L\to C:\mathrm{upd}} A_C,\\
+ \mathrm{LIEIIC}:~~&
+-S_{LE}(L_B)
++S_{LE}(N_i^t)
+ \xrightarrow{E\to C:\mathrm{upd}} A_C,\\
+ \mathrm{LIEIIIC}:~~&
+-\bigl[S_{LE}(L_B)\rightarrow A_E\bigr]^{E_B}
++\bigl[S_{LE}(N_i^t)\rightarrow A_E\bigr]^{E_B}
+ \xrightarrow{E\to C:\mathrm{upd}} A_C,\\
+ \mathrm{LIIEIIIC}:~~&
+ \bigl[
+-T_L(L_B)
++T_L(N_i^t)
+ \xrightarrow{L\to E:\mathrm{upd}} A_E
+ \bigr]^{E_B}
+ \xrightarrow{E\to C:\mathrm{upd}} A_C .
+@@ -417,7 +438,7 @@ T_L(L_B)
+ \label{eq:mode_flows}
+ \end{equation}
+ Figure~\ref{fig:eecblockflow} illustrates the execution structure of the seven collaboration modes, with each subfigure showing one mode.
+-Orange links represent collaborative link block execution, with each block containing \(L_B\) training steps.
++Orange links represent collaborative link block execution, with each block containing the workload-derived \(N_i^t\) training steps.
+ Green links represent execution at the Edge stage in hierarchical modes. This execution is repeated \(E_B\) times before the resulting Edge update is forwarded to the Cloud.
+ Black self loops represent the final aggregation at the corresponding aggregation node. Black arrows represent update forwarding and model return paths among end devices, Edge nodes, and the Cloud. These flows determine the structure of the directed payload transmissions \(\mathcal X_i^t(h)\) presented below.
+ 
+@@ -610,6 +631,26 @@ M_{i,L}^{\mathrm{mem}}(h_i)\le Q_{\mathrm{mem},i}
+ \right\}.
+ \label{eq:resource_feasible}
+ \end{equation}
++We further distinguish the full-local/update family
++\(\mathcal H^{\mathrm{FL}}=\{\mathrm{LIIE},\mathrm{LIIC},\mathrm{LIIEIIIC}\}\)
++and the split/offloading family
++\(\mathcal H^{\mathrm{SP}}=\{\mathrm{LIE},\mathrm{LIC},\mathrm{LIEIIC},\mathrm{LIEIIIC}\}\).
++DynFL follows an FL-first, split-on-demand admissibility rule. If at least
++one full-local mode is resource feasible, dynamic mode selection is restricted
++to the feasible full-local family. Split modes are activated when no full-local
++mode satisfies the end-side computation and memory constraints. Fixed baselines
++are evaluated independently of this dynamic admissibility rule. Accordingly,
++the dynamic admissible set is
++\begin{equation}
++\mathcal H_i^{\mathrm{adm}}
++=
++\begin{cases}
++\mathcal H_i^{\mathrm{res}}\cap\mathcal H^{\mathrm{FL}},
++&\text{if }\mathcal H_i^{\mathrm{res}}\cap\mathcal H^{\mathrm{FL}}\neq\varnothing,\\
++\mathcal H_i^{\mathrm{res}},&\text{otherwise.}
++\end{cases}
++\label{eq:fl_first_admissible}
++\end{equation}
+ 
+ \subsubsection{Path and Round Latency on a Common Timeline}
+ 
+@@ -634,20 +675,28 @@ T_{u,v,b}^{\mathrm{priv},t}
+ where \(\alpha(\cdot)\) is the payload expansion factor caused by the protection mechanism and \(T_{u,v,b}^{\mathrm{priv},t}(\cdot)\) is the corresponding protection processing latency. For an unprotected transmission, \(\alpha(\mathrm{none})=1\) and \(T_{u,v,b}^{\mathrm{priv},t}(\mathrm{none})=0\).
+ 
+ \textbf{Execution latency.}
+-Let \(\tau_{i,L}^t(h_i)\) and \(\tau_{i,E}^t(h_i)\) denote the Local and Edge execution times within one training step under mode \(h_i\). For split training between Local and Edge, the \(L_B\) training steps are pipelined across the two tiers, giving
++Let \(\tau_{i,L}^t(h_i)\) and \(\tau_{i,r}^t(h_i)\), \(r\in\{E,C\}\), denote
++the Local and remote-tier execution times within one training step under mode
++\(h_i\). For split training, the \(N_i^t\) workload-derived steps may be
++pipelined across the two participating tiers, giving
+ \begin{equation}
+ T_i^{\mathrm{stage},t}(h_i)
+ =
+-L_B\max\!\left\{
+-\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
++N_i^t\max\!\left\{
++\tau_{i,L}^t(h_i),\tau_{i,r}^t(h_i)
+ \right\}
+ +
+ \min\!\left\{
+-\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
+-\right\}.
++\tau_{i,L}^t(h_i),\tau_{i,r}^t(h_i)
++\right\},\qquad r\in\{E,C\}.
+ \label{eq:execution_latency}
+ \end{equation}
+-For local training, \(T_i^{\mathrm{stage},t}(h_i)=L_B\tau_{i,L}^t(h_i)\). Hierarchical modes repeat the corresponding Edge stage \(E_B\) times.
++This expression is the ideal two-stage pipeline bound; all directed split
++payloads in \(\mathcal X_i^t(h)\) retain multiplicity \(N_i^t\), so base link
++delay and transmission time are incurred at every interactive step. For local
++training, \(T_i^{\mathrm{stage},t}(h_i)=N_i^t\tau_{i,L}^t(h_i)\), while the
++resulting update is submitted once after the local training block. Hierarchical
++modes repeat the corresponding Edge stage \(E_B\) times.
+ 
+ \textbf{Reconfiguration latency.}
+ Changing the collaboration mode may require model reconfiguration across tiers. The resulting delay is
+@@ -1008,7 +1057,7 @@ the current formal results. The main parameters are listed in
+ End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=100\) \\
+ Training and test samples & 12000 and 2000 & Random seeds & 40, 42, and 44 \\
+ Client computation and memory factors & Independent $\mathcal U(0.5,2.0)$ & Edge computation factor & $\mathcal U(2/3,1.5)$ \\
+-Logical link block reference & \(L_B=5\) & Independent stages in multilevel modes & \(E_B=3\) \\
++Split minibatch size & \(B_i=128\) & Independent stages in multilevel modes & \(E_B=3\) \\
+ Lifetime update-DP target & \(\bar\epsilon=8.0\) & DP slack parameter & \(\delta=10^{-5}\) \\
+ Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=0.02052\) MB & HE expansion factor & \(\alpha_{\mathrm{HE}}=8.04\) \\
+ CKKS polynomial degree and scale & \(8192\) and \(2^{40}\) & CKKS coefficient modulus bits & \([50,40]\) \\
