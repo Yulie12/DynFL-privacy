@@ -110,6 +110,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dp-emb-epsilon", type=float, default=8.0)
     parser.add_argument("--dp-upd-epsilon", type=float, default=8.0)
     parser.add_argument("--dp-clip-norm", type=float, default=1.0)
+    parser.add_argument(
+        "--dp-feature-clip-norm", type=float, default=None,
+        help="Feature/embedding clipping norm C_f. Defaults to --dp-clip-norm for backward compatibility.",
+    )
+    parser.add_argument(
+        "--dp-update-clip-norm", type=float, default=None,
+        help="Model-update clipping norm C_u. Defaults to --dp-clip-norm for backward compatibility.",
+    )
     parser.add_argument("--dp-noise-multiplier", type=float, default=0.0002)
     parser.add_argument(
         "--dp-accounting-mode",
@@ -228,6 +236,16 @@ def main() -> None:
             "--trusted-edge-split-execution has been removed; use exposure-aware privacy requirements instead"
         )
     policies = _resolved_policies(args)
+    feature_clip_norm = float(
+        args.dp_feature_clip_norm if args.dp_feature_clip_norm is not None else args.dp_clip_norm
+    )
+    update_clip_norm = float(
+        args.dp_update_clip_norm if args.dp_update_clip_norm is not None else args.dp_clip_norm
+    )
+    if feature_clip_norm <= 0.0:
+        raise ValueError("--dp-feature-clip-norm must be positive")
+    if update_clip_norm <= 0.0:
+        raise ValueError("--dp-update-clip-norm must be positive")
     if args.max_new_rounds is not None and args.max_new_rounds < 1:
         raise ValueError("--max-new-rounds must be positive")
     output_root = timestamped_dir(args.output_root, "lenet5_dynamic_newtex202608")
@@ -275,8 +293,8 @@ def main() -> None:
         dp_update_noise_multiplier=args.dp_update_noise_multiplier,
         dp_delta=args.dp_delta,
         omega_learning_rate=args.lr,
-        omega_feature_clip_norm=args.dp_clip_norm,
-        omega_update_clip_norm=args.dp_clip_norm,
+        omega_feature_clip_norm=feature_clip_norm,
+        omega_update_clip_norm=update_clip_norm,
         resource_limit=args.resource_limit,
         memory_limit=args.memory_limit,
         time_limit=args.time_limit,
@@ -338,6 +356,8 @@ def main() -> None:
         dirichlet_alpha=args.dirichlet_alpha,
         selection_period=args.selection_period,
         dp_clip_norm=args.dp_clip_norm,
+        dp_feature_clip_norm=feature_clip_norm,
+        dp_update_clip_norm=update_clip_norm,
         dp_noise_multiplier=args.dp_noise_multiplier,
         dp_update_mode=args.dp_update_mode,
         dp_release_calibration=args.dp_release_calibration,

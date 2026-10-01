@@ -739,7 +739,19 @@ def split_local_train_lenet5(
         For no-split modes, only "end" contains the full model diff.
     """
     diagnostics = training_diagnostics if training_diagnostics is not None else {}
-    diagnostics.update(actual_local_batches=0, actual_optimizer_steps=0)
+    diagnostics.update(
+        actual_local_batches=0,
+        actual_optimizer_steps=0,
+        feature_dp_release_batches=0,
+        feature_dp_sample_count=0,
+        feature_raw_norm_sum=0.0,
+        feature_clipped_norm_sum=0.0,
+        feature_noise_norm_sum=0.0,
+        feature_distortion_norm_sum=0.0,
+        feature_noise_l2_sq_sum=0.0,
+        feature_distortion_l2_sq_sum=0.0,
+        feature_clipped_sample_count=0,
+    )
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
         "resnet18pretrainedadapter",
         "resnet18pretrainedhead",
@@ -859,6 +871,7 @@ def split_local_train_lenet5(
             dp_rng,
             device,
             dp_epsilon,
+            diagnostics=diagnostics,
         )
         edge_input = transmitted_emb.detach().requires_grad_(True)
         logits = edge(edge_input)
@@ -1069,6 +1082,7 @@ def _protect_tensor_dp(
     rng: np.random.Generator,
     device: torch.device,
     epsilon: float,
+    diagnostics: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     if mechanism != "dp":
         return tensor
@@ -1091,8 +1105,59 @@ def _protect_tensor_dp(
     sigma = noise_multiplier * 2.0 * clip_norm
     noise = torch.from_numpy(
         rng.normal(0.0, sigma, size=tuple(tensor.shape)).astype(np.float32)
-    ).to(device)
-    return protected + noise
+    ).to(device=device, dtype=tensor.dtype)
+    released = protected + noise
+
+    if diagnostics is not None:
+        with torch.no_grad():
+            if tensor.ndim >= 2:
+                batch_size = int(tensor.shape[0])
+                raw_flat = tensor.detach().reshape(batch_size, -1)
+                clipped_flat = protected.detach().reshape(batch_size, -1)
+                noise_flat = noise.detach().reshape(batch_size, -1)
+                distortion_flat = (released.detach() - tensor.detach()).reshape(batch_size, -1)
+                raw_norms = torch.linalg.vector_norm(raw_flat, dim=1)
+                clipped_norms = torch.linalg.vector_norm(clipped_flat, dim=1)
+                noise_norms = torch.linalg.vector_norm(noise_flat, dim=1)
+                distortion_norms = torch.linalg.vector_norm(distortion_flat, dim=1)
+                clipped_count = int((raw_norms > float(clip_norm) + 1e-12).sum().item())
+            else:
+                batch_size = 1
+                raw_norms = torch.linalg.vector_norm(tensor.detach()).reshape(1)
+                clipped_norms = torch.linalg.vector_norm(protected.detach()).reshape(1)
+                noise_norms = torch.linalg.vector_norm(noise.detach()).reshape(1)
+                distortion_norms = torch.linalg.vector_norm(released.detach() - tensor.detach()).reshape(1)
+                clipped_count = int(float(raw_norms.item()) > float(clip_norm) + 1e-12)
+
+            diagnostics["feature_dp_release_batches"] = int(
+                diagnostics.get("feature_dp_release_batches", 0)
+            ) + 1
+            diagnostics["feature_dp_sample_count"] = int(
+                diagnostics.get("feature_dp_sample_count", 0)
+            ) + batch_size
+            diagnostics["feature_raw_norm_sum"] = float(
+                diagnostics.get("feature_raw_norm_sum", 0.0)
+            ) + float(raw_norms.sum().item())
+            diagnostics["feature_clipped_norm_sum"] = float(
+                diagnostics.get("feature_clipped_norm_sum", 0.0)
+            ) + float(clipped_norms.sum().item())
+            diagnostics["feature_noise_norm_sum"] = float(
+                diagnostics.get("feature_noise_norm_sum", 0.0)
+            ) + float(noise_norms.sum().item())
+            diagnostics["feature_distortion_norm_sum"] = float(
+                diagnostics.get("feature_distortion_norm_sum", 0.0)
+            ) + float(distortion_norms.sum().item())
+            diagnostics["feature_noise_l2_sq_sum"] = float(
+                diagnostics.get("feature_noise_l2_sq_sum", 0.0)
+            ) + float((noise_norms * noise_norms).sum().item())
+            diagnostics["feature_distortion_l2_sq_sum"] = float(
+                diagnostics.get("feature_distortion_l2_sq_sum", 0.0)
+            ) + float((distortion_norms * distortion_norms).sum().item())
+            diagnostics["feature_clipped_sample_count"] = int(
+                diagnostics.get("feature_clipped_sample_count", 0)
+            ) + clipped_count
+
+    return released
 
 
 def fedavg_split(

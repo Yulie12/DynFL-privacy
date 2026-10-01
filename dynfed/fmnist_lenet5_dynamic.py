@@ -75,6 +75,7 @@ from .selection import (
     paper_client_privacy_requirement,
     build_client_privacy_ledger,
     resolved_privacy_parameters,
+    mode_aware_feature_noise_multiplier,
     _local_omega_proxy as selection_local_omega_proxy,
 )
 from .training import MODE_SPECS
@@ -112,6 +113,8 @@ class Lenet5Config:
     dirichlet_alpha: float = 0.5
     selection_period: int = 5
     dp_clip_norm: float = 1.0
+    dp_feature_clip_norm: float | None = None
+    dp_update_clip_norm: float | None = None
     dp_noise_multiplier: float = 0.0002
     dp_update_mode: str = "upd_only"
     dp_release_calibration: str = "tex_packet"
@@ -125,6 +128,14 @@ class Lenet5Config:
     he_workers: int = 1
     executor: str = "serial"
     executor_workers: int | None = None
+
+
+def _feature_clip_norm(config: Lenet5Config) -> float:
+    return float(config.dp_feature_clip_norm if config.dp_feature_clip_norm is not None else config.dp_clip_norm)
+
+
+def _update_clip_norm(config: Lenet5Config) -> float:
+    return float(config.dp_update_clip_norm if config.dp_update_clip_norm is not None else config.dp_clip_norm)
 
 
 def _validate_mainline_fusion(selection: SelectionConfig, train_config: Lenet5Config) -> None:
@@ -355,7 +366,7 @@ def _client_train_worker(
         input_shape=payload["input_shape"],
         num_classes=payload["num_classes"],
         mechanisms=payload["mechanisms"],
-        dp_clip_norm=payload["dp_clip_norm"],
+        dp_clip_norm=payload.get("dp_feature_clip_norm", payload["dp_clip_norm"]),
         dp_noise_multiplier=payload["dp_feature_noise_multiplier"],
         dp_rng=rng,
         dp_epsilon=payload["dp_epsilon"],
@@ -372,7 +383,7 @@ def _client_train_worker(
     state_diff = apply_unified_dp(
         state_diff,
         mechanism="dp" if has_dp else "none",
-        clip_norm=payload["dp_clip_norm"],
+        clip_norm=payload.get("dp_update_clip_norm", payload["dp_clip_norm"]),
         noise_multiplier=payload["dp_update_noise_multiplier"],
         rng=rng,
         device=worker_device,
@@ -444,9 +455,17 @@ def run_fmnist_lenet5_training(
     transport_parameter_count = (trainable_parameter_count if selection.mainline_fusion
                                  else update_parameter_count)
     update_payload_mb = transport_parameter_count * 4.0 / 1_000_000.0
+    # Measure the actual per-sample split representation instead of hard-coding
+    # a model-specific feature dimension (e.g. torchvision ResNet18 layer2 is
+    # 128x4x4=2048 for CIFAR10).
+    with torch.no_grad():
+        probe = torch.zeros((1, *input_shape), dtype=torch.float32)
+        feature_probe = profile_end(probe)
+    feature_dimension = int(feature_probe[0].numel())
     selection = replace(
         selection,
         omega_update_dimension=float(trainable_parameter_count),
+        omega_feature_dimension=float(feature_dimension),
         update_payload_mb=float(update_payload_mb),
     )
     model_partition = {
@@ -466,6 +485,7 @@ def run_fmnist_lenet5_training(
         "dp_parameter_scope": train_config.update_parameter_scope,
         "transport_parameter_count": transport_parameter_count,
         "update_payload_mb": update_payload_mb,
+        "feature_dimension": feature_dimension,
     }
     del profile_end, profile_edge
     client_indices = _partition_clients_lenet5(
@@ -981,8 +1001,8 @@ def _run_lenet5_policy(
     effective_selection = replace(
         selection,
         allow_he=real_he_available,
-        omega_feature_clip_norm=train_config.dp_clip_norm,
-        omega_update_clip_norm=train_config.dp_clip_norm,
+        omega_feature_clip_norm=_feature_clip_norm(train_config),
+        omega_update_clip_norm=_update_clip_norm(train_config),
     )
     _validate_mainline_fusion(effective_selection, train_config)
     diagnostic_update_ablation = os.environ.get(
@@ -1034,7 +1054,7 @@ def _run_lenet5_policy(
             raise ValueError("Mainline fusion requires a non-empty fixed client roster")
         release_account = IndependentReleaseAccount(
             release_counts,
-            train_config.dp_clip_norm,
+            _update_clip_norm(train_config),
             float(privacy_parameters["update_budget"]),
             float(privacy_parameters["delta"]),
             int(selection.rounds),
@@ -1470,6 +1490,7 @@ def _run_lenet5_policy(
             projection = ledger.project(
                 candidate.feature_dp_events,
                 candidate.update_dp_events,
+                feature_noise_multiplier=candidate.feature_noise_multiplier,
                 update_noise_multiplier=candidate.update_noise_multiplier,
             )
             if (effective_selection.update_protection_goal == "released_model_dp"
@@ -1524,6 +1545,11 @@ def _run_lenet5_policy(
                     # Step32.2 runtime audit: preserve the exact sigma selected by
                     # the candidate so it can be reconciled with execution and
                     # realized accounting after the round.
+                    "selected_feature_noise_multiplier": (
+                        float(candidate.feature_noise_multiplier)
+                        if candidate.feature_noise_multiplier is not None
+                        else None
+                    ),
                     "selected_update_noise_multiplier": (
                         float(candidate.update_noise_multiplier)
                         if candidate.update_noise_multiplier is not None
@@ -1654,8 +1680,36 @@ def _run_lenet5_policy(
         for row in decision_rows:
             if row.get("round") == round_idx and row.get("client_id") in worker_results:
                 result = worker_results[row["client_id"]]
-                for field in ("actual_local_batches", "actual_optimizer_steps"):
+                for field in (
+                    "actual_local_batches",
+                    "actual_optimizer_steps",
+                    "feature_dp_release_batches",
+                    "feature_dp_sample_count",
+                    "feature_raw_norm_sum",
+                    "feature_clipped_norm_sum",
+                    "feature_noise_norm_sum",
+                    "feature_distortion_norm_sum",
+                    "feature_noise_l2_sq_sum",
+                    "feature_distortion_l2_sq_sum",
+                    "feature_clipped_sample_count",
+                ):
                     row[field] = result.get(field, 0)
+                feature_samples = max(float(result.get("feature_dp_sample_count", 0)), 0.0)
+                if feature_samples > 0.0:
+                    clipped_sum = float(result.get("feature_clipped_norm_sum", 0.0))
+                    row["feature_raw_norm_mean"] = float(result.get("feature_raw_norm_sum", 0.0)) / feature_samples
+                    row["feature_clipped_norm_mean"] = clipped_sum / feature_samples
+                    row["feature_noise_norm_mean"] = float(result.get("feature_noise_norm_sum", 0.0)) / feature_samples
+                    row["feature_distortion_norm_mean"] = float(result.get("feature_distortion_norm_sum", 0.0)) / feature_samples
+                    row["feature_noise_to_clipped_ratio"] = float(result.get("feature_noise_norm_sum", 0.0)) / max(clipped_sum, 1e-12)
+                    row["feature_clipping_fraction"] = float(result.get("feature_clipped_sample_count", 0)) / feature_samples
+                else:
+                    row["feature_raw_norm_mean"] = 0.0
+                    row["feature_clipped_norm_mean"] = 0.0
+                    row["feature_noise_norm_mean"] = 0.0
+                    row["feature_distortion_norm_mean"] = 0.0
+                    row["feature_noise_to_clipped_ratio"] = 0.0
+                    row["feature_clipping_fraction"] = 0.0
 
         round_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
         for client_id, candidate, idx, sequence in train_tasks:
@@ -2048,7 +2102,7 @@ def _run_lenet5_policy(
                 if mainline_clip_enabled:
                     relative_update, original_norm, clip_scale = clip_state_difference(
                         relative_update,
-                        train_config.dp_clip_norm,
+                        _update_clip_norm(train_config),
                         torch.device("cpu"),
                     )
                     update_dp_clip_scales.append(clip_scale)
@@ -2091,7 +2145,7 @@ def _run_lenet5_policy(
                     if local_packet_dp or secure_aggregate_dp:
                         relative_update, _original_norm, clip_scale = clip_state_difference(
                             relative_update,
-                            train_config.dp_clip_norm,
+                            _update_clip_norm(train_config),
                             torch.device("cpu"),
                         )
                         update_dp_clip_scales.append(clip_scale)
@@ -2102,7 +2156,7 @@ def _run_lenet5_policy(
                     if local_packet_dp:
                         sensitivity, noise_std = _dp_update_release_parameters(
                             1.0,
-                            clip_norm=train_config.dp_clip_norm,
+                            clip_norm=_update_clip_norm(train_config),
                             noise_multiplier=float(
                                 candidate.update_noise_multiplier
                                 if candidate.update_noise_multiplier is not None
@@ -2162,7 +2216,7 @@ def _run_lenet5_policy(
                             device=torch.device("cpu"),
                         )
                         clipped, _original_norm, clip_scale = clip_state_difference(
-                            relative_update, train_config.dp_clip_norm, torch.device("cpu"),
+                            relative_update, _update_clip_norm(train_config), torch.device("cpu"),
                         )
                         update_dp_clip_scales.append(clip_scale)
                         update_dp_preclip_norms.append(float(_original_norm))
@@ -2191,7 +2245,7 @@ def _run_lenet5_policy(
                         )
                         sensitivity, noise_std = _dp_update_release_parameters(
                             max_client_fraction,
-                            clip_norm=train_config.dp_clip_norm,
+                            clip_norm=_update_clip_norm(train_config),
                             noise_multiplier=group_sigma,
                         )
                         local_dp_packet_client_fractions.append(max_client_fraction)
@@ -2276,7 +2330,7 @@ def _run_lenet5_policy(
         ) = _distributed_aggregate_dp_parameters(
             global_aggregation_weights,
             secure_aggregate_dp_client_fractions,
-            clip_norm=train_config.dp_clip_norm,
+            clip_norm=_update_clip_norm(train_config),
             noise_multiplier=aggregate_noise_multiplier,
         )
         cloud_signal_updates.clear()
@@ -2375,7 +2429,7 @@ def _run_lenet5_policy(
                     _protect_edge_only_client_update_dp(
                         state_diff,
                         candidate=candidate,
-                        clip_norm=train_config.dp_clip_norm,
+                        clip_norm=_update_clip_norm(train_config),
                         fallback_noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
                         noise_seed=_dp_noise_seed(selection.seed, round_idx, client_id, 20_000),
                     )
@@ -2437,7 +2491,7 @@ def _run_lenet5_policy(
         update_dp_sensitivity = max(
             local_dp_packet_sensitivities
             + [aggregate_dp_sensitivity]
-            + ([2.0 * train_config.dp_clip_norm] if edge_only_dp_release_records else []),
+            + ([2.0 * _update_clip_norm(train_config)] if edge_only_dp_release_records else []),
             default=0.0,
         )
         update_dp_noise_std = float(
@@ -2708,6 +2762,30 @@ def _run_lenet5_policy(
             + evaluation_wall_time_sec
         )
         best_accuracy = max(best_accuracy, test_accuracy)
+        feature_dp_sample_count = sum(
+            float(r.get("feature_dp_sample_count", 0.0)) for r in worker_results.values()
+        )
+        feature_raw_norm_sum = sum(
+            float(r.get("feature_raw_norm_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_clipped_norm_sum = sum(
+            float(r.get("feature_clipped_norm_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_noise_norm_sum = sum(
+            float(r.get("feature_noise_norm_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_distortion_norm_sum = sum(
+            float(r.get("feature_distortion_norm_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_noise_l2_sq_sum = sum(
+            float(r.get("feature_noise_l2_sq_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_distortion_l2_sq_sum = sum(
+            float(r.get("feature_distortion_l2_sq_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_clipped_sample_count = sum(
+            float(r.get("feature_clipped_sample_count", 0.0)) for r in worker_results.values()
+        )
         round_rows.append(
             {
                 "policy": policy,
@@ -2721,6 +2799,16 @@ def _run_lenet5_policy(
                 "training_wall_time_sec": training_wall_time_sec,
                 "actual_local_batches": sum(r.get("actual_local_batches", 0) for r in worker_results.values()),
                 "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
+                "feature_dp_release_batches": sum(r.get("feature_dp_release_batches", 0) for r in worker_results.values()),
+                "feature_dp_sample_count": feature_dp_sample_count,
+                "feature_raw_norm_mean": feature_raw_norm_sum / max(feature_dp_sample_count, 1.0),
+                "feature_clipped_norm_mean": feature_clipped_norm_sum / max(feature_dp_sample_count, 1.0),
+                "feature_noise_norm_mean": feature_noise_norm_sum / max(feature_dp_sample_count, 1.0),
+                "feature_distortion_norm_mean": feature_distortion_norm_sum / max(feature_dp_sample_count, 1.0),
+                "feature_noise_to_clipped_ratio": feature_noise_norm_sum / max(feature_clipped_norm_sum, 1e-12),
+                "feature_clipping_fraction": feature_clipped_sample_count / max(feature_dp_sample_count, 1.0),
+                "feature_noise_l2_sq_mean": feature_noise_l2_sq_sum / max(feature_dp_sample_count, 1.0),
+                "feature_distortion_l2_sq_mean": feature_distortion_l2_sq_sum / max(feature_dp_sample_count, 1.0),
                 "flow_wall_time_sec": flow_wall_time_sec,
                 "aggregation_wall_time_sec": aggregation_wall_time_sec,
                 "evaluation_wall_time_sec": evaluation_wall_time_sec,
@@ -3016,6 +3104,7 @@ def _run_lenet5_policy(
                 ),
                 "system_latency_objective": profile_evaluation.system_latency if profile_evaluation else "",
                 "dp_perturbation_objective": profile_evaluation.system_dp if profile_evaluation else "",
+                "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                 "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                 "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
                 "system_omega_objective": profile_evaluation.system_learning_error if profile_evaluation else "",  # legacy column name
@@ -3078,7 +3167,11 @@ def _run_lenet5_policy(
             "global_release_contract": current_round["global_release_contract"],
             "privacy_guarantee": current_round["privacy_guarantee"],
             "dp_delta": privacy_parameters["delta"],
-            "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
+            "dp_feature_noise_multiplier": float(
+                candidate.feature_noise_multiplier
+                if candidate.feature_noise_multiplier is not None
+                else privacy_parameters["feature_noise_multiplier"]
+            ),
             "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
             "min_remaining_epsilon": current_round["min_remaining_epsilon"],
             "effective_clients": current_round["num_effective_clients"],
@@ -3665,6 +3758,8 @@ def _run_client_training_tasks(
                 aggregate_cloud_update_dp=True,
             ),
             "dp_clip_norm": train_config.dp_clip_norm,
+            "dp_feature_clip_norm": _feature_clip_norm(train_config),
+            "dp_update_clip_norm": _update_clip_norm(train_config),
             "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
             "dp_update_noise_multiplier": float(
                 candidate.update_noise_multiplier
@@ -4591,8 +4686,17 @@ def _coordinate_accuracy_oracle_round(
                     candidate,
                     aggregate_cloud_update_dp=True,
                 ),
-                dp_clip_norm=train_config.dp_clip_norm,
-                dp_noise_multiplier=float(privacy_parameters["feature_noise_multiplier"]),
+                dp_clip_norm=_feature_clip_norm(train_config),
+                dp_noise_multiplier=float(
+                    candidate.feature_noise_multiplier
+                    if candidate.feature_noise_multiplier is not None
+                    else mode_aware_feature_noise_multiplier(
+                        selection_config,
+                        candidate.feature_dp_events,
+                        resolved=privacy_parameters,
+                    )
+                    or privacy_parameters["feature_noise_multiplier"]
+                ),
                 dp_rng=eval_rng,
                 dp_epsilon=max(selection_config.dp_emb_epsilon, 1e-6),
                 l2=train_config.l2,
@@ -4614,7 +4718,7 @@ def _coordinate_accuracy_oracle_round(
                 state_diff = apply_unified_dp(
                     state_diff,
                     mechanism="dp",
-                    clip_norm=train_config.dp_clip_norm,
+                    clip_norm=_update_clip_norm(train_config),
                     noise_multiplier=float(
                         candidate.update_noise_multiplier
                         if candidate.update_noise_multiplier is not None

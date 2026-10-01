@@ -283,20 +283,27 @@ class ClientPrivacyLedger:
         feature_events: int,
         update_events: int,
         *,
+        feature_noise_multiplier: float | None = None,
         update_noise_multiplier: float | None = None,
     ) -> PrivacyProjection:
         feature_before = self.feature.current_epsilon()
         update_before = self.update.current_epsilon()
+        feature_sigma = (
+            self.feature_noise_multiplier
+            if feature_noise_multiplier is None
+            else float(feature_noise_multiplier)
+        )
         update_sigma = (
             self.update_noise_multiplier
             if update_noise_multiplier is None
             else float(update_noise_multiplier)
         )
+        _validate_dp_parameters(feature_sigma, self.feature.delta)
         _validate_dp_parameters(update_sigma, self.update.delta)
         return PrivacyProjection(
             feature_epsilon_before=feature_before,
             feature_epsilon_after=self.feature.epsilon_after(
-                self.feature_noise_multiplier,
+                feature_sigma,
                 feature_events,
             ),
             update_epsilon_before=update_before,
@@ -339,19 +346,28 @@ class ClientPrivacyLedger:
         feature_events: int,
         update_events: int,
         *,
+        feature_noise_multiplier: float | None = None,
         update_noise_multiplier: float | None = None,
     ) -> PrivacyProjection:
+        feature_sigma = (
+            self.feature_noise_multiplier
+            if feature_noise_multiplier is None
+            else float(feature_noise_multiplier)
+        )
         update_sigma = (
             self.update_noise_multiplier
             if update_noise_multiplier is None
             else float(update_noise_multiplier)
         )
         projection = self.project(
-            feature_events, update_events, update_noise_multiplier=update_sigma
+            feature_events,
+            update_events,
+            feature_noise_multiplier=feature_sigma,
+            update_noise_multiplier=update_sigma,
         )
         if not self.can_apply(projection):
             raise ValueError("DP event would exceed the configured privacy target")
-        self.feature.add_events(self.feature_noise_multiplier, feature_events)
+        self.feature.add_events(feature_sigma, feature_events)
         self.update.add_events(update_sigma, update_events)
         return projection
 

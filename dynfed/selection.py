@@ -85,11 +85,11 @@ class ExposurePrivacyRequirement:
 
 
 def paper_client_privacy_requirement() -> ExposurePrivacyRequirement:
-    """Current paper profile: protect update exposures to Cloud.
+    """Current paper profile: protect split embeddings and Cloud-bound updates.
 
     This is an explicit client requirement profile, not a trust label on Edge or
-    Cloud.  Feature/gradient exposures are currently allowed in plaintext; their
-    protection can be requested by supplying a different per-client profile.
+    Cloud. Split embeddings leaving the client require feature DP; model updates
+    released toward Cloud require the configured update protection.
     """
 
     cloud_update_links = frozenset({"L_C_upd", "E_C_upd"})
@@ -182,6 +182,10 @@ class SelectionConfig:
     omega_feature_lipschitz: float = 1.0
     omega_feature_backward_bias_sq: float = 0.01
     omega_feature_clf_pairwise_spread: float = 0.04
+    # Number of scalar coordinates in one transmitted split representation.
+    # The formal training entry overwrites this with the measured split tensor
+    # size for the selected model/input shape.
+    omega_feature_dimension: float = 1.0
     omega_update_clip_norm: float = 1.0
     omega_update_clip_excess_sq: float = 0.02
     omega_update_dimension: float = 61706.0
@@ -235,6 +239,7 @@ class Candidate:
     cloud_aggregation_payload: float = 0.0
     link_metrics: tuple[dict[str, Any], ...] = ()
     global_release_required: bool = False
+    feature_noise_multiplier: float | None = None
     update_noise_multiplier: float | None = None
 
     @property
@@ -401,6 +406,35 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
     }
 
 
+def mode_aware_feature_noise_multiplier(
+    config: SelectionConfig,
+    feature_events: int,
+    *,
+    resolved: dict[str, Any] | None = None,
+) -> float | None:
+    """Return the feature-DP sigma for one candidate round.
+
+    Under automatic RDP calibration, the shared sigma is calibrated against the
+    maximum number of feature releases in any admissible mode.  Scaling sigma
+    by sqrt(m / m_max) for a candidate with m releases preserves the same
+    per-round Gaussian RDP charge because m / sigma_m^2 is constant.  This
+    therefore removes needless worst-case noise from lighter split modes while
+    remaining safe under arbitrary dynamic mode switching.  Manual accounting
+    keeps the explicitly configured sigma unchanged.
+    """
+    m = max(int(feature_events), 0)
+    if m <= 0:
+        return None
+    privacy = resolved_privacy_parameters(config) if resolved is None else resolved
+    shared_sigma = float(privacy["feature_noise_multiplier"])
+    if config.dp_accounting_mode != "rdp_auto":
+        return shared_sigma
+    m_max = max(int(privacy["max_feature_events_per_round"]), 0)
+    if m_max <= 0:
+        return shared_sigma
+    return shared_sigma * math.sqrt(float(m) / float(m_max))
+
+
 def build_client_privacy_ledger(config: SelectionConfig) -> ClientPrivacyLedger:
     resolved = resolved_privacy_parameters(config)
     return ClientPrivacyLedger(
@@ -429,6 +463,7 @@ class ProfileEvaluation:
     # learning objective J_learn = J_fusion^ub + J_DP.  Keep this separate so
     # diagnostics can still report the DP term on its own.
     dp_perturbation: float | None = None
+    feature_perturbation: float = 0.0
     fusion_bound: float = 0.0
 
     @property
@@ -596,6 +631,7 @@ def run_selection_experiment(
                             == profile_evaluation.profile_signature,
                             "system_latency_objective": evaluation.system_latency,
                             "dp_perturbation_objective": evaluation.system_dp,
+                            "feature_perturbation_objective": evaluation.feature_perturbation,
                             "fusion_bound_objective": evaluation.fusion_bound,
                             "learning_error_objective": evaluation.system_learning_error,
                             "system_omega_objective": evaluation.system_learning_error,  # legacy column name
@@ -643,6 +679,7 @@ def run_selection_experiment(
                 projection = ledger.add(
                     selected.feature_dp_events,
                     selected.update_dp_events,
+                    feature_noise_multiplier=selected.feature_noise_multiplier,
                     update_noise_multiplier=selected.update_noise_multiplier,
                 )
                 remaining_after = ledger.remaining_budget
@@ -662,6 +699,7 @@ def run_selection_experiment(
                     "remaining_epsilon": remaining_after,
                     "feature_dp_events": selected.feature_dp_events,
                     "update_dp_events": selected.update_dp_events,
+                    "feature_noise_multiplier": selected.feature_noise_multiplier if selected.feature_noise_multiplier is not None else "",
                     "update_noise_multiplier": selected.update_noise_multiplier if selected.update_noise_multiplier is not None else "",
                     "feature_epsilon": projection.feature_epsilon_after,
                     "update_epsilon": projection.update_epsilon_after,
@@ -704,6 +742,7 @@ def run_selection_experiment(
                     "sensitivity": client_sensitivity[client_id],
                     "system_latency_objective": profile_evaluation.system_latency if profile_evaluation else "",
                     "dp_perturbation_objective": profile_evaluation.system_dp if profile_evaluation else "",
+                    "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                     "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                     "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
                     "system_omega_objective": profile_evaluation.system_learning_error if profile_evaluation else "",  # legacy column name
@@ -2464,6 +2503,81 @@ def _profile_fusion_distortion(
     return float(relative), float(cosine_distortion)
 
 
+def _global_feature_perturbation_cost(
+    config: SelectionConfig,
+    profile: dict[int, Candidate],
+    client_samples: dict[int, float],
+    admitted_client_ids: tuple[int, ...] | list[int] | set[int],
+) -> float:
+    """Update-space second-moment bound induced by split-feature DP.
+
+    Only split representations that ultimately contribute to the current Cloud
+    aggregate enter the global-learning objective. Feature-DP events on an
+    Edge-only path still consume the feature privacy ledger, but their noisy
+    representations do not perturb this round's Cloud update.
+
+    Let K_z bound the sensitivity of one local SGD update to the transmitted
+    representation. For m independent Gaussian feature releases, the stochastic
+    contribution scales as m, while deterministic clipping bias can align across
+    releases and therefore scales as m^2. Client contributions are then mapped
+    into the Cloud aggregate with the same represented-sample weights used by
+    the fusion term. The result has squared-model-update units, matching J_DP.
+    """
+    admitted = set(admitted_client_ids)
+    cloud_ids = [
+        client_id
+        for client_id, candidate in profile.items()
+        if client_id in admitted and _candidate_reaches_cloud(candidate)
+    ]
+    total_cloud_samples = sum(max(float(client_samples.get(i, 0.0)), 0.0) for i in cloud_ids)
+    if total_cloud_samples <= 0.0:
+        return 0.0
+
+    privacy = resolved_privacy_parameters(config)
+    clip_norm = max(float(config.omega_feature_clip_norm), 0.0)
+    delta_z = 2.0 * clip_norm
+    feature_dim = max(float(config.omega_feature_dimension), 1.0)
+    # Existing feature Jacobian/Lipschitz constants jointly define the
+    # representation-to-gradient sensitivity bound. Multiplication by eta maps
+    # it into one-step parameter-update units.
+    k_update = (
+        max(float(config.omega_learning_rate), 0.0)
+        * max(float(config.omega_feature_jacobian_norm), 0.0)
+        * max(float(config.omega_feature_lipschitz), 0.0)
+    )
+
+    weighted_bias_norm = 0.0
+    weighted_noise_second_moment = 0.0
+    for client_id in cloud_ids:
+        candidate = profile[client_id]
+        m = max(int(candidate.feature_dp_events), 0)
+        if m <= 0:
+            continue
+        sigma_f = max(
+            float(
+                candidate.feature_noise_multiplier
+                if candidate.feature_noise_multiplier is not None
+                else mode_aware_feature_noise_multiplier(config, m, resolved=privacy)
+            ),
+            0.0,
+        )
+        weight = max(float(client_samples.get(client_id, 0.0)), 0.0) / total_cloud_samples
+        clip_excess_sq = max(_candidate_feature_clip_excess_sq(candidate, config), 0.0)
+        # Worst-case coherent accumulation of deterministic clipping bias.
+        client_bias_norm = k_update * float(m) * math.sqrt(clip_excess_sq)
+        # Independent zero-mean Gaussian releases accumulate in second moment.
+        client_noise_second_moment = (
+            k_update * k_update
+            * float(m)
+            * feature_dim
+            * (sigma_f * delta_z) ** 2
+        )
+        weighted_bias_norm += weight * client_bias_norm
+        weighted_noise_second_moment += weight * weight * client_noise_second_moment
+
+    return float(weighted_bias_norm ** 2 + weighted_noise_second_moment)
+
+
 def _evaluate_profile(
     config: SelectionConfig,
     profile: dict[int, Candidate],
@@ -2497,6 +2611,12 @@ def _evaluate_profile(
         client_edges,
         admitted_client_ids=admitted_client_ids,
     )
+    system_feature = _global_feature_perturbation_cost(
+        config,
+        profile,
+        client_samples,
+        admitted_client_ids,
+    )
     cloud_fusion_ratio = _cloud_update_coverage_ratio(
         profile,
         client_samples,
@@ -2508,7 +2628,7 @@ def _evaluate_profile(
     # zero because there is no Cloud release, hence J_learn=4 C_u^2.
     clip_norm = max(float(config.omega_update_clip_norm), 0.0)
     fusion_bound = 4.0 * clip_norm * clip_norm * (1.0 - cloud_fusion_ratio) ** 2
-    system_learning_error = fusion_bound + system_dp
+    system_learning_error = fusion_bound + system_feature + system_dp
     fusion_distortion, fusion_cosine_distortion = _profile_fusion_distortion(
         profile,
         client_samples,
@@ -2529,6 +2649,7 @@ def _evaluate_profile(
         # selection.  Observed fusion distortion remains diagnostic-only.
         fusion_objective_enabled=False,
         dp_perturbation=system_dp,
+        feature_perturbation=system_feature,
         fusion_bound=fusion_bound,
     )
 
@@ -4338,12 +4459,17 @@ def _estimate_candidate(
         and obj == "upd"
         and mechanism_uses_dp(actual_link_mechanisms[link_id])
     )
+    feature_noise_multiplier = mode_aware_feature_noise_multiplier(
+        config,
+        feature_dp_events,
+    )
     feature_epsilon_after = 0.0
     update_epsilon_after = 0.0
     if privacy_ledger is not None:
         projection = privacy_ledger.project(
             feature_dp_events,
             update_dp_events,
+            feature_noise_multiplier=feature_noise_multiplier,
             update_noise_multiplier=update_noise_multiplier,
         )
         # Legacy scalar used only for diagnostics/old local policies. The
@@ -4454,6 +4580,11 @@ def _estimate_candidate(
         cloud_aggregation_payload=cloud_aggregation_payload,
         link_metrics=tuple(link_metrics),
         global_release_required=bool(config.mainline_fusion),
+        feature_noise_multiplier=(
+            float(feature_noise_multiplier)
+            if feature_dp_events > 0 and feature_noise_multiplier is not None
+            else None
+        ),
         update_noise_multiplier=(
             float(update_noise_multiplier) if update_dp_events > 0 and update_noise_multiplier is not None else None
         ),
