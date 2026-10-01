@@ -19,12 +19,19 @@ from dynfed.fmnist_lenet5_dynamic import (  # noqa: E402
     _split_client_indices,
     load_image_dataset_arrays,
 )
-from dynfed.selection import SelectionConfig, resolved_privacy_parameters  # noqa: E402
+from dynfed.selection import (  # noqa: E402
+    SelectionConfig,
+    _mode_link_transmissions,
+    _record_dp_event_count,
+    mode_aware_feature_noise_multiplier,
+    resolved_privacy_parameters,
+)
 from dynfed.split_learning import (  # noqa: E402
     build_split_pair,
     normalize_model_name,
     split_local_train_lenet5,
 )
+from dynfed.training import MODE_SPECS  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -173,30 +180,50 @@ def main() -> None:
         feature_probe = end(torch.zeros((1, *input_shape), dtype=torch.float32, device=device))
     feature_dim = int(feature_probe[0].numel())
 
+    privacy_cfg = SelectionConfig(
+        rounds=args.rounds,
+        num_clients=args.clients,
+        num_edges=args.edges,
+        seed=args.seed,
+        initial_epsilon=args.initial_epsilon,
+        dp_feature_epsilon_budget=args.feature_epsilon_budget,
+        dp_delta=args.dp_delta,
+        privacy_local_epochs=args.local_epochs,
+        omega_learning_rate=args.lr,
+    )
+    privacy = resolved_privacy_parameters(privacy_cfg)
+
+    spec = MODE_SPECS[args.mode]
+    mode_events = _mode_link_transmissions(
+        args.mode,
+        privacy_cfg.L_block_cycles,
+        spec.E_edge_loops,
+    )
+    feature_events_per_round = sum(
+        _record_dp_event_count(privacy_cfg, args.mode, communication_count)
+        for _link_id, obj, communication_count, privacy_eligible in mode_events
+        if privacy_eligible and obj == "emb"
+    )
+    mode_horizon_events = int(args.rounds) * int(feature_events_per_round)
+
     if args.feature_noise_multiplier is None:
-        privacy_cfg = SelectionConfig(
-            rounds=args.rounds,
-            num_clients=args.clients,
-            num_edges=args.edges,
-            seed=args.seed,
-            initial_epsilon=args.initial_epsilon,
-            dp_feature_epsilon_budget=args.feature_epsilon_budget,
-            dp_delta=args.dp_delta,
-            privacy_local_epochs=args.local_epochs,
-            omega_learning_rate=args.lr,
+        mode_sigma = mode_aware_feature_noise_multiplier(
+            privacy_cfg,
+            feature_events_per_round,
+            resolved=privacy,
         )
-        privacy = resolved_privacy_parameters(privacy_cfg)
-        sigma_f = float(privacy["feature_noise_multiplier"])
-        horizon_events = int(privacy["feature_horizon_events"])
+        if mode_sigma is None:
+            raise RuntimeError(
+                f"mode {args.mode} has no feature-DP release events; "
+                "shadow feature-DP calibration is not applicable"
+            )
+        sigma_f = float(mode_sigma)
     else:
         sigma_f = float(args.feature_noise_multiplier)
-        horizon_events = -1
 
     delta_z = 2.0 * float(args.feature_clip_norm)
     k_update = float(args.lr) * float(args.feature_jacobian_norm) * float(args.feature_lipschitz)
-    # For I-split modes, one embedding release is counted per private local epoch
-    # in the formal event ledger.
-    m_events = int(args.local_epochs)
+    m_events = int(feature_events_per_round)
     predicted_noise_only_local = (
         k_update * k_update * m_events * feature_dim * (sigma_f * delta_z) ** 2
     )
@@ -322,7 +349,10 @@ def main() -> None:
         "mode": args.mode,
         "feature_dimension": feature_dim,
         "feature_noise_multiplier": sigma_f,
-        "feature_horizon_events": horizon_events,
+        "feature_events_per_round": feature_events_per_round,
+        "feature_horizon_events": mode_horizon_events,
+        "shared_feature_noise_multiplier": float(privacy["feature_noise_multiplier"]),
+        "shared_feature_horizon_events": int(privacy["feature_horizon_events"]),
         **{
             f"{key}_mean": float(np.mean([float(row[key]) for row in rows]))
             for key in numeric_keys
