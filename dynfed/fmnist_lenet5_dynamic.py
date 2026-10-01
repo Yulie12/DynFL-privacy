@@ -2407,6 +2407,7 @@ def _run_lenet5_policy(
         cloud_signal_updates.clear()
         edge_only_dp_release_records: list[dict[str, Any]] = []
         edge_only_dp_noise_norms: list[float] = []
+        edge_only_secagg_release_records: list[dict[str, Any]] = []
         local_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
         aggregate_dp_noise_accumulator: dict[str, dict[str, torch.Tensor]] = {}
         update_dp_component_noise_norms: list[float] = []
@@ -2498,6 +2499,52 @@ def _run_lenet5_policy(
 
         edge_only_iter = () if effective_selection.mainline_fusion else edge_only_groups.values()
         for updates in edge_only_iter:
+            if _liie_streaming_secagg_eligible(updates, execute_real_he=execute_real_he):
+                representative = updates[0][3]
+                sigma = max(
+                    float(
+                        candidate.update_noise_multiplier
+                        if candidate is not None and candidate.update_noise_multiplier is not None
+                        else privacy_parameters["update_noise_multiplier"]
+                    )
+                    for _client_id, _state_diff, _sample_count, candidate in updates
+                )
+                relative_updates, reference_state = _edge_relative_updates_for_secure_aggregate(
+                    updates,
+                    client_model_states=client_model_states,
+                    global_end=global_end,
+                    global_edge=global_edge,
+                )
+                noisy_aggregate, secagg_audit = streaming_secure_aggregate_exact_target(
+                    relative_updates,
+                    [item[2] for item in updates],
+                    clip_norm=_update_clip_norm(train_config),
+                    noise_multiplier=sigma,
+                    round_seed=_dp_noise_seed(
+                        selection.seed,
+                        round_idx,
+                        ("liie_streaming_secagg", int(client_by_id[updates[0][0]].edge_id)),
+                        40_000,
+                    ),
+                )
+                shared_returned_state = _state_with_applied_difference(
+                    reference_state, noisy_aggregate
+                )
+                for client_id, _state_diff, _sample_count, _candidate in updates:
+                    client_model_states[client_id] = shared_returned_state
+                edge_only_secagg_release_records.append({
+                    "client_ids": [int(item[0]) for item in updates],
+                    "edge_id": int(client_by_id[updates[0][0]].edge_id),
+                    "candidate": representative,
+                    "mechanism": _candidate_edge_update_mechanism(representative),
+                    "sigma": sigma,
+                    "sensitivity": float(secagg_audit.aggregate_sensitivity),
+                    "noise_std": float(secagg_audit.target_noise_std),
+                    "cohort_size": int(secagg_audit.cohort_size),
+                    "max_client_weight": float(secagg_audit.max_client_weight),
+                })
+                continue
+
             prepared_updates: list[tuple[int, Any, int, Candidate | None]] = []
             for client_id, state_diff, sample_count, candidate in updates:
                 mechanism = _candidate_edge_update_mechanism(candidate)
@@ -2555,19 +2602,25 @@ def _run_lenet5_policy(
         update_dp_release_count = (
             len(local_dp_pending_components)
             + len(edge_only_dp_release_records)
+            + len(edge_only_secagg_release_records)
             + int(aggregate_dp_noise_share_count > 0)
         )
         update_dp_release = update_dp_release_count > 0
         update_dp_max_client_fraction = max(
             local_dp_packet_client_fractions
             + secure_aggregate_dp_client_fractions
-            + ([1.0] if edge_only_dp_release_records else []),
+            + ([1.0] if edge_only_dp_release_records else [])
+            + [
+                float(record["max_client_weight"])
+                for record in edge_only_secagg_release_records
+            ],
             default=0.0,
         )
         update_dp_sensitivity = max(
             local_dp_packet_sensitivities
             + [aggregate_dp_sensitivity]
-            + ([2.0 * _update_clip_norm(train_config)] if edge_only_dp_release_records else []),
+            + ([2.0 * _update_clip_norm(train_config)] if edge_only_dp_release_records else [])
+            + [float(record["sensitivity"]) for record in edge_only_secagg_release_records],
             default=0.0,
         )
         update_dp_noise_std = float(
@@ -2577,6 +2630,7 @@ def _run_lenet5_policy(
                     for index, noise_std, _seed in local_dp_pending_components
                 )
                 + aggregate_dp_noise_std ** 2
+                + sum(float(record["noise_std"]) ** 2 for record in edge_only_secagg_release_records)
             )
         )
         local_dp_noise_norm = _state_difference_l2_norm(
@@ -3014,7 +3068,10 @@ def _run_lenet5_policy(
                 "local_packet_dp_release_count": (
                     len(local_dp_pending_components) + len(edge_only_dp_release_records)
                 ),
-                "edge_only_dp_release_count": len(edge_only_dp_release_records),
+                "edge_only_dp_release_count": (
+                    len(edge_only_dp_release_records) + len(edge_only_secagg_release_records)
+                ),
+                "edge_only_secagg_release_count": len(edge_only_secagg_release_records),
                 "edge_only_dp_noise_norm": (
                     float(np.sqrt(np.sum(np.square(edge_only_dp_noise_norms))))
                     if edge_only_dp_noise_norms else 0.0
@@ -4503,6 +4560,78 @@ def _apply_aggregate_state_difference(
                 continue
             state[name].data.add_(values[name].to(device=state[name].device, dtype=state[name].dtype))
     return global_end, global_edge
+
+
+def _liie_streaming_secagg_eligible(
+    updates: list[tuple[int, Any, int, Candidate | None]],
+    *,
+    execute_real_he: bool,
+) -> bool:
+    """Whether one edge-local LIIE cohort can release only a SecAgg aggregate."""
+    if execute_real_he or len(updates) < 2:
+        return False
+    for _client_id, _state_diff, _sample_count, candidate in updates:
+        if candidate is None or candidate.mode != "LIIE":
+            return False
+        mechanism = _candidate_edge_update_mechanism(candidate)
+        if not mechanism_uses_dp(mechanism) or mechanism_uses_he(mechanism):
+            return False
+    return True
+
+
+def _edge_relative_updates_for_secure_aggregate(
+    updates: list[tuple[int, Any, int, Candidate | None]],
+    *,
+    client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]],
+    global_end: torch.nn.Module,
+    global_edge: torch.nn.Module,
+) -> tuple[list[dict[str, dict[str, torch.Tensor]]], dict[str, dict[str, torch.Tensor]]]:
+    """Express edge-local client models as deltas from one shared edge reference."""
+    if not updates:
+        raise ValueError("Cannot build secure edge updates for an empty cohort")
+    reference = client_model_states.get(updates[0][0])
+    if reference is None:
+        reference = {
+            "end": _state_dict_to_device(global_end.state_dict(), torch.device("cpu")),
+            "edge": _state_dict_to_device(global_edge.state_dict(), torch.device("cpu")),
+        }
+    relative_updates: list[dict[str, dict[str, torch.Tensor]]] = []
+    for client_id, state_diff, _sample_count, _candidate in updates:
+        base = client_model_states.get(client_id, reference)
+        relative: dict[str, dict[str, torch.Tensor]] = {"end": {}, "edge": {}}
+        for part_name, model in (("end", global_end), ("edge", global_edge)):
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                reference_value = reference[part_name][name].detach().to("cpu")
+                base_value = base[part_name][name].detach().to("cpu")
+                local_delta = state_diff.get(part_name, {}).get(name)
+                if local_delta is None:
+                    local_delta = torch.zeros_like(base_value)
+                relative[part_name][name] = (
+                    base_value + local_delta.detach().to("cpu") - reference_value
+                )
+        relative_updates.append(relative)
+    return relative_updates, reference
+
+
+def _state_with_applied_difference(
+    reference: dict[str, dict[str, torch.Tensor]],
+    difference: dict[str, dict[str, torch.Tensor]],
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Return a detached CPU state equal to ``reference + difference``."""
+    result = {
+        part_name: {name: value.detach().to("cpu").clone() for name, value in values.items()}
+        for part_name, values in reference.items()
+    }
+    for part_name, values in difference.items():
+        target = result.setdefault(part_name, {})
+        for name, value in values.items():
+            if name not in target:
+                target[name] = value.detach().to("cpu").clone()
+            else:
+                target[name].add_(value.detach().to("cpu", dtype=target[name].dtype))
+    return result
 
 
 def _liic_streaming_secagg_eligible(
