@@ -9,7 +9,9 @@ import numpy as np
 import torch
 
 
-def aggregate_fused_release(updates, weights, client_edges, end, edge, metrics):
+def aggregate_fused_release(
+    updates, weights, client_edges, end, edge, metrics, *, encrypted_mask=None,
+):
     from experiments.trusted_edge_custodian import TrustedEdgeCustodian
 
     layout = [(part, name, p) for part, model in (("end", end), ("edge", edge))
@@ -20,8 +22,16 @@ def aggregate_fused_release(updates, weights, client_edges, end, edge, metrics):
     if not np.isfinite(weights).all() or np.any(weights <= 0):
         raise ValueError("Positive finite public release weights required")
     weights = weights / weights.sum()
-    packets, masses = {}, {}
-    for (diff, _count, _candidate, ids), weight in zip(updates, weights):
+    mask = [True] * len(updates) if encrypted_mask is None else list(encrypted_mask)
+    if len(mask) != len(updates):
+        raise ValueError("encrypted_mask length must match updates")
+    if not any(mask):
+        raise ValueError("At least one HE-protected contribution is required")
+
+    encrypted_packets, encrypted_masses = {}, {}
+    plaintext_sum = None
+    expected = None
+    for (diff, _count, _candidate, ids), weight, encrypted in zip(updates, weights, mask):
         domains = {client_edges[cid] for cid in ids}
         if len(domains) != 1:
             raise ValueError("Each trusted packet must belong to one edge domain")
@@ -30,15 +40,37 @@ def aggregate_fused_release(updates, weights, client_edges, end, edge, metrics):
             diff[part][name].detach().cpu().numpy().reshape(-1)
             for part, name, _param in layout
         ]).astype(np.float64)
-        packets[domain] = packets.get(domain, np.zeros_like(vector)) + weight * vector
-        masses[domain] = masses.get(domain, 0.0) + float(weight)
-    expected = sum(packets.values())
-    groups = [{"edge": domain, "cloud_weight": masses[domain]} for domain in sorted(masses)]
-    packets = {domain: value / masses[domain] for domain, value in packets.items()}
-    with TrustedEdgeCustodian(groups, custodian_edge=min(masses), release_limit=1) as custodian:
-        decoded, audit = custodian.aggregate(packets, 0)
+        weighted = float(weight) * vector
+        expected = weighted.copy() if expected is None else expected + weighted
+        if encrypted:
+            encrypted_packets[domain] = (
+                encrypted_packets.get(domain, np.zeros_like(vector)) + weighted
+            )
+            encrypted_masses[domain] = (
+                encrypted_masses.get(domain, 0.0) + float(weight)
+            )
+        else:
+            plaintext_sum = weighted.copy() if plaintext_sum is None else plaintext_sum + weighted
+
+    encrypted_mass = float(sum(encrypted_masses.values()))
+    groups = [
+        {"edge": domain, "cloud_weight": encrypted_masses[domain] / encrypted_mass}
+        for domain in sorted(encrypted_masses)
+    ]
+    packets = {
+        domain: value / encrypted_masses[domain]
+        for domain, value in encrypted_packets.items()
+    }
+    with TrustedEdgeCustodian(groups, custodian_edge=min(encrypted_masses), release_limit=1) as custodian:
+        decoded_he, audit = custodian.aggregate(packets, 0)
+    decoded = encrypted_mass * decoded_he
+    if plaintext_sum is not None:
+        decoded = decoded + plaintext_sum
     audit["max_abs_error"] = float(np.max(np.abs(decoded - expected)))
     audit["custodian_session_scope"] = "one_global_release_fresh_key"
+    audit["encrypted_release_weight"] = encrypted_mass
+    audit["plaintext_release_weight"] = float(1.0 - encrypted_mass)
+    audit["mixed_release"] = bool(not all(mask))
     for field in ("encrypted_updates", "encrypted_parameter_values", "ciphertext_count",
                   "ciphertext_bytes", "key_setup_time_sec", "encryption_time_sec",
                   "decryption_time_sec"):

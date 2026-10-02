@@ -2808,23 +2808,12 @@ def _run_lenet5_policy(
                     for item, encrypted in zip(cloud_updates, global_he_mask)
                     if encrypted
                 )
-                if effective_selection.mainline_fusion and he_status.backend == "seal":
+                if he_status.backend == "seal":
                     from .fused_he_release import aggregate_fused_release
                     fused_he_audit = aggregate_fused_release(
                         cloud_updates, global_aggregation_weights, client_edges,
                         global_end, global_edge, round_he_metrics,
-                    )
-                elif he_status.backend == "seal":
-                    global_end, global_edge = fedavg_split_seal(
-                        global_state_diffs,
-                        global_sample_counts,
-                        global_end,
-                        global_edge,
-                        device,
                         encrypted_mask=global_he_mask,
-                        he_aggregation_size=train_config.he_aggregation_size,
-                        he_workers=train_config.he_workers,
-                        he_metrics=round_he_metrics,
                     )
                 else:
                     global_end, global_edge = fedavg_split_tenseal(
