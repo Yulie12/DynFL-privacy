@@ -2212,9 +2212,6 @@ def _run_lenet5_policy(
                         candidate,
                         effective_selection.trusted_edge_split_execution,
                     )
-                    if train_config.dp_release_calibration == "tex_packet":
-                        local_packet_dp = local_packet_dp or secure_aggregate_dp
-                        secure_aggregate_dp = False
                     if local_packet_dp or secure_aggregate_dp:
                         relative_update, _original_norm, clip_scale = clip_state_difference(
                             relative_update,
@@ -2272,10 +2269,6 @@ def _run_lenet5_policy(
                     representative,
                     effective_selection.trusted_edge_split_execution,
                 )
-                tex_packet = train_config.dp_release_calibration == "tex_packet"
-                if tex_packet:
-                    local_packet_dp = local_packet_dp or secure_aggregate_dp
-                    secure_aggregate_dp = False
                 if local_packet_dp or secure_aggregate_dp:
                     clipped_updates = []
                     clipped_counts = []
