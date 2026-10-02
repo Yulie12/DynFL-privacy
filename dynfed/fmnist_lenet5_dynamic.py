@@ -1019,6 +1019,7 @@ def _run_lenet5_policy(
         omega_update_clip_norm=_update_clip_norm(train_config),
     )
     _validate_mainline_fusion(effective_selection, train_config)
+    update_dp_execution_enabled = train_config.dp_update_mode != "off"
     diagnostic_update_ablation = os.environ.get(
         "DYNFL_DIAGNOSTIC_UPDATE_ABLATION", ""
     ).strip().lower()
@@ -1026,33 +1027,42 @@ def _run_lenet5_policy(
         raise ValueError(
             "DYNFL_DIAGNOSTIC_UPDATE_ABLATION must be empty or 'clip_only'"
         )
-    mainline_dp_enabled = (
-        effective_selection.mainline_fusion and train_config.dp_update_mode != "off"
-    )
     diagnostic_clip_only = (
-        effective_selection.mainline_fusion
-        and not mainline_dp_enabled
+        not update_dp_execution_enabled
         and diagnostic_update_ablation == "clip_only"
+    )
+    update_dp_clipping_enabled = update_dp_execution_enabled or diagnostic_clip_only
+    if diagnostic_clip_only:
+        print(
+            f"  [{policy}] DIAGNOSTIC: update clip-only ablation is enabled; "
+            "runtime update clipping remains active, Gaussian update noise is bypassed, "
+            "and selector/privacy accounting remain unchanged. Feature-DP and HE execution remain active.",
+            flush=True,
+        )
+    elif not update_dp_execution_enabled:
+        print(
+            f"  [{policy}] DIAGNOSTIC: update-DP execution is disabled; "
+            "selector/privacy accounting remain unchanged, while runtime update clipping "
+            "and Gaussian update noise are bypassed. Feature-DP and HE execution remain active.",
+            flush=True,
+        )
+    mainline_dp_enabled = (
+        effective_selection.mainline_fusion and update_dp_execution_enabled
     )
     diagnostic_no_dp = (
         effective_selection.mainline_fusion
         and not mainline_dp_enabled
         and not diagnostic_clip_only
     )
-    mainline_clip_enabled = mainline_dp_enabled or diagnostic_clip_only
+    mainline_clip_enabled = mainline_dp_enabled or (
+        effective_selection.mainline_fusion and diagnostic_clip_only
+    )
     privacy_reporting_scope = _privacy_reporting_scope(
         effective_selection.mainline_fusion,
         mainline_dp_enabled=mainline_dp_enabled,
         mainline_clip_enabled=mainline_clip_enabled,
     )
-    if diagnostic_clip_only:
-        print(
-            f"  [{policy}] DIAGNOSTIC: mainline clip-only ablation is enabled; "
-            "client update clipping remains active, Gaussian update noise and global DP "
-            "accounting are bypassed; real HE remains enabled.",
-            flush=True,
-        )
-    elif diagnostic_no_dp:
+    if diagnostic_no_dp:
         print(
             f"  [{policy}] DIAGNOSTIC: mainline update DP is disabled; "
             "client clipping, Gaussian update noise, and global DP accounting are bypassed; "
@@ -2204,15 +2214,23 @@ def _run_lenet5_policy(
                         global_edge=global_edge,
                         device=torch.device("cpu"),
                     )
-                    local_packet_dp = _candidate_uses_local_packet_update_dp(
+                    candidate_local_packet_dp = _candidate_uses_local_packet_update_dp(
                         candidate,
                         effective_selection.trusted_edge_split_execution,
                     )
-                    secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
+                    candidate_secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
                         candidate,
                         effective_selection.trusted_edge_split_execution,
                     )
-                    if local_packet_dp or secure_aggregate_dp:
+                    local_packet_dp = (
+                        update_dp_execution_enabled and candidate_local_packet_dp
+                    )
+                    secure_aggregate_dp = (
+                        update_dp_execution_enabled and candidate_secure_aggregate_dp
+                    )
+                    if update_dp_clipping_enabled and (
+                        candidate_local_packet_dp or candidate_secure_aggregate_dp
+                    ):
                         relative_update, _original_norm, clip_scale = clip_state_difference(
                             relative_update,
                             _update_clip_norm(train_config),
@@ -2261,15 +2279,23 @@ def _run_lenet5_policy(
 
             for edge_id, updates in edge_cloud_groups.items():
                 representative = updates[0][3]
-                local_packet_dp = _candidate_uses_local_packet_update_dp(
+                candidate_local_packet_dp = _candidate_uses_local_packet_update_dp(
                     representative,
                     effective_selection.trusted_edge_split_execution,
                 )
-                secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
+                candidate_secure_aggregate_dp = _candidate_uses_secure_aggregate_update_dp(
                     representative,
                     effective_selection.trusted_edge_split_execution,
                 )
-                if local_packet_dp or secure_aggregate_dp:
+                local_packet_dp = (
+                    update_dp_execution_enabled and candidate_local_packet_dp
+                )
+                secure_aggregate_dp = (
+                    update_dp_execution_enabled and candidate_secure_aggregate_dp
+                )
+                if update_dp_clipping_enabled and (
+                    candidate_local_packet_dp or candidate_secure_aggregate_dp
+                ):
                     clipped_updates = []
                     clipped_counts = []
                     for client_id, state_diff, sample_count, _candidate in updates:
@@ -2581,7 +2607,10 @@ def _run_lenet5_policy(
 
         edge_only_iter = () if effective_selection.mainline_fusion else edge_only_groups.values()
         for updates in edge_only_iter:
-            if _liie_streaming_secagg_eligible(updates, execute_real_he=execute_real_he):
+            if (
+                update_dp_execution_enabled
+                and _liie_streaming_secagg_eligible(updates, execute_real_he=execute_real_he)
+            ):
                 representative = updates[0][3]
                 sigma = max(
                     float(
@@ -2630,17 +2659,30 @@ def _run_lenet5_policy(
             prepared_updates: list[tuple[int, Any, int, Candidate | None]] = []
             for client_id, state_diff, sample_count, candidate in updates:
                 mechanism = _candidate_edge_update_mechanism(candidate)
-                protected_diff, audit = (
-                    _protect_edge_only_client_update_dp(
+                if update_dp_execution_enabled and candidate is not None:
+                    protected_diff, audit = _protect_edge_only_client_update_dp(
                         state_diff,
                         candidate=candidate,
                         clip_norm=_update_clip_norm(train_config),
                         fallback_noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
                         noise_seed=_dp_noise_seed(selection.seed, round_idx, client_id, 20_000),
                     )
-                    if candidate is not None
-                    else (state_diff, None)
-                )
+                elif (
+                    diagnostic_clip_only
+                    and candidate is not None
+                    and mechanism_uses_dp(mechanism)
+                ):
+                    protected_diff, original_norm, clip_scale = clip_state_difference(
+                        state_diff,
+                        _update_clip_norm(train_config),
+                        torch.device("cpu"),
+                    )
+                    update_dp_clip_scales.append(float(clip_scale))
+                    update_dp_preclip_norms.append(float(original_norm))
+                    update_dp_clipped_clients += int(clip_scale < 1.0 - 1e-12)
+                    audit = None
+                else:
+                    protected_diff, audit = state_diff, None
                 if audit is not None:
                     update_dp_clip_scales.append(audit["clip_scale"])
                     update_dp_preclip_norms.append(audit["original_norm"])
