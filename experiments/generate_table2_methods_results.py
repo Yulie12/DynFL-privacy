@@ -18,8 +18,8 @@ METHOD_DEFINITIONS = {
     "fixed_mode_fixed_privacy": {
         "mode_policy": "Fixed",
         "privacy_policy": "Fixed",
-        "mode_definition": "LIIEIIIC",
-        "privacy_definition": "Initial legal privacy profile is locked; infeasibility uses fallback.",
+        "mode_definition": "Round-0 per-client assignment frozen thereafter",
+        "privacy_definition": "Round-0 legal privacy profile is locked; later infeasibility skips the affected client.",
     },
     "dynamic_mode_fixed_privacy": {
         "mode_policy": "Dynamic",
@@ -30,8 +30,8 @@ METHOD_DEFINITIONS = {
     "fixed_mode_dynamic_privacy": {
         "mode_policy": "Fixed",
         "privacy_policy": "Dynamic",
-        "mode_definition": "LIIEIIIC",
-        "privacy_definition": "Privacy configuration/noise may adapt within the same hard constraints.",
+        "mode_definition": "Round-0 per-client assignment frozen thereafter",
+        "privacy_definition": "Privacy configuration/noise may adapt within each client's frozen mode and per-client feasibility constraints.",
     },
     "full_dynfl": {
         "mode_policy": "Dynamic",

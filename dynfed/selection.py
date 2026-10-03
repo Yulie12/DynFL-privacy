@@ -576,6 +576,8 @@ def run_selection_experiment(
         }
         policy_rows: list[dict[str, Any]] = []
         previous_choices: dict[int, Candidate] = {}
+        fixed_mode_assignments: dict[int, str] = {}
+        fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]] = {}
 
         evaluated_rounds = (
             config.rounds
@@ -598,6 +600,16 @@ def run_selection_experiment(
                     rng=rng,
                     policy=policy,
                     privacy_ledger=privacy_ledgers[client.client_id],
+                    fixed_privacy_profile=(
+                        fixed_privacy_profiles.get(client.client_id)
+                        if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}
+                        else None
+                    ),
+                    frozen_mode=(
+                        fixed_mode_assignments.get(client.client_id)
+                        if policy in {"fixed_mode_fixed_privacy", "fixed_mode_dynamic_privacy"}
+                        else None
+                    ),
                 )
                 selected = choose_candidate(
                     candidates,
@@ -610,12 +622,24 @@ def run_selection_experiment(
                 )
                 round_selected.append((client.client_id, selected, candidates, rem))
 
-            if policy == "ours":
+            if policy in {
+                "ours",
+                "fixed_mode_fixed_privacy",
+                "dynamic_mode_fixed_privacy",
+                "fixed_mode_dynamic_privacy",
+                "full_dynfl",
+            }:
                 client_samples = {client.client_id: float(client.samples) for client in clients}
                 client_edges = {client.client_id: int(client.edge_id) for client in clients}
                 selection_diagnostics: dict[str, Any] = {}
+                profile_selection_config = (
+                    replace(config, require_edge_cloud_coverage=False)
+                    if policy in {"fixed_mode_fixed_privacy", "fixed_mode_dynamic_privacy"}
+                    and bool(fixed_mode_assignments)
+                    else config
+                )
                 round_selected, profile_evaluation = choose_global_pareto_profile(
-                    config=config,
+                    config=profile_selection_config,
                     selected=round_selected,
                     client_samples=client_samples,
                     client_edges=client_edges,
@@ -671,6 +695,22 @@ def run_selection_experiment(
                     )
             else:
                 profile_evaluation = None
+
+            if (
+                policy in {"fixed_mode_fixed_privacy", "fixed_mode_dynamic_privacy"}
+                and not fixed_mode_assignments
+            ):
+                fixed_mode_assignments = {
+                    client_id: selected.mode
+                    for client_id, selected, _candidates, _rem in round_selected
+                }
+            if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}:
+                for client_id, selected, _candidates, _rem in round_selected:
+                    if client_id not in fixed_privacy_profiles and selected.mode != "SKIP":
+                        fixed_privacy_profiles[client_id] = (
+                            dict(selected.mechanisms),
+                            selected.update_noise_multiplier,
+                        )
 
             previous_choices = {
                 client_id: selected
@@ -799,6 +839,7 @@ def enumerate_candidates(
     privacy_requirement: ExposurePrivacyRequirement | None = None,
     fast_response_deadline: float | None = None,
     fixed_privacy_profile: tuple[dict[str, str], float | None] | None = None,
+    frozen_mode: str | None = None,
 ) -> list[Candidate]:
     validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
@@ -889,7 +930,7 @@ def enumerate_candidates(
                         fast_response_deadline=fast_response_deadline,
                     )
                 )
-    if config.fl_first_split_on_demand and _policy_uses_dynamic_mode_selection(policy):
+    if config.fl_first_split_on_demand and _policy_uses_fl_first_mode_admissibility(policy):
         full_local_modes = {"LIIE", "LIIC", "LIIEIIIC"}
         full_local_device_feasible = any(
             candidate.mode in full_local_modes and candidate.feasible_device
@@ -903,7 +944,13 @@ def enumerate_candidates(
     # in the latency objective and are not rejected by a universal time limit.
     if fast_response_deadline is not None:
         candidates = [candidate for candidate in candidates if candidate.feasible_time]
-    return _apply_policy_candidate_filters(config, policy, candidates)
+    candidates = _apply_policy_candidate_filters(config, policy, candidates)
+    if frozen_mode is not None:
+        candidates = [
+            candidate for candidate in candidates
+            if candidate.mode == frozen_mode
+        ]
+    return candidates
 
 
 def _apply_policy_candidate_filters(
@@ -924,8 +971,6 @@ def _apply_policy_candidate_filters(
         "fixed_hfl": "LIIEIIIC",
         "fixed_liieiiic": "LIIEIIIC",
         "ours_fixed_liieiiic": "LIIEIIIC",
-        "fixed_mode_fixed_privacy": "LIIEIIIC",
-        "fixed_mode_dynamic_privacy": "LIIEIIIC",
     }.get(policy)
     if fixed_mode is not None:
         candidates = [
@@ -1032,8 +1077,6 @@ def choose_candidate(
         "fixed_hfl": "LIIEIIIC",
         "fixed_liieiiic": "LIIEIIIC",
         "ours_fixed_liieiiic": "LIIEIIIC",
-        "fixed_mode_fixed_privacy": "LIIEIIIC",
-        "fixed_mode_dynamic_privacy": "LIIEIIIC",
     }.get(policy)
     if fixed_mode is not None:
         fixed_pool = [c for c in pool if c.mode == fixed_mode]
@@ -4855,9 +4898,22 @@ _DYNAMIC_MODE_POLICIES = {
     "random",
 }
 
+_FROZEN_MODE_POLICIES = {
+    "fixed_mode_fixed_privacy",
+    "fixed_mode_dynamic_privacy",
+}
+
 
 def _policy_uses_dynamic_mode_selection(policy: str) -> bool:
     return policy in _DYNAMIC_MODE_POLICIES
+
+
+def _policy_uses_fl_first_mode_admissibility(policy: str) -> bool:
+    # The two fixed-mode factorial baselines use the same round-0 admissible
+    # mode set as DynFL, then freeze that per-client assignment. Therefore the
+    # FL-first split-on-demand gate also applies while initializing and
+    # revalidating their frozen per-client modes.
+    return policy in _DYNAMIC_MODE_POLICIES or policy in _FROZEN_MODE_POLICIES
 
 
 def _split_interaction_count(config: SelectionConfig, samples: int) -> int:

@@ -85,6 +85,15 @@ from .version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
 
 ROOT = Path(__file__).resolve().parents[1]
 
+_FROZEN_MODE_POLICIES = {
+    "fixed_mode_fixed_privacy",
+    "fixed_mode_dynamic_privacy",
+}
+_FIXED_PRIVACY_POLICIES = {
+    "fixed_mode_fixed_privacy",
+    "dynamic_mode_fixed_privacy",
+}
+
 DRIFTRACE_DATA_MEAN = {
     "fmnist": [0.286],
     "cifar10": [0.4914, 0.4822, 0.4465],
@@ -1121,6 +1130,7 @@ def _run_lenet5_policy(
         )
     selection_period = max(1, int(train_config.selection_period))
     previous_choices: dict[int, Candidate] = {}
+    fixed_mode_assignments: dict[int, str] = {}
     fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]] = {}
     start_round = 0
     real_he_rounds = 0
@@ -1222,6 +1232,10 @@ def _run_lenet5_policy(
         best_accuracy = float(checkpoint.get("best_accuracy", 0.0))
         logical_time = float(checkpoint.get("logical_time", 0.0))
         previous_choices = dict(checkpoint.get("previous_choices", {}))
+        fixed_mode_assignments = {
+            int(client_id): str(mode)
+            for client_id, mode in checkpoint.get("fixed_mode_assignments", {}).items()
+        }
         fixed_privacy_profiles = dict(checkpoint.get("fixed_privacy_profiles", {}))
         real_he_rounds = int(checkpoint.get("real_he_rounds", 0))
         real_he_aggregated_clients = int(checkpoint.get("real_he_aggregated_clients", 0))
@@ -1240,6 +1254,16 @@ def _run_lenet5_policy(
             for client_id, parts in saved_client_states.items()
         }
         start_round = int(checkpoint.get("next_round", len(round_rows)))
+        if (
+            policy in _FROZEN_MODE_POLICIES
+            and start_round > 0
+            and not fixed_mode_assignments
+        ):
+            raise RuntimeError(
+                "Cannot resume a fixed-mode baseline checkpoint created before "
+                "per-client frozen mode assignments were recorded. Start a new run "
+                "so baseline semantics do not change mid-training."
+            )
         if round_rows:
             completed_wall_time_offset_sec = float(
                 round_rows[-1].get(
@@ -1300,6 +1324,9 @@ def _run_lenet5_policy(
         infeasible = 0
         forced_feasibility_repair = False
         selection_diagnostics: dict[str, Any] = {}
+        frozen_mode_runtime_active = (
+            policy in _FROZEN_MODE_POLICIES and bool(fixed_mode_assignments)
+        )
 
         for client in clients:
             rem = remaining_epsilon[client.client_id]
@@ -1319,7 +1346,12 @@ def _run_lenet5_policy(
                 fast_response_deadline=dict(effective_selection.fast_client_deadlines).get(client.client_id),
                 fixed_privacy_profile=(
                     fixed_privacy_profiles.get(client.client_id)
-                    if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}
+                    if policy in _FIXED_PRIVACY_POLICIES
+                    else None
+                ),
+                frozen_mode=(
+                    fixed_mode_assignments.get(client.client_id)
+                    if policy in _FROZEN_MODE_POLICIES
                     else None
                 ),
             )
@@ -1363,6 +1395,11 @@ def _run_lenet5_policy(
                         "client_id": client_id,
                         "candidate_index": candidate_index,
                         "mode": audit_candidate.mode,
+                        "frozen_mode_assignment": (
+                            fixed_mode_assignments.get(client_id, "")
+                            if policy in _FROZEN_MODE_POLICIES
+                            else ""
+                        ),
                         "mechanisms": candidate_mechanism_label(audit_candidate),
                         "initially_selected": int(audit_candidate == initial_candidate),
                         "feasible": bool(audit_candidate.feasible),
@@ -1490,8 +1527,13 @@ def _run_lenet5_policy(
                 round_value=round_idx,
             )
             client_samples = {client.client_id: float(client.samples) for client in clients}
+            profile_selection_config = (
+                replace(effective_selection, require_edge_cloud_coverage=False)
+                if frozen_mode_runtime_active
+                else effective_selection
+            )
             selected, profile_evaluation = choose_global_pareto_profile(
-                config=effective_selection,
+                config=profile_selection_config,
                 selected=selected,
                 client_samples=client_samples,
                 client_edges=client_edges,
@@ -1515,6 +1557,8 @@ def _run_lenet5_policy(
                         norm_eps=effective_selection.pareto_norm_eps,
                     )
                 )
+            if frozen_mode_runtime_active:
+                selection_diagnostics["coverage_constraint_bypassed_for_frozen_mode"] = True
             if policy in {"ours", "full_dynfl"}:
                 global_pareto_selection_rounds += 1
 
@@ -1546,7 +1590,12 @@ def _run_lenet5_policy(
             )
 
         selection_wall_time_sec = time.perf_counter() - selection_wall_started_at
-        if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}:
+        if policy in _FROZEN_MODE_POLICIES and not fixed_mode_assignments:
+            fixed_mode_assignments = {
+                client_id: candidate.mode
+                for client_id, candidate, _candidates, _rem in selected
+            }
+        if policy in _FIXED_PRIVACY_POLICIES:
             for client_id, candidate, _candidates, _rem in selected:
                 if client_id not in fixed_privacy_profiles and candidate.mode != "SKIP":
                     fixed_privacy_profiles[client_id] = (
@@ -1592,6 +1641,11 @@ def _run_lenet5_policy(
                     and candidate.time <= float(fast_response_deadline) + 1e-12
                 )
             )
+            frozen_mode_assignment = (
+                fixed_mode_assignments.get(client_id)
+                if policy in _FROZEN_MODE_POLICIES
+                else None
+            )
             row = {
                     "policy": policy,
                     "round": round_idx,
@@ -1599,6 +1653,23 @@ def _run_lenet5_policy(
                     "update_protection_goal": effective_selection.update_protection_goal,
                     "edge_id": client_by_id[client_id].edge_id,
                     "mode": candidate.mode,
+                    "frozen_mode_assignment": frozen_mode_assignment or "",
+                    "frozen_mode_assignment_source": (
+                        "round0_initialization"
+                        if policy in _FROZEN_MODE_POLICIES and round_idx == 0
+                        else "frozen"
+                        if policy in _FROZEN_MODE_POLICIES
+                        else ""
+                    ),
+                    "frozen_mode_runtime_skip": int(
+                        policy in _FROZEN_MODE_POLICIES
+                        and candidate.mode == "SKIP"
+                        and frozen_mode_assignment not in {None, "SKIP"}
+                    ),
+                    "frozen_mode_violation": int(
+                        policy in _FROZEN_MODE_POLICIES
+                        and candidate.mode not in {"SKIP", frozen_mode_assignment}
+                    ),
                     "mechanisms": candidate_mechanism_label(candidate),
                     "update_mechanism": (
                         _reported_release_mechanism(
@@ -1676,6 +1747,14 @@ def _run_lenet5_policy(
                         (item.epsilon_used for item in _candidates if item.mode == "LIIEIIIC"),
                         default="",
                     ),
+                    "frozen_mode_candidates": sum(
+                        item.mode == frozen_mode_assignment
+                        for item in _candidates
+                    ) if frozen_mode_assignment is not None else 0,
+                    "frozen_mode_feasible_candidates": sum(
+                        item.mode == frozen_mode_assignment and bool(item.feasible)
+                        for item in _candidates
+                    ) if frozen_mode_assignment is not None else 0,
                     "fast_response_client": fast_response_deadline is not None,
                     "fast_response_deadline": fast_response_deadline,
                     "deadline_satisfied": deadline_satisfied,
@@ -2596,6 +2675,19 @@ def _run_lenet5_policy(
             client_edges=client_edges,
             edge_total_samples=edge_total_samples,
         )
+        coverage_target_ratio = min(
+            max(float(effective_selection.min_edge_cloud_fusion_ratio), 0.0),
+            1.0,
+        )
+        actual_coverage_failure_edges = [
+            {
+                "edge_id": int(edge_id),
+                "actual_coverage_ratio": float(ratio),
+                "target_ratio": float(coverage_target_ratio),
+            }
+            for edge_id, ratio in sorted(cloud_edge_ratios.items())
+            if float(ratio) + 1e-12 < coverage_target_ratio
+        ]
         edge_only_groups: dict[tuple[int, str], list[tuple[int, Any, int, Candidate | None]]] = {}
         for client_id, state_diff, sample_count, candidate in admitted_updates:
             if candidate is None or candidate.mode not in EDGE_ONLY_MODES:
@@ -3285,6 +3377,13 @@ def _run_lenet5_policy(
                 "selection_coverage_infeasible_fallback": int(
                     bool(selection_diagnostics.get("coverage_infeasible_fallback", False))
                 ),
+                "selection_coverage_constraint_bypassed_for_frozen_mode": int(
+                    bool(
+                        selection_diagnostics.get(
+                            "coverage_constraint_bypassed_for_frozen_mode", False
+                        )
+                    )
+                ),
                 "selection_cloud_reaching_candidates": int(
                     selection_diagnostics.get("cloud_reaching_candidate_count", 0)
                 ),
@@ -3380,6 +3479,39 @@ def _run_lenet5_policy(
                 "actual_cloud_share_of_admitted": actual_cloud_share_of_admitted,
                 "cloud_edge_sample_ratio_min": min(cloud_edge_ratios.values(), default=0.0),
                 "cloud_edge_sample_ratio_max": max(cloud_edge_ratios.values(), default=0.0),
+                "actual_edge_cloud_coverage_satisfied": int(
+                    not actual_coverage_failure_edges
+                ),
+                "actual_edge_cloud_coverage_failure_edges": json.dumps(
+                    actual_coverage_failure_edges, sort_keys=True
+                ),
+                "frozen_mode_assignment_active": int(
+                    policy in _FROZEN_MODE_POLICIES and bool(fixed_mode_assignments)
+                ),
+                "frozen_mode_assignment_counts": json.dumps(
+                    {
+                        mode: sum(value == mode for value in fixed_mode_assignments.values())
+                        for mode in (*MODE_SPECS.keys(), "SKIP")
+                        if any(value == mode for value in fixed_mode_assignments.values())
+                    },
+                    sort_keys=True,
+                ),
+                "frozen_mode_runtime_skip_count": sum(
+                    int(
+                        candidate.mode == "SKIP"
+                        and fixed_mode_assignments.get(client_id) not in {None, "SKIP"}
+                    )
+                    for client_id, candidate, _candidates, _rem in selected
+                ) if policy in _FROZEN_MODE_POLICIES else 0,
+                "frozen_mode_violation_count": sum(
+                    int(
+                        candidate.mode not in {
+                            "SKIP",
+                            fixed_mode_assignments.get(client_id),
+                        }
+                    )
+                    for client_id, candidate, _candidates, _rem in selected
+                ) if policy in _FROZEN_MODE_POLICIES else 0,
                 "admitted_client_ids_objective": ";".join(str(cid) for cid in profile_evaluation.admitted_client_ids) if profile_evaluation else "",
                 "admitted_client_ids_actual": ";".join(str(cid) for cid in flow_result.selected_client_ids),
                 "num_clients": len(clients),
@@ -3533,6 +3665,7 @@ def _run_lenet5_policy(
             remaining_epsilon=remaining_epsilon,
             privacy_ledgers=privacy_ledgers,
             previous_choices=previous_choices,
+            fixed_mode_assignments=fixed_mode_assignments,
             fixed_privacy_profiles=fixed_privacy_profiles,
             round_rows=round_rows,
             decision_rows=decision_rows,
@@ -3673,6 +3806,13 @@ def _run_lenet5_policy(
                 ),
             }
         )
+        partial_summary["fixed_mode_assignment"] = {
+            str(client_id): mode
+            for client_id, mode in sorted(fixed_mode_assignments.items())
+        }
+        partial_summary["fixed_mode_assignment_distribution"] = _distribution(
+            fixed_mode_assignments.values()
+        )
         partial_summary.update(privacy_reporting_scope)
         partial_summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
         partial_summary.update(_global_release_summary(release_account, enabled=mainline_dp_enabled))
@@ -3725,6 +3865,13 @@ def _run_lenet5_policy(
     )
     summary["status"] = "completed"
     summary["target_rounds"] = selection.rounds
+    summary["fixed_mode_assignment"] = {
+        str(client_id): mode
+        for client_id, mode in sorted(fixed_mode_assignments.items())
+    }
+    summary["fixed_mode_assignment_distribution"] = _distribution(
+        fixed_mode_assignments.values()
+    )
     summary["per_client_test_accuracy_mean"] = float(np.mean(client_accs))
     summary["per_client_test_accuracy_min"] = float(np.min(client_accs))
     summary["per_client_test_accuracy_max"] = float(np.max(client_accs))
@@ -5473,6 +5620,7 @@ def _save_policy_checkpoint(
     remaining_epsilon: dict[int, float],
     privacy_ledgers: dict[int, ClientPrivacyLedger],
     previous_choices: dict[int, Candidate],
+    fixed_mode_assignments: dict[int, str],
     fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]],
     round_rows: list[dict[str, Any]],
     decision_rows: list[dict[str, Any]],
@@ -5506,6 +5654,7 @@ def _save_policy_checkpoint(
                 for client_id, ledger in privacy_ledgers.items()
             },
             "previous_choices": previous_choices,
+            "fixed_mode_assignments": fixed_mode_assignments,
             "fixed_privacy_profiles": fixed_privacy_profiles,
             "round_rows": round_rows,
             "decision_rows": decision_rows,

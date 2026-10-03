@@ -1212,22 +1212,29 @@ not be presented as measured classifier-only system performance.
 % revision paper_flow_v31_mode_specific_privacy before submission.
 \subsection{Compared Policies and Main Results}
 The formal comparison isolates the two adaptive axes of DynFL: collaboration
-mode and privacy calibration. \textsc{Fixed Mode + Fixed Privacy} restricts
-executed clients to the fixed LIIEIIIC collaboration mode and reuses each
-client's established protection profile. \textsc{Dynamic Mode + Fixed Privacy}
-allows collaboration modes to adapt while holding that privacy profile fixed.
-\textsc{Fixed Mode + Dynamic Privacy} keeps LIIEIIIC but recalibrates privacy
-from the evolving ledger and remaining horizon. \textsc{Full DynFL} makes both
-axes state dependent. Infeasible clients may produce \textsc{skip}; this is an
-execution/admission outcome and not an additional collaboration mode.
+mode and privacy calibration. For both fixed-mode baselines, the round-0 global
+selector first constructs a feasible heterogeneous per-client mode assignment
+under the same candidate legality and Edge/Cloud coverage constraints as DynFL;
+that assignment is then frozen for the remaining rounds. \textsc{Fixed Mode +
+Fixed Privacy} additionally reuses each client's round-0 protection profile,
+whereas \textsc{Fixed Mode + Dynamic Privacy} may recalibrate privacy within
+the frozen mode. \textsc{Dynamic Mode + Fixed Privacy} allows modes to adapt
+while holding the initial protection profile fixed, and \textsc{Full DynFL}
+makes both axes state dependent. If a frozen mode later becomes infeasible for
+a client, that client produces \textsc{skip} rather than switching mode;
+\textsc{skip} is an execution/admission outcome and not an additional
+collaboration mode.
 
-All four policies are evaluated through the same candidate legality checks,
+All four policies use the same per-client candidate legality checks,
 shared-resource flow model, system-level latency/error objectives, and actual
 execution/accounting path. Thus ``fixed privacy'' does not mean that privacy is
 disabled, and ``dynamic privacy'' does not introduce a separate privacy objective;
 it changes the state-dependent calibration used by otherwise legal exposures.
-The formal configuration also requires feasible execution, Edge/Cloud coverage,
-and real HE whenever a selected candidate requires HE.
+The round-0 fixed-mode assignment satisfies the same Edge/Cloud coverage gate as
+the dynamic policies. After freezing, the fixed-mode baselines do not repair a
+coverage loss by changing collaboration mode; realized per-edge Cloud coverage
+and skips are reported as outcomes of the static assignment. Real HE is required
+whenever a selected candidate requires HE.
 
 \tabref{tab:main_comparison} and \figref{fig:accuracy_convergence} are reserved
 for the completed three-seed formal runs. The primary efficiency value is system

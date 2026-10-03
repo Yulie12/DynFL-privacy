@@ -60,6 +60,7 @@ from dynfed.selection import (
     _replace_profile_omega_stats,
     _mode_link_events,
     _link_bandwidth,
+    choose_candidate,
     enumerate_candidates,
     build_client_privacy_ledger,
     resolved_privacy_parameters,
@@ -1946,23 +1947,60 @@ def test_formal_configs_use_only_frozen_four_internal_baselines() -> None:
         assert config["privacy"]["candidate_mechanisms"] == ["dp", "he3", "dp_he3"]
 
 
-def test_fixed_mode_baselines_use_liieiiic_without_relaxing_feasibility() -> None:
-    config = SelectionConfig(update_mechanism_options=("dp", "he3", "dp_he3"))
+def test_fixed_mode_baselines_initialize_from_shared_pool_then_freeze_per_client_mode() -> None:
+    config = SelectionConfig(
+        update_mechanism_options=("dp", "he3", "dp_he3"),
+        fl_first_split_on_demand=True,
+        resource_limit=1.35,
+        memory_limit=1.35,
+    )
     ledger = build_client_privacy_ledger(config)
     requirement = ExposurePrivacyRequirement(
         plaintext_forbidden_links=frozenset({"E_C_upd"}),
         dp_required_links=frozenset({"E_C_upd"}),
     )
     for policy in ("fixed_mode_fixed_privacy", "fixed_mode_dynamic_privacy"):
-        candidates = enumerate_candidates(
+        initial = enumerate_candidates(
             config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
             samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=0,
             rng=random.Random(202), policy=policy, privacy_ledger=ledger,
             privacy_requirement=requirement,
         )
-        assert candidates
-        assert {candidate.mode for candidate in candidates} == {"LIIEIIIC"}
-        assert all(candidate.feasible_privacy for candidate in candidates)
+        assert initial
+        assert {candidate.mode for candidate in initial} <= {"LIIE", "LIIC", "LIIEIIIC"}
+        assert len({candidate.mode for candidate in initial}) > 1
+        frozen_mode = next(candidate.mode for candidate in initial if candidate.feasible)
+        frozen = enumerate_candidates(
+            config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
+            samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=1,
+            rng=random.Random(203), policy=policy, privacy_ledger=ledger,
+            privacy_requirement=requirement, frozen_mode=frozen_mode,
+        )
+        assert frozen
+        assert {candidate.mode for candidate in frozen} == {frozen_mode}
+        assert all(candidate.feasible_privacy for candidate in frozen)
+
+
+def test_frozen_mode_infeasibility_skips_client_instead_of_switching_mode() -> None:
+    config = SelectionConfig(
+        update_mechanism_options=("dp", "he3", "dp_he3"),
+        resource_limit=1.35,
+        memory_limit=0.5,
+        require_feasible=True,
+    )
+    ledger = build_client_privacy_ledger(config)
+    candidates = enumerate_candidates(
+        config=config, client_id=0, edge_factor=1.0, compute_factor=1.0,
+        samples=100, remaining_epsilon=ledger.remaining_budget, round_idx=1,
+        rng=random.Random(204), policy="fixed_mode_dynamic_privacy",
+        privacy_ledger=ledger, frozen_mode="LIIEIIIC",
+    )
+    assert candidates
+    selected = choose_candidate(
+        candidates, policy="fixed_mode_dynamic_privacy", rng=random.Random(205),
+        require_feasible=True, remaining_epsilon=ledger.remaining_budget,
+    )
+    assert selected.mode == "SKIP"
 
 
 def test_fixed_privacy_profile_locks_mechanism_and_dp_strength() -> None:
@@ -2458,8 +2496,12 @@ def test_q98_table2_freezes_four_internal_method_definitions() -> None:
     from experiments.paper_final_plan import FINAL_POLICIES
 
     assert tuple(METHOD_DEFINITIONS) == FINAL_POLICIES
-    assert METHOD_DEFINITIONS["fixed_mode_fixed_privacy"]["mode_definition"] == "LIIEIIIC"
-    assert METHOD_DEFINITIONS["fixed_mode_dynamic_privacy"]["mode_definition"] == "LIIEIIIC"
+    assert METHOD_DEFINITIONS["fixed_mode_fixed_privacy"]["mode_definition"] == (
+        "Round-0 per-client assignment frozen thereafter"
+    )
+    assert METHOD_DEFINITIONS["fixed_mode_dynamic_privacy"]["mode_definition"] == (
+        "Round-0 per-client assignment frozen thereafter"
+    )
     assert METHOD_DEFINITIONS["dynamic_mode_fixed_privacy"]["mode_policy"] == "Dynamic"
     assert METHOD_DEFINITIONS["full_dynfl"]["privacy_policy"] == "Dynamic"
 
