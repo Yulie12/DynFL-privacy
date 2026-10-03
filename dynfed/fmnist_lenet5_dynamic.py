@@ -3328,7 +3328,8 @@ def _run_lenet5_policy(
                 "privacy_mechanism_scope": privacy_reporting_scope["privacy_mechanism_scope"],
                 "protection_release_audit": json.dumps(protection_releases, sort_keys=True),
                 "update_packets_without_dp_calibration": sum(
-                    item["released_model_dp_status"] != "dp_coverage_pending_analysis"
+                    item["destination"] == "cloud"
+                    and item["released_model_dp_status"] != "dp_coverage_pending_analysis"
                     for item in protection_releases
                 ),
                 "update_packets_with_real_he_pending_isolation": sum(
@@ -3337,11 +3338,15 @@ def _run_lenet5_policy(
                 ),
                 "protection_rule_scope": "observed_operations_not_a_security_proof",
                 "released_model_dp_coverage": (
-                    "no_new_cloud_update" if not protection_releases else
-                    "all_contributions_pending_analysis" if all(
+                    "no_new_cloud_update"
+                    if not any(item["destination"] == "cloud" for item in protection_releases)
+                    else "all_contributions_pending_analysis"
+                    if all(
                         item["released_model_dp_status"] == "dp_coverage_pending_analysis"
                         for item in protection_releases
-                    ) else "some_contributions_without_dp_calibration"
+                        if item["destination"] == "cloud"
+                    )
+                    else "some_contributions_without_dp_calibration"
                 ),
                 "selection_pool_candidates_before_stability": sum(
                     selection_diagnostics.get(
