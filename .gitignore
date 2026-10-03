@@ -37,3 +37,11 @@ data/
 *.tar.gz
 *.7z
 
+
+# Fed3Scale SEAL-python local build artifacts
+third_party/SEAL-python/build/
+third_party/SEAL-python/SEAL/build/
+third_party/SEAL-python/*.so
+third_party/SEAL-python/*.pyd
+third_party/SEAL-python/*.egg-info/
+.he_deps
