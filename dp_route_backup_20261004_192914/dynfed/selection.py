@@ -3328,12 +3328,11 @@ def _candidate_uses_secure_aggregate_update_dp_for_selection(candidate: Candidat
 
 
 def _candidate_uses_edge_local_exact_update_dp(candidate: Candidate) -> bool:
-    """LIIE L->E DP is now performed in Worker; no later aggregate DP credit.
-
-    The Edge cannot re-noise the same packet.  A future genuine masked-before-
-    exposure LIIE protocol would need its own independently audited candidate.
-    """
-    return False
+    """Whether LIIE execution uses the edge-local streaming SecAgg DP path."""
+    if candidate.mode != "LIIE":
+        return False
+    mechanism = candidate_link_mechanism(candidate, "L_E_upd")
+    return mechanism_uses_dp(mechanism) and not mechanism_uses_he(mechanism)
 
 
 def _candidate_has_update_dp(candidate: Candidate) -> bool:
@@ -3460,31 +3459,36 @@ def _global_dp_perturbation_cost(
             sigma = max(float(candidate.update_noise_multiplier or default_sigma), 0.0)
             cost += dim * (weight * sigma * sensitivity_unweighted) ** 2
 
-    # LIIE publishes locally DP-protected individual L->E packets.  Edge
-    # averaging is only post-processing, so independently sampled packet noise
-    # combines in variance (sum of squared *actual edge weights*).  Include
-    # every LIIE client in the denominator, even HE-only peers.
+    # LIIE has no Cloud update.  Its returned model is the edge-local SecAgg
+    # release, so charge each edge once at that cohort's aggregate sensitivity
+    # and population-weight the resulting squared noise norm.  A singleton
+    # cohort cannot execute pairwise SecAgg and falls back to packet-level DP.
     edge_groups: dict[int, list[int]] = {}
     for client_id in admitted:
         candidate = profile.get(client_id)
-        if candidate is not None and candidate.mode == "LIIE":
+        if candidate is not None and _candidate_uses_edge_local_exact_update_dp(candidate):
             edge_groups.setdefault(int(client_edges.get(client_id, -1)), []).append(client_id)
     admitted_mass = sum(
         max(float(client_samples.get(client_id, 0.0)), 0.0)
-        for client_id in admitted if client_id in profile
+        for client_id in admitted
+        if client_id in profile
     )
     for members in edge_groups.values():
-        group_mass = sum(max(float(client_samples.get(cid, 0.0)), 0.0) for cid in members)
+        group_mass = sum(max(float(client_samples.get(client_id, 0.0)), 0.0) for client_id in members)
         if group_mass <= 0.0 or admitted_mass <= 0.0:
             continue
-        group_cost = 0.0
-        for cid in members:
-            candidate = profile[cid]
-            if not mechanism_uses_dp(candidate_link_mechanism(candidate, "L_E_upd")):
-                continue
-            weight = max(float(client_samples.get(cid, 0.0)), 0.0) / group_mass
-            sigma = max(float(candidate.update_noise_multiplier or default_sigma), 0.0)
-            group_cost += dim * (weight * sigma * sensitivity_unweighted) ** 2
+        sigma = max(
+            max(float(profile[client_id].update_noise_multiplier or default_sigma), 0.0)
+            for client_id in members
+        )
+        if len(members) >= 2:
+            max_local_weight = max(
+                max(float(client_samples.get(client_id, 0.0)), 0.0) / group_mass
+                for client_id in members
+            )
+            group_cost = dim * (sigma * sensitivity_unweighted * max_local_weight) ** 2
+        else:
+            group_cost = dim * (sigma * sensitivity_unweighted) ** 2
         cost += (group_mass / admitted_mass) * group_cost
 
     return float(cost)
@@ -3855,11 +3859,7 @@ def _local_proxy_aggregation_size_hint(
     """
     if _candidate_uses_secure_aggregate_update_dp_for_selection(candidate):
         return max(int(config.num_clients), 1)
-    if candidate.mode == "LIIE" and mechanism_uses_dp(
-        candidate_link_mechanism(candidate, "L_E_upd")
-    ):
-        # Locally DP-protected packets average with 1/K (variance) rather
-        # than 1/K^2 (one DP-protected aggregate) in the search proxy.
+    if _candidate_uses_edge_local_exact_update_dp(candidate):
         edges = max(int(config.num_edges), 1)
         return max(int(math.ceil(float(config.num_clients) / float(edges))), 1)
     return 1

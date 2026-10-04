@@ -1014,7 +1014,6 @@ def apply_unified_dp(
     rng: np.random.Generator,
     device: torch.device,
     adaptive: bool = False,
-    audit_out: dict[str, float] | None = None,
 ) -> dict[str, dict[str, torch.Tensor]]:
     """Apply client replacement DP to one model update release.
 
@@ -1040,7 +1039,6 @@ def apply_unified_dp(
             total_norm_sq += (value ** 2).sum().item()
     flat_norm = np.sqrt(max(total_norm_sq, 1e-12))
     scale = min(1.0, clip_norm / flat_norm)
-    sampled_noise_norm_sq = 0.0
 
     for part_key in diff:
         for name in diff[part_key]:
@@ -1051,18 +1049,8 @@ def apply_unified_dp(
             noise = torch.from_numpy(
                 rng.normal(0.0, sigma, size=value.shape).astype(np.float32)
             ).to(device)
-            if audit_out is not None:
-                sampled_noise_norm_sq += float(torch.sum(noise.to(dtype=torch.float64) ** 2).item())
             diff[part_key][name] = protected + noise
 
-    if audit_out is not None:
-        audit_out.update({
-            "original_norm": float(flat_norm),
-            "clip_scale": float(scale),
-            "sensitivity": float(2.0 * clip_norm),
-            "noise_std": float(sigma),
-            "noise_norm": float(np.sqrt(sampled_noise_norm_sq)),
-        })
     return diff
 
 

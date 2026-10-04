@@ -323,31 +323,14 @@ def _candidate_training_mechanisms(
         mechanisms["upd"] = candidate_link_mechanism(candidate, update_link)
     if (
         aggregate_cloud_update_dp
-        and update_link != "L_E_upd"
         and mechanism_uses_dp(_candidate_cloud_update_mechanism(candidate))
     ):
-        # A cloud release must not silently disable a distinct L->E packet
-        # protection requirement in LIIEIIIC.  Cloud-local DP is still deferred.
         mechanisms["upd"] = (
             "he3"
             if mechanism_uses_he(_candidate_cloud_update_mechanism(candidate))
             else "none"
         )
     return mechanisms
-
-
-def _candidate_worker_update_dp_applied(
-    candidate: Candidate | None,
-    update_mode: str,
-) -> bool:
-    """Whether the worker already protected this candidate's outgoing update."""
-    if candidate is None:
-        return False
-    return _should_apply_update_dp(
-        _candidate_training_mechanisms(candidate, aggregate_cloud_update_dp=True),
-        update_mode,
-        candidate.mode,
-    )
 
 
 def _candidate_cloud_update_mechanism(candidate: Candidate | None) -> str:
@@ -461,7 +444,6 @@ def _client_train_worker(
         payload["dp_update_mode"],
         payload["mode"],
     )
-    worker_update_dp_audit: dict[str, float] = {}
     state_diff = apply_unified_dp(
         state_diff,
         mechanism="dp" if has_dp else "none",
@@ -469,7 +451,6 @@ def _client_train_worker(
         noise_multiplier=payload["dp_update_noise_multiplier"],
         rng=rng,
         device=worker_device,
-        audit_out=worker_update_dp_audit if has_dp else None,
     )
     finite = _state_diff_is_finite(state_diff)
     returned_diff = _state_dict_to_device_nested(state_diff, torch.device("cpu"))
@@ -479,7 +460,6 @@ def _client_train_worker(
         "measured_local": time.perf_counter() - start,
         **training_diagnostics,
         "finite": finite,
-        "worker_update_dp_audit": worker_update_dp_audit,
     }
 
 
@@ -1379,8 +1359,6 @@ def _run_lenet5_policy(
     for round_idx in range(start_round, stop_round):
         round_wall_started_at = time.perf_counter()
         round_he_metrics = HEOperationMetrics(backend=he_status.backend)
-        secagg_wall_time_sec = 0.0
-        secagg_call_count = 0
         fused_he_audit = {}
         selection_wall_started_at = time.perf_counter()
         emit_stage_status(
@@ -2647,7 +2625,6 @@ def _run_lenet5_policy(
             if local_sensitivity <= 0.0:
                 raise RuntimeError("LIIEIIIC secure aggregation has zero local sensitivity")
             effective_edge_sigma = desired_edge_noise_std / local_sensitivity
-            secagg_started = time.perf_counter()
             noisy_edge_update, secagg_audit = streaming_secure_aggregate_exact_target(
                 relative_updates,
                 [item[2] for item in updates],
@@ -2660,8 +2637,6 @@ def _run_lenet5_policy(
                     50_000,
                 ),
             )
-            secagg_wall_time_sec += time.perf_counter() - secagg_started
-            secagg_call_count += 1
             cloud_updates[cloud_index] = (
                 noisy_edge_update,
                 sample_count,
@@ -2777,13 +2752,7 @@ def _run_lenet5_policy(
             if (
                 update_dp_execution_enabled
                 and _liie_streaming_secagg_eligible(updates, execute_real_he=execute_real_he)
-                and not any(
-                    _candidate_worker_update_dp_applied(item[3], train_config.dp_update_mode)
-                    for item in updates
-                )
             ):
-                # Streaming SecAgg is only valid on *unnoised* client inputs.
-                # This guard prevents clipping/noising already-DP worker updates.
                 representative = updates[0][3]
                 sigma = max(
                     float(
@@ -2799,7 +2768,6 @@ def _run_lenet5_policy(
                     global_end=global_end,
                     global_edge=global_edge,
                 )
-                secagg_started = time.perf_counter()
                 noisy_aggregate, secagg_audit = streaming_secure_aggregate_exact_target(
                     relative_updates,
                     [item[2] for item in updates],
@@ -2812,8 +2780,6 @@ def _run_lenet5_policy(
                         40_000,
                     ),
                 )
-                secagg_wall_time_sec += time.perf_counter() - secagg_started
-                secagg_call_count += 1
                 shared_returned_state = _state_with_applied_difference(
                     reference_state, noisy_aggregate
                 )
@@ -2835,28 +2801,7 @@ def _run_lenet5_policy(
             prepared_updates: list[tuple[int, Any, int, Candidate | None]] = []
             for client_id, state_diff, sample_count, candidate in updates:
                 mechanism = _candidate_edge_update_mechanism(candidate)
-                worker_has_dp = (
-                    update_dp_execution_enabled
-                    and candidate is not None
-                    and _candidate_worker_update_dp_applied(candidate, train_config.dp_update_mode)
-                )
-                if worker_has_dp:
-                    # LIIE's L->E update was DP-protected *before* reaching Edge.
-                    # Pure Edge aggregation is post-processing: no second noise.
-                    audit = dict(worker_results[client_id].get("worker_update_dp_audit") or {})
-                    if not audit:
-                        raise RuntimeError("Missing worker DP audit for protected LIIE update")
-                    audit.update({
-                        "mechanism": mechanism,
-                        "sigma": float(
-                            candidate.update_noise_multiplier
-                            if candidate.update_noise_multiplier is not None
-                            else privacy_parameters["update_noise_multiplier"]
-                        ),
-                        "noise_location": "worker",
-                    })
-                    protected_diff = state_diff
-                elif update_dp_execution_enabled and candidate is not None:
+                if update_dp_execution_enabled and candidate is not None:
                     protected_diff, audit = _protect_edge_only_client_update_dp(
                         state_diff,
                         candidate=candidate,
@@ -3030,7 +2975,6 @@ def _run_lenet5_policy(
                     )
             else:
                 if liic_streaming_secagg:
-                    secagg_started = time.perf_counter()
                     noisy_aggregate, secagg_audit = streaming_secure_aggregate_exact_target(
                         global_state_diffs,
                         global_sample_counts,
@@ -3038,8 +2982,6 @@ def _run_lenet5_policy(
                         noise_multiplier=aggregate_noise_multiplier,
                         round_seed=_dp_noise_seed(selection.seed, round_idx, "liic_streaming_secagg", 30_000),
                     )
-                    secagg_wall_time_sec += time.perf_counter() - secagg_started
-                    secagg_call_count += 1
                     global_end, global_edge = _apply_aggregate_state_difference(
                         noisy_aggregate, global_end, global_edge, device
                     )
@@ -3103,7 +3045,7 @@ def _run_lenet5_policy(
                 "key_isolation_enforced": False,
                 "aggregate_only_decryption_enforced": False,
                 "mechanism": record["mechanism"],
-                "noise_location": record.get("noise_location", "packet"),
+                "noise_location": "packet",
             })
         for packet_index, (_diff, _samples, candidate, client_ids) in enumerate(cloud_updates):
             # LIC is split training directly with the Cloud: S_LC(L_B) -> A_C.
@@ -3279,8 +3221,6 @@ def _run_lenet5_policy(
                 "feature_distortion_l2_sq_mean": feature_distortion_l2_sq_sum / max(feature_dp_sample_count, 1.0),
                 "flow_wall_time_sec": flow_wall_time_sec,
                 "aggregation_wall_time_sec": aggregation_wall_time_sec,
-                "secagg_wall_time_sec": secagg_wall_time_sec,
-                "secagg_call_count": secagg_call_count,
                 "evaluation_wall_time_sec": evaluation_wall_time_sec,
                 "accounted_phase_wall_time_sec": accounted_phase_wall_time_sec,
                 "unattributed_wall_time_sec": max(

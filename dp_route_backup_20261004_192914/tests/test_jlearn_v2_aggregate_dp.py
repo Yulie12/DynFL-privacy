@@ -52,7 +52,7 @@ def test_liic_exact_target_cost_is_charged_once_at_aggregate_sensitivity() -> No
     assert legacy_local_packet / actual == pytest.approx(float(k))
 
 
-def test_liie_edge_local_cost_uses_independent_worker_dp_packets() -> None:
+def test_liie_edge_local_cost_uses_each_edge_cohort_sensitivity() -> None:
     sigma = 0.5
     clip = 0.25
     dim = 1000.0
@@ -61,14 +61,14 @@ def test_liie_edge_local_cost_uses_independent_worker_dp_packets() -> None:
         omega_update_clip_norm=clip,
         omega_update_clip_excess_sq=0.0,
     )
-    # Two equal edges, each with five clients.  Each client packet already has
-    # DP, so independent packet noise averages in variance, not 1/K^2.
+    # Two equal edges, each with five clients.  Each edge release therefore has
+    # max local weight 1/5 and both edges have the same expected noise energy.
     profile = {i: _candidate("LIIE", "L_E_upd", sigma=sigma) for i in range(10)}
     samples = {i: 1.0 for i in profile}
     edges = {i: i // 5 for i in profile}
 
     actual = _global_dp_perturbation_cost(config, profile, samples, edges, tuple(profile))
-    per_edge = dim * (sigma * 2.0 * clip) ** 2 / 5.0
+    per_edge = dim * (sigma * (2.0 * clip / 5.0)) ** 2
 
     assert actual == pytest.approx(per_edge)
 
@@ -180,7 +180,7 @@ def test_liie_local_search_proxy_uses_expected_edge_cohort_scaling() -> None:
 
     expected_cohort = 5
     assert singleton > 0.0
-    assert search_proxy == pytest.approx(singleton / expected_cohort)
+    assert search_proxy == pytest.approx(singleton / (expected_cohort * expected_cohort))
 
 
 def test_split_local_packet_dp_keeps_legacy_local_search_proxy() -> None:
