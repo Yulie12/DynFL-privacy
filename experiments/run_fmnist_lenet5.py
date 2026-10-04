@@ -83,11 +83,14 @@ def parse_args() -> argparse.Namespace:
             "resnet50",
             "resnet18_pretrained",
             "resnet18_pretrained_head",
+            "resnet18_pretrained_head256",
             "resnet18_pretrained_adapter",
             "resnet50_pretrained",
         ],
     )
     parser.add_argument("--lr", type=float, default=0.15)
+    parser.add_argument("--server-step", type=float, default=1.0,
+                        help="Scale the final cloud model update after DP/HE/SecAgg aggregation")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--iid", action="store_true")
     parser.add_argument(
@@ -370,6 +373,7 @@ def main() -> None:
         local_epochs=args.local_epochs,
         equal_optimizer_work_control=args.equal_optimizer_work_control,
         learning_rate=args.lr,
+        server_step=args.server_step,
         iid=args.iid,
         partition_mode="iid" if args.iid else args.partition_mode,
         dirichlet_alpha=args.dirichlet_alpha,

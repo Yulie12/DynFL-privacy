@@ -425,6 +425,41 @@ class TorchvisionResNetFull(nn.Module):
         return self.classifier(x)
 
 
+class FixedEvenChannelProjection(nn.Module):
+    """Data-independent, parameter-free selection of 256/512 ResNet-18 features.
+
+    The same projection is used by split and full-model execution, and does
+    not access private labels, trainable weights or any client statistics.
+    """
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        if features.shape[-1] != 512:
+            raise ValueError("head256 expects a 512-dimensional ResNet-18 feature vector")
+        return features[..., ::2]
+
+
+class TorchvisionResNet18Head256Edge(TorchvisionResNet18Edge):
+    """Unchanged frozen ResNet-18 edge backbone; only a 2,570-param head."""
+
+    def __init__(self, embedding_dim: int = 512, num_classes: int = 10) -> None:
+        super().__init__(embedding_dim=embedding_dim, num_classes=num_classes)
+        self.classifier = nn.Sequential(
+            FixedEvenChannelProjection(), nn.Linear(256, num_classes)
+        )
+
+
+class TorchvisionResNet18Head256Full(TorchvisionResNetFull):
+    """Same classifier state keys and forward rule as the split edge model."""
+
+    version = "18"
+
+    def __init__(self, input_channels: int = 3, image_size: int = 32, num_classes: int = 10) -> None:
+        super().__init__(input_channels=input_channels, image_size=image_size, num_classes=num_classes)
+        self.classifier = nn.Sequential(
+            FixedEvenChannelProjection(), nn.Linear(256, num_classes)
+        )
+
+
 class TorchvisionResNet18Full(TorchvisionResNetFull):
     version = "18"
 
@@ -518,6 +553,7 @@ MODEL_BUILDERS = {
     "resnet50": (ResNet50End, ResNetEdge, ResNet50Full),
     "resnet18pretrained": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
     "resnet18pretrainedhead": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
+    "resnet18pretrainedhead256": (TorchvisionResNet18End, TorchvisionResNet18Head256Edge, TorchvisionResNet18Head256Full),
     "resnet18pretrainedlayer4head": (TorchvisionResNet18End, TorchvisionResNet18Edge, TorchvisionResNet18Full),
     "resnet50pretrained": (TorchvisionResNet50End, TorchvisionResNet50Edge, TorchvisionResNet50Full),
 }
@@ -546,6 +582,7 @@ def normalize_model_name(model_name: str) -> str:
         "res18pretrained": "resnet18pretrained",
         "resnet18pretrained": "resnet18pretrained",
         "resnet18pretrainedhead": "resnet18pretrainedhead",
+        "resnet18pretrainedhead256": "resnet18pretrainedhead256",
         "resnet18pretrainedlayer4head": "resnet18pretrainedlayer4head",
         "torchvisionresnet18": "resnet18pretrained",
         "driftraceres18": "resnet18pretrained",
@@ -636,6 +673,7 @@ def _is_pretrained_resnet(model_name: str) -> bool:
         "resnet18pretrained",
         "resnet50pretrained",
         "resnet18pretrainedhead",
+        "resnet18pretrainedhead256",
         "resnet18pretrainedlayer4head",
     }
 
@@ -651,7 +689,7 @@ def _prepare_model_for_training(model: nn.Module, model_name: str) -> None:
             or name.startswith("fc.")
         )
         normalized = normalize_model_name(model_name)
-        if normalized in {"resnet18pretrainedhead", "resnet18pretrainedadapter"}:
+        if normalized in {"resnet18pretrainedhead", "resnet18pretrainedhead256", "resnet18pretrainedadapter"}:
             trainable = name.startswith(("classifier.", "fc."))
         elif normalized == "resnet18pretrainedlayer4head":
             trainable = name.startswith(("layer4.", "classifier.", "fc."))
@@ -680,6 +718,7 @@ def _make_optimizer(
         "resnet18pretrained",
         "resnet50pretrained",
         "resnet18pretrainedhead",
+        "resnet18pretrainedhead256",
         "resnet18pretrainedlayer4head",
     }:
         decay = 5e-4 if weight_decay is None else float(weight_decay)
@@ -755,6 +794,7 @@ def split_local_train_lenet5(
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
         "resnet18pretrainedadapter",
         "resnet18pretrainedhead",
+        "resnet18pretrainedhead256",
         "resnet18pretrainedlayer4head",
         "resnet18",
         "resnet50",

@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--policies", nargs="+")
     parser.add_argument("--rounds", type=int)
+    parser.add_argument("--server-step", type=float,
+                        help="Diagnostic override of the cloud server step (default 1.0)")
     parser.add_argument("--he-execution", choices=["real", "profiled"])
     parser.add_argument("--output-root")
     parser.add_argument(
@@ -87,6 +89,7 @@ def build_command(
     max_new_rounds: int | None = None,
     resume_from_run: Path | None = None,
     equal_optimizer_work_control: bool = False,
+    server_step: float | None = None,
     disable_update_dp: bool = False,
     exclude_modes: list[str] | None = None,
 ) -> list[str]:
@@ -120,6 +123,9 @@ def build_command(
         "dirichlet_alpha": training.get("dirichlet_alpha", 0.5),
         "local_epochs": training["local_epochs"],
         "lr": training["learning_rate"],
+        "server_step": (
+            server_step if server_step is not None else training.get("server_step", 1.0)
+        ),
         "device": training["device"],
         "executor": training["executor"],
         "selection_period": training["selection_period"],
@@ -225,6 +231,12 @@ def main() -> None:
         raise ValueError("--resume-from-run requires exactly one seed")
     if args.max_new_rounds is not None and args.max_new_rounds < 1:
         raise ValueError("--max-new-rounds must be positive")
+    effective_server_step = (
+        args.server_step if args.server_step is not None
+        else config["training"].get("server_step", 1.0)
+    )
+    if not (0.0 < effective_server_step <= 1.0):
+        raise ValueError("--server-step must be in (0, 1]")
 
     for seed in seeds:
         command = build_command(
@@ -235,6 +247,7 @@ def main() -> None:
             max_new_rounds=args.max_new_rounds,
             resume_from_run=args.resume_from_run,
             equal_optimizer_work_control=args.equal_optimizer_work_control,
+            server_step=args.server_step,
             disable_update_dp=args.disable_update_dp,
             exclude_modes=args.exclude_modes,
         )

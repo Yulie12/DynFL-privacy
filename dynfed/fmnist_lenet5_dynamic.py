@@ -117,6 +117,7 @@ class Lenet5Config:
     local_epochs: int = 1
     equal_optimizer_work_control: bool = False
     learning_rate: float = 0.15
+    server_step: float = 1.0  # Post-aggregation cloud update multiplier.
     l2: float = 0.0001
     iid: bool = False
     partition_mode: str = "client_noniid"
@@ -138,6 +139,46 @@ class Lenet5Config:
     he_workers: int = 1
     executor: str = "serial"
     executor_workers: int | None = None
+
+
+def _snapshot_trainable_parameters(
+    end_model: torch.nn.Module,
+    edge_model: torch.nn.Module,
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Snapshot only trainable parameters, not the (possibly frozen) backbone."""
+    return {
+        part: {
+            name: param.detach().clone()
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+        for part, model in (("end", end_model), ("edge", edge_model))
+    }
+
+
+def _apply_cloud_server_step(
+    end_model: torch.nn.Module,
+    edge_model: torch.nn.Module,
+    before: dict[str, dict[str, torch.Tensor]],
+    step: float,
+) -> None:
+    """Damp the final *already released* cloud update, including its DP noise.
+
+    All per-mode aggregation and cryptographic/DP operations finish before this
+    function. This is deterministic post-processing of the cloud model, not a
+    change to the noise used for any intermediate packet release.
+    """
+    if not (0.0 < step <= 1.0):
+        raise ValueError("server_step must be in (0, 1]")
+    with torch.no_grad():
+        for part, model in (("end", end_model), ("edge", edge_model)):
+            saved = before[part]
+            current = {name: param for name, param in model.named_parameters() if param.requires_grad}
+            if saved.keys() != current.keys():
+                raise RuntimeError("Trainable parameter set changed during cloud aggregation")
+            for name, param in current.items():
+                original = saved[name].to(device=param.device, dtype=param.dtype)
+                param.copy_(original + step * (param - original))
 
 
 def _feature_clip_norm(config: Lenet5Config) -> float:
@@ -441,6 +482,8 @@ def run_fmnist_lenet5_training(
 ) -> dict[str, Any]:
     if max_new_rounds is not None and max_new_rounds < 1:
         raise ValueError("max_new_rounds must be positive")
+    if not (0.0 < train_config.server_step <= 1.0):
+        raise ValueError("server_step must be in (0, 1]")
     for policy in policies:
         validate_update_protection_goal(selection, policy)
     if train_config.dp_release_calibration not in {"tex_packet", "legacy_aggregate", "global_release"}:
@@ -1150,6 +1193,13 @@ def _run_lenet5_policy(
         global_end.load_state_dict(checkpoint["global_end_state"])
         global_edge.load_state_dict(checkpoint["global_edge_state"])
         saved_training = checkpoint.get("training", {})
+        if not math.isclose(
+            float(saved_training.get("server_step", 1.0)),
+            train_config.server_step,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise RuntimeError("Cannot change server_step when resuming: start a new run")
         if saved_training.get("update_parameter_scope") != train_config.update_parameter_scope:
             raise RuntimeError(
                 "Cannot resume a checkpoint with a different DP update parameter scope. "
@@ -2871,6 +2921,11 @@ def _run_lenet5_policy(
         global_state_diffs: list[dict[str, dict[str, torch.Tensor]]] = []
         global_candidates: list[Candidate | None] = []
         global_he_mask: list[bool] = []
+        before_cloud_update = (
+            _snapshot_trainable_parameters(global_end, global_edge)
+            if cloud_updates and train_config.server_step != 1.0
+            else None
+        )
         if cloud_updates:
             global_state_diffs = [item[0] for item in cloud_updates]
             global_sample_counts = global_aggregation_weights
@@ -2941,6 +2996,10 @@ def _run_lenet5_policy(
                         global_edge,
                         device,
                     )
+        if before_cloud_update is not None:
+            _apply_cloud_server_step(
+                global_end, global_edge, before_cloud_update, train_config.server_step
+            )
         for client_id, candidate, _candidates, _remaining in selected:
             if effective_selection.mainline_fusion or _mode_reaches_cloud(candidate.mode):
                 client_model_states.pop(client_id, None)
@@ -3232,7 +3291,9 @@ def _run_lenet5_policy(
                 "direction_aggregate_to_mean_client_norm_ratio": direction_diagnostics[
                     "aggregate_to_mean_client_norm_ratio"
                 ],
-                "global_update_norm": global_update_norm,
+                "global_update_norm": global_update_norm,  # Pre-server-step diagnostic.
+                "server_step": train_config.server_step,
+                "applied_cloud_update_norm": global_update_norm * train_config.server_step,
                 "post_to_pre_update_norm_ratio": global_update_norm
                 / max(pre_dp_global_update_norm, 1e-12),
                 "update_dp_release": int(update_dp_release),
