@@ -71,6 +71,7 @@ from .selection import (
     candidate_mechanisms_for_object,
     choose_candidate,
     choose_global_pareto_profile,
+    choose_cloud_dp_pareto_profile,
     evaluate_global_profile,
     enumerate_candidates,
     paper_client_privacy_requirement,
@@ -321,6 +322,11 @@ def _candidate_training_mechanisms(
     }.get(candidate.mode)
     if update_link is not None:
         mechanisms["upd"] = candidate_link_mechanism(candidate, update_link)
+    if candidate.mode == "LIIE" and candidate.dp_execution_plan == "aggregate":
+        # Suppress worker DP only for the *explicit* fixed-cohort SecAgg plan.
+        # The masked SecAgg release clips unnoised inputs and generates one
+        # exact-target aggregate DP output. Never expose raw per-client packets.
+        mechanisms["upd"] = "none"
     if (
         aggregate_cloud_update_dp
         and update_link != "L_E_upd"
@@ -400,6 +406,8 @@ def _candidate_uses_local_packet_update_dp(
     trusted_edge_split_execution: bool = False,
 ) -> bool:
     mechanism = _candidate_cloud_update_mechanism(candidate)
+    if candidate is not None and getattr(candidate, "dp_execution_plan", "independent") == "cloud_packet":
+        return mechanism_uses_dp(mechanism)
     # Full-local direct-cloud FL no longer needs high-dimensional local packet DP.
     # Its DP release is closed at the aggregate boundary by streaming SecAgg.
     if (
@@ -417,6 +425,8 @@ def _candidate_uses_secure_aggregate_update_dp(
     trusted_edge_split_execution: bool = False,
 ) -> bool:
     mechanism = _candidate_cloud_update_mechanism(candidate)
+    if candidate is not None and getattr(candidate, "dp_execution_plan", "independent") == "cloud_packet":
+        return False
     if candidate is not None and candidate.mode == "LIIC":
         return mechanism_uses_dp(mechanism)
     if candidate is not None and candidate.mode == "LIIEIIIC":
@@ -1396,12 +1406,14 @@ def _run_lenet5_policy(
         infeasible = 0
         forced_feasibility_repair = False
         selection_diagnostics: dict[str, Any] = {}
+        mode_enumeration_audits: list[dict[str, Any]] = []
         frozen_mode_runtime_active = (
             policy in _FROZEN_MODE_POLICIES and bool(fixed_mode_assignments)
         )
 
         for client in clients:
             rem = remaining_epsilon[client.client_id]
+            client_mode_audit: dict[str, Any] = {}
             candidates = enumerate_candidates(
                 config=effective_selection,
                 client_id=client.client_id,
@@ -1415,6 +1427,7 @@ def _run_lenet5_policy(
                 policy=policy,
                 privacy_ledger=privacy_ledgers[client.client_id],
                 privacy_requirement=paper_client_privacy_requirement(),
+                mode_audit=client_mode_audit,
                 fast_response_deadline=dict(effective_selection.fast_client_deadlines).get(client.client_id),
                 fixed_privacy_profile=(
                     fixed_privacy_profiles.get(client.client_id)
@@ -1427,6 +1440,7 @@ def _run_lenet5_policy(
                     else None
                 ),
             )
+            mode_enumeration_audits.append(client_mode_audit)
             should_update = round_idx == 0 or round_idx % selection_period == 0
             candidate = None
             if not should_update:
@@ -1604,7 +1618,11 @@ def _run_lenet5_policy(
                 if frozen_mode_runtime_active
                 else effective_selection
             )
-            selected, profile_evaluation = choose_global_pareto_profile(
+            selected, profile_evaluation = (
+                choose_cloud_dp_pareto_profile
+                if policy == "full_dynfl" and effective_selection.cloud_dp_plan != "legacy"
+                else choose_global_pareto_profile
+            )(
                 config=profile_selection_config,
                 selected=selected,
                 client_samples=client_samples,
@@ -1660,6 +1678,39 @@ def _run_lenet5_policy(
                 client_edges={client.client_id: int(client.edge_id) for client in clients},
                 previous_choices=prior_choices,
             )
+
+        planned_liie_groups = _liie_planned_edge_aggregate_groups(
+            selected,
+            client_edges,
+            plan=effective_selection.liie_edge_dp_plan,
+            execute_real_he=execute_real_he,
+        )
+        if planned_liie_groups:
+            if not update_dp_execution_enabled:
+                raise ValueError("LIIE aggregate DP requires update DP execution to be enabled")
+            planned_ids = set().union(*planned_liie_groups.values())
+            selected = [
+                (
+                    client_id,
+                    replace(candidate, dp_execution_plan="aggregate")
+                    if client_id in planned_ids else candidate,
+                    pool,
+                    remaining,
+                )
+                for client_id, candidate, pool, remaining in selected
+            ]
+            # This opt-in protocol ablation changes the selected profile's
+            # estimated DP perturbation, but does not retrospectively claim
+            # that the original Pareto search optimized protocol choice.
+            profile_evaluation = evaluate_global_profile(
+                config=effective_selection,
+                selected=selected,
+                client_samples={client.client_id: float(client.samples) for client in clients},
+                client_edges=client_edges,
+                previous_choices=prior_choices,
+            )
+            for client_id in planned_ids:
+                round_decision_rows_by_client[client_id]["dp_execution_plan"] = "aggregate"
 
         selection_wall_time_sec = time.perf_counter() - selection_wall_started_at
         if policy in _FROZEN_MODE_POLICIES and not fixed_mode_assignments:
@@ -1743,6 +1794,7 @@ def _run_lenet5_policy(
                         and candidate.mode not in {"SKIP", frozen_mode_assignment}
                     ),
                     "mechanisms": candidate_mechanism_label(candidate),
+                    "dp_execution_plan": candidate.dp_execution_plan,
                     "update_mechanism": (
                         _reported_release_mechanism(
                             candidate,
@@ -1918,6 +1970,9 @@ def _run_lenet5_policy(
                     "actual_optimizer_steps",
                     "feature_dp_release_batches",
                     "feature_dp_sample_count",
+                    "feature_dimension_sum",
+                    "feature_noise_std_sum",
+                    "feature_expected_noise_norm_sum",
                     "feature_raw_norm_sum",
                     "feature_clipped_norm_sum",
                     "feature_noise_norm_sum",
@@ -1930,6 +1985,9 @@ def _run_lenet5_policy(
                 feature_samples = max(float(result.get("feature_dp_sample_count", 0)), 0.0)
                 if feature_samples > 0.0:
                     clipped_sum = float(result.get("feature_clipped_norm_sum", 0.0))
+                    row["feature_dimension_mean"] = float(result.get("feature_dimension_sum", 0.0)) / feature_samples
+                    row["feature_noise_std_mean"] = float(result.get("feature_noise_std_sum", 0.0)) / feature_samples
+                    row["feature_expected_noise_norm_mean"] = float(result.get("feature_expected_noise_norm_sum", 0.0)) / feature_samples
                     row["feature_raw_norm_mean"] = float(result.get("feature_raw_norm_sum", 0.0)) / feature_samples
                     row["feature_clipped_norm_mean"] = clipped_sum / feature_samples
                     row["feature_noise_norm_mean"] = float(result.get("feature_noise_norm_sum", 0.0)) / feature_samples
@@ -1937,6 +1995,9 @@ def _run_lenet5_policy(
                     row["feature_noise_to_clipped_ratio"] = float(result.get("feature_noise_norm_sum", 0.0)) / max(clipped_sum, 1e-12)
                     row["feature_clipping_fraction"] = float(result.get("feature_clipped_sample_count", 0)) / feature_samples
                 else:
+                    row["feature_dimension_mean"] = 0.0
+                    row["feature_noise_std_mean"] = 0.0
+                    row["feature_expected_noise_norm_mean"] = 0.0
                     row["feature_raw_norm_mean"] = 0.0
                     row["feature_clipped_norm_mean"] = 0.0
                     row["feature_noise_norm_mean"] = 0.0
@@ -2033,6 +2094,16 @@ def _run_lenet5_policy(
         )
         selected_by_id = {client_id: candidate for client_id, candidate, _candidates, _rem in selected}
         admitted_client_ids = set(flow_result.selected_client_ids)
+        # Fail closed: with aggregate DP the worker deliberately did not add
+        # individual packet noise. A partial cohort is not safe to fall back to
+        # independent DP or to silently publish a smaller aggregate.
+        for edge_id, expected in planned_liie_groups.items():
+            admitted = expected.intersection(admitted_client_ids)
+            if admitted != expected:
+                raise RuntimeError(
+                    f"LIIE SecAgg cohort on edge {edge_id} changed after dispatch; "
+                    "aborting unprotected aggregate publication"
+                )
         for client_id, candidate in selected_by_id.items():
             ledger = privacy_ledgers[client_id]
             row = round_decision_rows_by_client[client_id]
@@ -2777,8 +2848,10 @@ def _run_lenet5_policy(
             if (
                 update_dp_execution_enabled
                 and _liie_streaming_secagg_eligible(updates, execute_real_he=execute_real_he)
-                and not any(
-                    _candidate_worker_update_dp_applied(item[3], train_config.dp_update_mode)
+                and all(
+                    item[3] is not None
+                    and item[3].dp_execution_plan == "aggregate"
+                    and not _candidate_worker_update_dp_applied(item[3], train_config.dp_update_mode)
                     for item in updates
                 )
             ):
@@ -2831,6 +2904,12 @@ def _run_lenet5_policy(
                     "max_client_weight": float(secagg_audit.max_client_weight),
                 })
                 continue
+
+            if any(
+                item[3] is not None and item[3].dp_execution_plan == "aggregate"
+                for item in updates
+            ):
+                raise RuntimeError("Planned LIIE SecAgg must never fall back to raw Edge packets")
 
             prepared_updates: list[tuple[int, Any, int, Candidate | None]] = []
             for client_id, state_diff, sample_count, candidate in updates:
@@ -3233,6 +3312,15 @@ def _run_lenet5_policy(
         feature_dp_sample_count = sum(
             float(r.get("feature_dp_sample_count", 0.0)) for r in worker_results.values()
         )
+        feature_dimension_sum = sum(
+            float(r.get("feature_dimension_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_noise_std_sum = sum(
+            float(r.get("feature_noise_std_sum", 0.0)) for r in worker_results.values()
+        )
+        feature_expected_noise_norm_sum = sum(
+            float(r.get("feature_expected_noise_norm_sum", 0.0)) for r in worker_results.values()
+        )
         feature_raw_norm_sum = sum(
             float(r.get("feature_raw_norm_sum", 0.0)) for r in worker_results.values()
         )
@@ -3254,10 +3342,14 @@ def _run_lenet5_policy(
         feature_clipped_sample_count = sum(
             float(r.get("feature_clipped_sample_count", 0.0)) for r in worker_results.values()
         )
+        mode_selection_summary = _summarize_mode_selection_audit(
+            mode_enumeration_audits, selection_diagnostics, selected,
+        )
         round_rows.append(
             {
                 "policy": policy,
                 "round": round_idx,
+                "mode_selection_audit": json.dumps(mode_selection_summary, sort_keys=True),
                 "logical_time": logical_time,
                 "accounted_system_time_sec": accounted_system_time_sec,
                 "round_duration": flow_result.round_duration,
@@ -3269,6 +3361,11 @@ def _run_lenet5_policy(
                 "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
                 "feature_dp_release_batches": sum(r.get("feature_dp_release_batches", 0) for r in worker_results.values()),
                 "feature_dp_sample_count": feature_dp_sample_count,
+                "feature_dimension_mean": feature_dimension_sum / max(feature_dp_sample_count, 1.0),
+                "feature_noise_std_mean": feature_noise_std_sum / max(feature_dp_sample_count, 1.0),
+                "feature_expected_noise_norm_mean": (
+                    feature_expected_noise_norm_sum / max(feature_dp_sample_count, 1.0)
+                ),
                 "feature_raw_norm_mean": feature_raw_norm_sum / max(feature_dp_sample_count, 1.0),
                 "feature_clipped_norm_mean": feature_clipped_norm_sum / max(feature_dp_sample_count, 1.0),
                 "feature_noise_norm_mean": feature_noise_norm_sum / max(feature_dp_sample_count, 1.0),
@@ -3281,6 +3378,7 @@ def _run_lenet5_policy(
                 "aggregation_wall_time_sec": aggregation_wall_time_sec,
                 "secagg_wall_time_sec": secagg_wall_time_sec,
                 "secagg_call_count": secagg_call_count,
+                "liie_planned_edge_aggregate_groups": len(planned_liie_groups),
                 "evaluation_wall_time_sec": evaluation_wall_time_sec,
                 "accounted_phase_wall_time_sec": accounted_phase_wall_time_sec,
                 "unattributed_wall_time_sec": max(
@@ -3406,6 +3504,29 @@ def _run_lenet5_policy(
                 ),
                 "local_packet_dp_released_noise_norm": local_dp_noise_norm,
                 "aggregate_dp_release": int(aggregate_dp_noise_share_count > 0),
+                "cloud_dp_plan_chosen": selection_diagnostics.get(
+                    "selected_cloud_dp_plan", "legacy"
+                ),
+                # Branch-best predicted values.  These need not equal the
+                # combined-archive winner, which is logged in its own fields.
+                "cloud_dp_packet_branch_time": selection_diagnostics.get(
+                    "cloud_dp_branch_results", {}
+                ).get("packet", {}).get("time", ""),
+                "cloud_dp_packet_branch_J_learn": selection_diagnostics.get(
+                    "cloud_dp_branch_results", {}
+                ).get("packet", {}).get("J_learn", ""),
+                "cloud_dp_packet_branch_J_DP": selection_diagnostics.get(
+                    "cloud_dp_branch_results", {}
+                ).get("packet", {}).get("J_DP", ""),
+                "cloud_dp_aggregate_branch_time": selection_diagnostics.get(
+                    "cloud_dp_branch_results", {}
+                ).get("aggregate", {}).get("time", ""),
+                "cloud_dp_aggregate_branch_J_learn": selection_diagnostics.get(
+                    "cloud_dp_branch_results", {}
+                ).get("aggregate", {}).get("J_learn", ""),
+                "cloud_dp_aggregate_branch_J_DP": selection_diagnostics.get(
+                    "cloud_dp_branch_results", {}
+                ).get("aggregate", {}).get("J_DP", ""),
                 "aggregate_dp_protocol": (
                     "distributed_noise_before_ckks_aggregation"
                     if aggregate_dp_noise_share_count > 0
@@ -3946,6 +4067,7 @@ def _run_lenet5_policy(
             partial_summary["larger_channel_epsilon"] = release_account.ledger.current_epsilon()
         _write_csv(output_dir / "client_decisions.csv", decision_rows)
         _write_csv(output_dir / "candidate_mode_audit.csv", candidate_mode_audit_rows)
+        _write_csv(output_dir / "mode_selection_audit.csv", _mode_selection_csv_rows(round_rows))
         _write_csv(output_dir / "pareto_profile_audit.csv", pareto_profile_audit_rows)
         _write_csv(output_dir / "flow_events.csv", flow_event_rows)
         _write_csv(output_dir / "link_state.csv", link_state_rows)
@@ -4145,6 +4267,7 @@ def _run_lenet5_policy(
     _write_csv(output_dir / "round_metrics.csv", round_rows)
     _write_csv(output_dir / "client_decisions.csv", decision_rows)
     _write_csv(output_dir / "candidate_mode_audit.csv", candidate_mode_audit_rows)
+    _write_csv(output_dir / "mode_selection_audit.csv", _mode_selection_csv_rows(round_rows))
     _write_csv(output_dir / "pareto_profile_audit.csv", pareto_profile_audit_rows)
     _write_csv(output_dir / "flow_events.csv", flow_event_rows)
     _write_csv(output_dir / "link_state.csv", link_state_rows)
@@ -4950,6 +5073,35 @@ def _apply_aggregate_state_difference(
     return global_end, global_edge
 
 
+def _liie_planned_edge_aggregate_groups(
+    selected: list[tuple[int, Candidate, Any, Any]],
+    client_edges: dict[int, int],
+    *,
+    plan: str,
+    execute_real_he: bool,
+) -> dict[int, frozenset[int]]:
+    """Freeze complete homogeneous DP-only LIIE cohorts *before* workers run.
+
+    An eligible group must contain only LIIE clients with L_E_upd=dp and at
+    least two participants. Mixed or HE-protected groups stay independent.
+    This opt-in ablation is not the joint Pareto plan selector.
+    """
+    if plan not in {"independent", "aggregate"}:
+        raise ValueError("liie_edge_dp_plan must be independent or aggregate")
+    if plan == "independent" or execute_real_he:
+        return {}
+    by_edge: dict[int, list[tuple[int, Candidate]]] = {}
+    for client_id, candidate, _pool, _rem in selected:
+        if candidate.mode == "LIIE":
+            by_edge.setdefault(int(client_edges[client_id]), []).append((client_id, candidate))
+    return {
+        edge_id: frozenset(cid for cid, _candidate in group)
+        for edge_id, group in by_edge.items()
+        if len(group) >= 2
+        and all(_candidate_edge_update_mechanism(candidate) == "dp" for _cid, candidate in group)
+    }
+
+
 def _liie_streaming_secagg_eligible(
     updates: list[tuple[int, Any, int, Candidate | None]],
     *,
@@ -5655,6 +5807,83 @@ def _mode_reaches_cloud(mode: str) -> bool:
     if spec is None:
         return False
     return spec.client_target == "cloud" or bool(spec.edge_to_cloud_objects) or spec.cloud_work > 0.0
+
+
+def _summarize_mode_selection_audit(
+    client_audits: list[dict[str, Any]],
+    search: dict[str, Any],
+    selected: list[tuple[int, Candidate, list[Candidate], float]],
+) -> dict[str, dict[str, Any]]:
+    """Non-invasive staged counts; rejection flags are NOT mutually exclusive."""
+    result: dict[str, dict[str, Any]] = {}
+    for mode in MODE_SPECS:
+        row: dict[str, Any] = {}
+        for stage in ("generated", "after_fl_first", "after_deadline",
+                      "after_policy", "returned"):
+            row[stage] = sum(int(a.get("stages", {}).get(stage, {}).get(mode, 0))
+                             for a in client_audits)
+        row["feasible"] = sum(int(a.get("feasible", {}).get(mode, 0))
+                              for a in client_audits)
+        row["budget_feasible"] = sum(int(a.get("budget_feasible", {}).get(mode, 0))
+                                     for a in client_audits)
+        row["rejection_flags"] = {
+            reason: sum(int(a.get("rejections", {}).get(reason, {}).get(mode, 0))
+                        for a in client_audits)
+            for reason in ("resource", "memory", "privacy", "epsilon_limit",
+                           "risk_diagnostic", "time_diagnostic",
+                           "edge_diagnostic", "cloud_diagnostic")
+        }
+        row["generation_counts"] = {
+            reason: sum(int(a.get("generation_counts", {}).get(reason, {}).get(mode, 0))
+                        for a in client_audits)
+            for reason in ("mechanism_assignments", "fixed_profile_mismatches",
+                           "missing_fixed_sigma", "budget_calibration_failures")
+        }
+        row["generation_exclusions"] = {
+            reason: sum(a.get("generation_exclusions", {}).get(mode) == reason
+                        for a in client_audits)
+            for reason in ("excluded_mode", "trusted_edge_or_mainline_excludes_LIC",
+                           "cloud_participation_required",
+                           "no_allowed_mechanism_assignment")
+        }
+        before = search.get("mode_pool_before_stability", {}).get(mode, {})
+        after = search.get("mode_pool_after_stability", {}).get(mode, {})
+        row["search_pool_before_stability"] = before.get("candidates", "")
+        row["search_pool_candidates"] = after.get("candidates", "")
+        row["search_pool_clients"] = after.get("clients", "")
+        row["archive_profiles_containing_mode"] = search.get(
+            "mode_archive_presence", {}).get(mode, "")
+        row["chosen_clients"] = sum(candidate.mode == mode
+                                    for _cid, candidate, _pool, _remaining in selected)
+        branches = search.get("cloud_dp_mode_branches", {})
+        for name in ("aggregate", "packet"):
+            branch = branches.get(name, {})
+            row[f"{name}_search_pool_candidates"] = branch.get(
+                "pool", {}).get(mode, {}).get("candidates", "")
+            row[f"{name}_archive_profiles"] = branch.get(
+                "archive_presence", {}).get(mode, "")
+            row[f"{name}_branch_winner_clients"] = branch.get(
+                "branch_winner", {}).get(mode, "")
+        result[mode] = row
+    return result
+
+
+def _mode_selection_csv_rows(round_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Derive the standalone audit from checkpointed round_metrics rows."""
+    rows: list[dict[str, Any]] = []
+    for record in round_rows:
+        payload = record.get("mode_selection_audit", "")
+        if not payload:
+            continue
+        audit = json.loads(payload) if isinstance(payload, str) else payload
+        for mode, row in audit.items():
+            rows.append({
+                "policy": record.get("policy", ""), "round": record.get("round", ""),
+                "mode": mode,
+                **{k: json.dumps(v, sort_keys=True) if isinstance(v, dict) else v
+                   for k, v in row.items()},
+            })
+    return rows
 
 
 def _pareto_profile_audit_rows(

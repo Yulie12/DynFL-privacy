@@ -1187,6 +1187,19 @@ def _protect_tensor_dp(
             diagnostics["feature_dp_sample_count"] = int(
                 diagnostics.get("feature_dp_sample_count", 0)
             ) + batch_size
+            # Per-sample feature dimension and the exact injected Gaussian
+            # standard deviation; these are private experiment diagnostics,
+            # not extra releases or public DP output.
+            feature_dim = int(tensor[0].numel()) if tensor.ndim >= 2 else int(tensor.numel())
+            diagnostics["feature_dimension_sum"] = int(
+                diagnostics.get("feature_dimension_sum", 0)
+            ) + batch_size * feature_dim
+            diagnostics["feature_noise_std_sum"] = float(
+                diagnostics.get("feature_noise_std_sum", 0.0)
+            ) + batch_size * float(sigma)
+            diagnostics["feature_expected_noise_norm_sum"] = float(
+                diagnostics.get("feature_expected_noise_norm_sum", 0.0)
+            ) + batch_size * float(sigma) * math.sqrt(feature_dim)
             diagnostics["feature_raw_norm_sum"] = float(
                 diagnostics.get("feature_raw_norm_sum", 0.0)
             ) + float(raw_norms.sum().item())

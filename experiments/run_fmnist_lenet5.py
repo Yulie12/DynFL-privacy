@@ -137,6 +137,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
     parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate", "global_release"])
     parser.add_argument("--update-mechanisms", nargs="+", choices=["dp", "he3", "dp_he3"], default=["dp", "he3"])
+    parser.add_argument(
+        "--liie-edge-dp-plan", choices=["independent", "aggregate"],
+        default="independent",
+        help="Experimental opt-in Edge SecAgg DP ablation; not yet a Pareto action.",
+    )
+    parser.add_argument(
+        "--cloud-dp-plan", choices=["legacy", "packet", "aggregate", "pareto"],
+        default="legacy",
+        help="Opt-in whole-profile Cloud DP release selection; legacy preserves old execution.",
+    )
     parser.add_argument("--update-protection-goal", choices=["packet_protection", "released_model_dp"], default="packet_protection")
     parser.add_argument(
         "--mainline-fusion",
@@ -361,6 +371,8 @@ def main() -> None:
         assume_encoder_feasible=args.assume_encoder_feasible,
         output_dir=str(output_root),
         update_mechanism_options=tuple(args.update_mechanisms),
+        liie_edge_dp_plan=args.liie_edge_dp_plan,
+        cloud_dp_plan=args.cloud_dp_plan,
         update_protection_goal=(
             "released_model_dp" if args.mainline_fusion else args.update_protection_goal
         ),

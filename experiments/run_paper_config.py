@@ -38,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-step", type=float,
                         help="Diagnostic override of the cloud server step (default 1.0)")
     parser.add_argument("--he-execution", choices=["real", "profiled"])
+    parser.add_argument("--liie-edge-dp-plan", choices=["independent", "aggregate"])
+    parser.add_argument("--cloud-dp-plan", choices=["legacy", "packet", "aggregate", "pareto"])
     parser.add_argument("--output-root")
     parser.add_argument(
         "--equal-optimizer-work-control",
@@ -92,6 +94,8 @@ def build_command(
     server_step: float | None = None,
     disable_update_dp: bool = False,
     exclude_modes: list[str] | None = None,
+    liie_edge_dp_plan: str | None = None,
+    cloud_dp_plan: str | None = None,
 ) -> list[str]:
     if config.get("execution_protocol") is not None:
         raise ValueError("Legacy fixed Method2 execution protocols are not part of the current DynFL mainline")
@@ -157,6 +161,8 @@ def build_command(
         "min_edge_cloud_fusion_ratio": system["min_edge_cloud_fusion_ratio"],
         "dp_accounting_mode": privacy["accounting_mode"],
         "update_protection_goal": privacy.get("update_protection_goal", "packet_protection"),
+        "liie_edge_dp_plan": liie_edge_dp_plan or privacy.get("liie_edge_dp_plan", "independent"),
+        "cloud_dp_plan": cloud_dp_plan or privacy.get("cloud_dp_plan", "legacy"),
         "initial_epsilon": privacy["initial_epsilon"],
         "dp_upd_epsilon": privacy["update_epsilon_budget"],
         "dp_update_epsilon_budget": privacy["update_epsilon_budget"],
@@ -248,6 +254,8 @@ def main() -> None:
             resume_from_run=args.resume_from_run,
             equal_optimizer_work_control=args.equal_optimizer_work_control,
             server_step=args.server_step,
+            liie_edge_dp_plan=args.liie_edge_dp_plan,
+            cloud_dp_plan=args.cloud_dp_plan,
             disable_update_dp=args.disable_update_dp,
             exclude_modes=args.exclude_modes,
         )

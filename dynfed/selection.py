@@ -152,6 +152,11 @@ class SelectionConfig:
     allow_he: bool = True
     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3")
     update_protection_goal: str = "packet_protection"
+    # Opt-in LIIE protocol ablation. This is NOT yet a joint Pareto action.
+    liie_edge_dp_plan: str = "independent"
+    # Uniform Cloud release protocol chosen jointly with the entire mode profile.
+    # Legacy preserves the prior runtime; pareto evaluates both complete profiles.
+    cloud_dp_plan: str = "legacy"
     assume_encoder_feasible: bool = False
     minibatch_reference_samples: float = 600.0
     edge_cpu_limit: float = 15.0  # per-edge CPU capacity
@@ -244,6 +249,7 @@ class Candidate:
     global_release_required: bool = False
     feature_noise_multiplier: float | None = None
     update_noise_multiplier: float | None = None
+    dp_execution_plan: str = "independent"
 
     @property
     def feasible(self) -> bool:
@@ -840,15 +846,34 @@ def enumerate_candidates(
     fast_response_deadline: float | None = None,
     fixed_privacy_profile: tuple[dict[str, str], float | None] | None = None,
     frozen_mode: str | None = None,
+    mode_audit: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     validate_update_protection_goal(config, policy)
     candidates: list[Candidate] = []
+    # Counts describe candidates, not clients. Stages are snapshots; their
+    # differences must not be conflated with Pareto rejection.
+    audit_stages: dict[str, dict[str, int]] = {}
+    audit_exclusions: dict[str, str] = {}
+    audit_counts: dict[str, dict[str, int]] = {
+        name: {mode: 0 for mode in MODE_SPECS}
+        for name in ("mechanism_assignments", "fixed_profile_mismatches",
+                     "missing_fixed_sigma", "budget_calibration_failures")
+    }
+    def snapshot(stage: str) -> None:
+        audit_stages[stage] = {
+            mode: sum(item.mode == mode for item in candidates)
+            for mode in MODE_SPECS
+        }
+
     for mode, spec in MODE_SPECS.items():
         if mode in config.excluded_modes:
+            audit_exclusions[mode] = "excluded_mode"
             continue
         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+            audit_exclusions[mode] = "trusted_edge_or_mainline_excludes_LIC"
             continue
         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
+            audit_exclusions[mode] = "cloud_participation_required"
             continue
         policy_allow_none = allow_none or policy in {
             "performance_only",
@@ -865,10 +890,14 @@ def enumerate_candidates(
             mainline_fusion=config.mainline_fusion,
             privacy_requirement=privacy_requirement,
         )
+        audit_counts["mechanism_assignments"][mode] = len(assignments)
+        if not assignments:
+            audit_exclusions[mode] = "no_allowed_mechanism_assignment"
         for mechanisms, link_mechanisms in assignments:
             if fixed_privacy_profile is not None:
                 fixed_mechanisms, _fixed_sigma = fixed_privacy_profile
                 if mechanisms != fixed_mechanisms:
+                    audit_counts["fixed_profile_mismatches"][mode] += 1
                     continue
             update_events = sum(
                 count
@@ -882,6 +911,7 @@ def enumerate_candidates(
             fixed_sigma = fixed_privacy_profile[1] if fixed_privacy_profile is not None else None
             if update_events > 0 and fixed_privacy_profile is not None:
                 if fixed_sigma is None:
+                    audit_counts["missing_fixed_sigma"][mode] += 1
                     continue
                 noise_tiers = (float(fixed_sigma),)
             elif update_events > 0 and privacy_ledger is not None:
@@ -896,6 +926,7 @@ def enumerate_candidates(
                         planned_update_events
                     )
                 except ValueError:
+                    audit_counts["budget_calibration_failures"][mode] += 1
                     continue
                 # Step44: lifetime-aware calibration already reserves the
                 # remaining candidate-level DP exposure horizon.  Enumerate
@@ -930,6 +961,7 @@ def enumerate_candidates(
                         fast_response_deadline=fast_response_deadline,
                     )
                 )
+    snapshot("generated")
     if config.fl_first_split_on_demand and _policy_uses_fl_first_mode_admissibility(policy):
         full_local_modes = {"LIIE", "LIIC", "LIIEIIIC"}
         full_local_device_feasible = any(
@@ -942,14 +974,57 @@ def enumerate_candidates(
     # Q72/Q73: fast-response QoS is a hard feasibility gate only for clients
     # that explicitly carry a per-client deadline. Ordinary clients keep time
     # in the latency objective and are not rejected by a universal time limit.
+    snapshot("after_fl_first")
     if fast_response_deadline is not None:
         candidates = [candidate for candidate in candidates if candidate.feasible_time]
+    snapshot("after_deadline")
     candidates = _apply_policy_candidate_filters(config, policy, candidates)
+    snapshot("after_policy")
     if frozen_mode is not None:
         candidates = [
             candidate for candidate in candidates
             if candidate.mode == frozen_mode
         ]
+    snapshot("returned")
+    if mode_audit is not None:
+        mode_audit.clear()
+        mode_audit["stages"] = audit_stages
+        mode_audit["generation_exclusions"] = audit_exclusions
+        mode_audit["generation_counts"] = audit_counts
+        mode_audit["feasible"] = {
+            mode: sum(item.mode == mode and item.feasible for item in candidates)
+            for mode in MODE_SPECS
+        }
+        mode_audit["budget_feasible"] = {
+            mode: sum(
+                item.mode == mode and item.feasible
+                and item.epsilon_used <= remaining_epsilon + 1e-12
+                for item in candidates
+            ) for mode in MODE_SPECS
+        }
+        mode_audit["rejections"] = {
+            reason: {
+                mode: sum(item.mode == mode and not getattr(item, flag)
+                          for item in candidates)
+                for mode in MODE_SPECS
+            }
+            for reason, flag in (
+                ("resource", "feasible_resource"),
+                ("memory", "feasible_memory"),
+                ("privacy", "feasible_privacy"),
+                ("risk_diagnostic", "feasible_risk"),
+                ("time_diagnostic", "feasible_time"),
+                ("edge_diagnostic", "feasible_edge"),
+                ("cloud_diagnostic", "feasible_cloud"),
+            )
+        }
+        mode_audit["rejections"]["epsilon_limit"] = {
+            mode: sum(item.mode == mode and item.epsilon_used > remaining_epsilon + 1e-12
+                      for item in candidates)
+            for mode in MODE_SPECS
+        }
+        # Resource/privacy/memory are hard gates; risk/time/edge/cloud flags
+        # are separately reported and are NOT automatically hard rejections.
     return candidates
 
 
@@ -1221,6 +1296,29 @@ def choose_knee_point(candidates: list[Candidate]) -> Candidate:
     return max(frontier, key=lambda item: (line_distance(points[frontier.index(item)]), item.accuracy, -item.time))
 
 
+def _mode_search_pool_audit(pools: dict[int, list[Candidate]]) -> dict[str, dict[str, int]]:
+    """Count the actual per-client candidates admitted to a search branch."""
+    return {
+        mode: {
+            "candidates": sum(item.mode == mode for pool in pools.values() for item in pool),
+            "clients": sum(any(item.mode == mode for item in pool) for pool in pools.values()),
+        }
+        for mode in MODE_SPECS
+    }
+
+
+def _mode_profile_distribution(profile: dict[int, Candidate]) -> dict[str, int]:
+    return {mode: sum(item.mode == mode for item in profile.values()) for mode in MODE_SPECS}
+
+
+def _mode_archive_audit(archive: list[ProfileEvaluation] | tuple[ProfileEvaluation, ...]) -> dict[str, int]:
+    return {
+        mode: sum(any(item.mode == mode for item in evaluation.profile.values())
+                  for evaluation in archive)
+        for mode in MODE_SPECS
+    }
+
+
 def choose_global_pareto_profile(
     *,
     config: SelectionConfig,
@@ -1314,6 +1412,10 @@ def choose_global_pareto_profile(
                         _candidate_update_mechanism_population(pools)
                     ),
                     "search_method": search_method,
+                    "mode_pool_before_stability": _mode_search_pool_audit(pools_before_stability),
+                    "mode_pool_after_stability": _mode_search_pool_audit(pools),
+                    "mode_archive_presence": _mode_archive_audit(()),
+                    "mode_chosen": _mode_profile_distribution(fallback_profile),
                 }
             )
         rewritten = [
@@ -1703,6 +1805,10 @@ def choose_global_pareto_profile(
                 ),
                 "seed_evaluations": tuple(seed_evaluations),
                 "search_method": search_method,
+                "mode_pool_before_stability": _mode_search_pool_audit(pools_before_stability),
+                "mode_pool_after_stability": _mode_search_pool_audit(pools),
+                "mode_archive_presence": _mode_archive_audit(archive),
+                "mode_chosen": _mode_profile_distribution(chosen.profile),
             }
         )
     rewritten = [
@@ -1711,6 +1817,129 @@ def choose_global_pareto_profile(
     ]
     return rewritten, chosen
 
+
+
+def _candidate_cloud_dp_eligible(candidate: Candidate) -> bool:
+    """Stage-2 scope: hierarchical LIIEIIIC E->C already carrying Cloud DP.
+
+    LIIC client-packet DP requires moving noise generation into the client
+    worker before any raw upload, so is deliberately left on its existing
+    aggregate-only route until the separate direct-Cloud protocol is ready.
+    """
+    return (
+        candidate.mode == "LIIEIIIC"
+        and _candidate_uses_secure_aggregate_update_dp_for_selection(candidate)
+    )
+
+
+def _with_cloud_plan(candidate: Candidate, plan: str) -> Candidate:
+    if plan not in {"packet", "aggregate"}:
+        raise ValueError("cloud plan must be packet or aggregate")
+    if _candidate_cloud_dp_eligible(candidate):
+        return replace(candidate, dp_execution_plan="cloud_" + plan)
+    return candidate
+
+
+def choose_cloud_dp_pareto_profile(
+    *,
+    config: SelectionConfig,
+    selected: list[tuple[int, Candidate, list[Candidate], float]],
+    client_samples: dict[int, float],
+    client_edges: dict[int, int] | None = None,
+    previous_choices: dict[int, Candidate] | None = None,
+    objective: str = "pareto",
+    search_method: str = "bounded",
+    diagnostics: dict[str, Any] | None = None,
+    previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] | None = None,
+    fusion_objective_enabled: bool = False,
+) -> tuple[list[tuple[int, Candidate, list[Candidate], float]], ProfileEvaluation]:
+    """Search whole-mode profiles under both *uniform* Cloud release plans.
+
+    This intentionally does NOT permit heterogeneous plans inside an E->C
+    packet. It reoptimizes the entire mode profile in each feasible branch and
+    selects from their combined non-dominated archive using the existing
+    Tchebycheff decision rule. No per-client noise plan is changed afterward.
+    """
+    plan = config.cloud_dp_plan
+    if plan not in {"legacy", "packet", "aggregate", "pareto"}:
+        raise ValueError("cloud_dp_plan must be legacy, packet, aggregate, or pareto")
+    if plan == "legacy":
+        return choose_global_pareto_profile(
+            config=config, selected=selected, client_samples=client_samples,
+            client_edges=client_edges, previous_choices=previous_choices,
+            objective=objective, search_method=search_method,
+            diagnostics=diagnostics, previous_client_updates=previous_client_updates,
+            fusion_objective_enabled=fusion_objective_enabled,
+        )
+    branches = ("packet", "aggregate") if plan == "pareto" else (plan,)
+    outcomes = []
+    for branch in branches:
+        mapped = [
+            (cid, _with_cloud_plan(current, branch),
+             [_with_cloud_plan(c, branch) for c in pool], remaining)
+            for cid, current, pool, remaining in selected
+        ]
+        branch_diagnostics: dict[str, Any] = {}
+        result, chosen = choose_global_pareto_profile(
+            config=config, selected=mapped, client_samples=client_samples,
+            client_edges=client_edges, previous_choices=previous_choices,
+            objective=objective, search_method=search_method,
+            diagnostics=branch_diagnostics, previous_client_updates=previous_client_updates,
+            fusion_objective_enabled=fusion_objective_enabled,
+        )
+        outcomes.append((branch, result, chosen, branch_diagnostics))
+    if len(outcomes) == 1:
+        branch, result, chosen, branch_diagnostics = outcomes[0]
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update(branch_diagnostics)
+            diagnostics["selected_cloud_dp_plan"] = branch
+        return result, chosen
+    combined_evaluations = [
+        replace(evaluation, profile_signature=(branch_index, *evaluation.profile_signature))
+        for branch_index, (_branch, _result, _chosen, d) in enumerate(outcomes)
+        for evaluation in d.get("archive", ())
+    ]
+    archive = (_pareto_archive(combined_evaluations, config.pareto_archive_size)
+               if objective == "pareto" else
+               _latency_archive(combined_evaluations, config.pareto_archive_size))
+    if not archive:
+        raise RuntimeError("Cloud plan comparison produced no feasible profile")
+    winner = (_choose_tchebycheff(archive, config.pareto_norm_eps)
+              if objective == "pareto" else min(archive, key=lambda x: x.system_latency))
+    branch = outcomes[int(winner.profile_signature[0])][0]
+    chosen_result = next(result for name, result, _chosen, _d in outcomes if name == branch)
+    chosen_diagnostics = next(d for name, _result, _chosen, d in outcomes if name == branch)
+    # The combined winner may be an archived profile rather than the branch's
+    # own winner. Rebuild selected tuples from the winner's actual candidates.
+    chosen_result = [
+        (cid, winner.profile[cid], pool, remaining)
+        for cid, _current, pool, remaining in chosen_result
+    ]
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(chosen_diagnostics)
+        diagnostics["archive"] = tuple(archive)
+        diagnostics["chosen"] = winner
+        diagnostics["selected_cloud_dp_plan"] = branch
+        diagnostics["cloud_dp_mode_branches"] = {
+            name: {
+                "pool": d.get("mode_pool_after_stability", {}),
+                "archive_presence": d.get("mode_archive_presence", {}),
+                "branch_winner": d.get("mode_chosen", {}),
+            }
+            for name, _result, _evaluation, d in outcomes
+        }
+        # Combined winner may differ from the branch-local winner.
+        diagnostics["mode_chosen"] = _mode_profile_distribution(winner.profile)
+        diagnostics["mode_archive_presence"] = _mode_archive_audit(archive)
+        diagnostics["cloud_dp_branch_results"] = {
+            name: {"time": evaluation.system_latency,
+                   "J_learn": evaluation.system_omega,
+                   "J_DP": evaluation.system_dp}
+            for name, _result, evaluation, _d in outcomes
+        }
+    return chosen_result, winner
 
 def _run_nsga2_search(
     *,
@@ -3319,6 +3548,8 @@ def _candidate_uses_secure_aggregate_update_dp_for_selection(candidate: Candidat
     DP (with or without HE).  Other modes only use this path when DP and HE are
     jointly selected, preserving the legacy secure-aggregate packet contract.
     """
+    if candidate.dp_execution_plan == "cloud_packet":
+        return False
     mechanism = candidate_link_mechanism(candidate, "L_C_upd")
     if candidate.mode == "LIIEIIIC":
         mechanism = candidate_link_mechanism(candidate, "E_C_upd")
@@ -3328,12 +3559,12 @@ def _candidate_uses_secure_aggregate_update_dp_for_selection(candidate: Candidat
 
 
 def _candidate_uses_edge_local_exact_update_dp(candidate: Candidate) -> bool:
-    """LIIE L->E DP is now performed in Worker; no later aggregate DP credit.
-
-    The Edge cannot re-noise the same packet.  A future genuine masked-before-
-    exposure LIIE protocol would need its own independently audited candidate.
-    """
-    return False
+    """Explicitly planned LIIE DP-only secure aggregate, never worker-DP input."""
+    return (
+        candidate.mode == "LIIE"
+        and candidate.dp_execution_plan == "aggregate"
+        and candidate_link_mechanism(candidate, "L_E_upd") == "dp"
+    )
 
 
 def _candidate_has_update_dp(candidate: Candidate) -> bool:
@@ -3438,10 +3669,36 @@ def _global_dp_perturbation_cost(
         )
         cost += dim * (sigma * sensitivity_unweighted * max_weight) ** 2
 
+    # An explicitly selected independent E->C packet is formed *after* its
+    # Edge group has averaged individually clipped client contributions.
+    # Its sensitivity is 2 C max_i w_(i|e), not the direct-client 2 C.
+    packet_group_clients: set[int] = set()
+    edge_packet_groups: dict[tuple[int, str, str], list[int]] = {}
+    for cid in cloud_clients:
+        candidate = profile[cid]
+        if candidate.dp_execution_plan != "cloud_packet" or candidate.mode not in EDGE_CLOUD_MODES:
+            continue
+        key = (int(client_edges.get(cid, -1)), candidate.mode,
+               candidate_link_mechanism(candidate, "E_C_upd"))
+        edge_packet_groups.setdefault(key, []).append(cid)
+    for members in edge_packet_groups.values():
+        total = sum(max(float(client_samples.get(cid, 0)), 0.0) for cid in members)
+        if total <= 0:
+            continue
+        cloud_weight = sum(cloud_weights[cid] for cid in members)
+        max_within_weight = max(max(float(client_samples.get(cid, 0)), 0.0) / total
+                                for cid in members)
+        group_sigma = max(float(profile[cid].update_noise_multiplier or default_sigma)
+                          for cid in members)
+        cost += dim * (cloud_weight * group_sigma * sensitivity_unweighted * max_within_weight) ** 2
+        packet_group_clients.update(members)
+
     # Cloud-bound DP that is not on the aggregate-boundary path keeps legacy
     # independent packet noise.  This is primarily the split/offload family.
     for client_id in cloud_clients:
         candidate = profile[client_id]
+        if client_id in packet_group_clients:
+            continue
         if _candidate_uses_secure_aggregate_update_dp_for_selection(candidate):
             continue
         weight = cloud_weights[client_id]
@@ -3460,6 +3717,9 @@ def _global_dp_perturbation_cost(
             sigma = max(float(candidate.update_noise_multiplier or default_sigma), 0.0)
             cost += dim * (weight * sigma * sensitivity_unweighted) ** 2
 
+    # LIIE publishes either individual DP packets or one explicitly planned
+    # Edge SecAgg + aggregate-DP release. Edge-group eligibility is verified
+    # before dispatch and again before publishing the release.
     # LIIE publishes locally DP-protected individual L->E packets.  Edge
     # averaging is only post-processing, so independently sampled packet noise
     # combines in variance (sum of squared *actual edge weights*).  Include
@@ -3477,14 +3737,31 @@ def _global_dp_perturbation_cost(
         group_mass = sum(max(float(client_samples.get(cid, 0.0)), 0.0) for cid in members)
         if group_mass <= 0.0 or admitted_mass <= 0.0:
             continue
-        group_cost = 0.0
-        for cid in members:
-            candidate = profile[cid]
-            if not mechanism_uses_dp(candidate_link_mechanism(candidate, "L_E_upd")):
-                continue
-            weight = max(float(client_samples.get(cid, 0.0)), 0.0) / group_mass
-            sigma = max(float(candidate.update_noise_multiplier or default_sigma), 0.0)
-            group_cost += dim * (weight * sigma * sensitivity_unweighted) ** 2
+        aggregate_members = [
+            cid for cid in members
+            if _candidate_uses_edge_local_exact_update_dp(profile[cid])
+        ]
+        if aggregate_members:
+            if len(aggregate_members) != len(members) or len(members) < 2:
+                raise ValueError("Inconsistent LIIE aggregate DP cohort in profile")
+            max_weight = max(
+                max(float(client_samples.get(cid, 0.0)), 0.0) / group_mass
+                for cid in members
+            )
+            group_sigma = max(
+                max(float(profile[cid].update_noise_multiplier or default_sigma), 0.0)
+                for cid in members
+            )
+            group_cost = dim * (group_sigma * sensitivity_unweighted * max_weight) ** 2
+        else:
+            group_cost = 0.0
+            for cid in members:
+                candidate = profile[cid]
+                if not mechanism_uses_dp(candidate_link_mechanism(candidate, "L_E_upd")):
+                    continue
+                weight = max(float(client_samples.get(cid, 0.0)), 0.0) / group_mass
+                sigma = max(float(candidate.update_noise_multiplier or default_sigma), 0.0)
+                group_cost += dim * (weight * sigma * sensitivity_unweighted) ** 2
         cost += (group_mass / admitted_mass) * group_cost
 
     return float(cost)
@@ -4174,10 +4451,10 @@ def _evaluation_key(evaluation: ProfileEvaluation) -> tuple:
 
 
 def _candidate_key(candidate: Candidate) -> tuple:
-    return (
-        candidate.mode,
-        tuple(sorted((candidate.link_mechanisms or candidate.mechanisms).items())),
-    )
+    base = (candidate.mode, tuple(sorted((candidate.link_mechanisms or candidate.mechanisms).items())))
+    # Preserve the legacy two-field keys in tests/old checkpoints, but keep
+    # opt-in publication choices distinct when present.
+    return base if candidate.dp_execution_plan == "independent" else (*base, candidate.dp_execution_plan)
 
 
 def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
