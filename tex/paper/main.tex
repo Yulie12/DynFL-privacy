@@ -1395,7 +1395,7 @@ orders equal Tchebycheff values by latency, error cost, and profile identity.
 
 \subsection{Empirical Calibration of the Error Cost Estimate}
 For every Ours run, the value of
-$\widehat\Omega_{\mathrm{sys}}^t$ is recorded before the selected round update.
+$\widehat J_{\mathrm{learn}}^t$ is recorded before the selected round update.
 It is paired with the test loss after that update, the change in test loss, and
 the change in test accuracy. Spearman and Kendall correlations are computed
 within each seed and after standardizing each trajectory within its seed. This
@@ -1464,7 +1464,7 @@ privacy loss, final accuracy, and last 10 round accuracy.
 The ablation study compares the complete method with three variants. No Global
 Coordination replaces the global profile search with independent client
 selection. No Error Cost Estimate removes
-\(\widehat{\Omega}_{\mathrm{sys}}\) from the objectives. Fixed LIIEIIIC
+\(\widehat J_{\mathrm{learn}}\) from the objectives. Fixed LIIEIIIC
 restricts every feasible client to the LIIEIIIC
 mode while retaining the same training and feasibility checks.
 

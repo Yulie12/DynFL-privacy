@@ -4,6 +4,7 @@ import csv
 import json
 import math
 import random
+import time
 
 import torch
 from dataclasses import dataclass, replace
@@ -68,6 +69,11 @@ PRIVACY_RISK_OBJECTS = frozenset(
     obj for obj, mechanisms in MECHANISMS_BY_OBJECT.items()
     if mechanisms != ("none",)
 )
+
+
+def _perf_add(profiler: dict[str, Any] | None, key: str, value: float = 1.0) -> None:
+    if profiler is not None:
+        profiler[key] = profiler.get(key, 0) + value
 
 
 @dataclass(frozen=True)
@@ -668,7 +674,6 @@ def run_selection_experiment(
                             "feature_perturbation_objective": evaluation.feature_perturbation,
                             "fusion_bound_objective": evaluation.fusion_bound,
                             "learning_error_objective": evaluation.system_learning_error,
-                            "system_omega_objective": evaluation.system_learning_error,  # legacy column name
                             "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
                             "he_clients": sum(
                                 candidate_has_he(candidate)
@@ -795,7 +800,6 @@ def run_selection_experiment(
                     "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                     "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                     "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
-                    "system_omega_objective": profile_evaluation.system_learning_error if profile_evaluation else "",  # legacy column name
                     "cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
                     "admitted_client_ids_objective": ";".join(str(cid) for cid in profile_evaluation.admitted_client_ids) if profile_evaluation else "",
                 }
@@ -1349,6 +1353,30 @@ def choose_global_pareto_profile(
         empty = ProfileEvaluation({}, 0.0, 0.0, 0.0, ())
         return selected, empty
 
+    perf: dict[str, Any] = {
+        "search_iterations": 0,
+        "evaluate_calls": 0,
+        "evaluate_cache_hits": 0,
+        "evaluate_cache_misses": 0,
+        "evaluate_profile_sec": 0.0,
+        "replacement_priority_calls": 0,
+        "replacement_priority_sec": 0.0,
+        "incremental_jlearn_calls": 0,
+        "incremental_jlearn_sec": 0.0,
+        "full_jlearn_fallback_calls": 0,
+        "full_jlearn_fallback_sec": 0.0,
+        "replacement_stats_build_sec": 0.0,
+        "flow_objective_update_sec": 0.0,
+        "neighbor_candidates_generated": 0,
+        "neighbor_candidates_retained": 0,
+        "neighbor_generation_sec": 0.0,
+        "neighbor_evaluation_sec": 0.0,
+        "pareto_archive_calls": 0,
+        "pareto_archive_sec": 0.0,
+        "dominance_compare_count": 0,
+        "beam_sec": 0.0,
+    }
+    search_started_at = time.perf_counter()
     previous_choices = previous_choices or {}
     client_edges = client_edges or {}
     pools: dict[int, list[Candidate]] = {}
@@ -1430,6 +1458,7 @@ def choose_global_pareto_profile(
             pools,
             previous_choices,
             client_samples=client_samples,
+            client_edges=client_edges,
         )
         if objective == "pareto"
         else _initial_latency_profiles(pools, previous_choices)
@@ -1452,18 +1481,12 @@ def choose_global_pareto_profile(
         previous_choices,
         client_order,
     )
-    sample_total = max(sum(float(value) for value in client_samples.values()), 1.0)
     candidate_tokens = {
         client_id: {
             _candidate_key(candidate): token
             for token, candidate in enumerate(pools[client_id])
         }
         for client_id in client_order
-    }
-    omega_components_by_candidate = {
-        id(candidate): _local_omega_components(candidate, config)
-        for candidates in pools.values()
-        for candidate in candidates
     }
 
     def signature(profile: dict[int, Candidate]) -> tuple[int, ...]:
@@ -1476,45 +1499,44 @@ def choose_global_pareto_profile(
 
     def evaluate(
         profile: dict[int, Candidate],
-        omega_stats: _ProfileOmegaStats | None = None,
         profile_signature: tuple[int, ...] = (),
         flow_objectives: tuple[tuple[int, ...], float] | None = None,
     ) -> ProfileEvaluation:
         profile_key = profile_signature or signature(profile)
+        _perf_add(perf, "evaluate_calls")
         cached = evaluation_cache.get(profile_key)
         if cached is not None:
+            _perf_add(perf, "evaluate_cache_hits")
             return cached
+        _perf_add(perf, "evaluate_cache_misses")
+        started_at = time.perf_counter()
         evaluated = _evaluate_profile(
             config,
             profile,
             client_samples,
             client_edges,
             previous_choices,
-            omega_stats=omega_stats,
             profile_signature=profile_key,
             flow_inputs_by_candidate=flow_inputs_by_candidate,
             flow_objectives=flow_objectives,
             previous_client_updates=previous_client_updates,
             fusion_objective_enabled=fusion_objective_enabled,
         )
+        _perf_add(perf, "evaluate_profile_sec", time.perf_counter() - started_at)
         evaluation_cache[profile_key] = evaluated
         return evaluated
 
-    archive_selector = (
-        _pareto_archive
-        if objective == "pareto"
-        else _latency_archive
-    )
+    def archive_selector(items: list[ProfileEvaluation], limit: int) -> list[ProfileEvaluation]:
+        if objective == "pareto":
+            return _pareto_archive(items, limit, profiler=perf)
+        started_at = time.perf_counter()
+        result = _latency_archive(items, limit)
+        _perf_add(perf, "pareto_archive_calls")
+        _perf_add(perf, "pareto_archive_sec", time.perf_counter() - started_at)
+        return result
     seed_evaluations = [
             evaluate(
                 item,
-                omega_stats=_profile_omega_stats(
-                    config,
-                    item,
-                    client_samples,
-                    client_edges,
-                    candidate_omega_components=omega_components_by_candidate,
-                ),
                 profile_signature=signature(item),
             )
             for item in seeds
@@ -1546,7 +1568,7 @@ def choose_global_pareto_profile(
             repair_objectives = (
                 ("latency",)
                 if objective == "latency"
-                else ("latency", "omega", "pareto")
+                else ("latency", "learning", "pareto")
             )
             feasible_seeds.extend(
                 _repair_edge_cloud_coverage(
@@ -1580,10 +1602,11 @@ def choose_global_pareto_profile(
 
     bounded_iterations = config.pareto_max_iters if search_method == "bounded" else 0
     for _iter_idx in range(max(0, bounded_iterations)):
+        _perf_add(perf, "search_iterations")
+        neighbor_started_at = time.perf_counter()
         neighbors: list[
             tuple[
                 dict[int, Candidate],
-                _ProfileOmegaStats,
                 tuple[int, ...],
                 tuple[tuple[int, ...], float] | None,
             ]
@@ -1602,18 +1625,19 @@ def choose_global_pareto_profile(
                 evaluated.profile,
                 flow_inputs_by_candidate,
             )
-            base_stats = _profile_omega_stats(
-                config,
-                evaluated.profile,
-                client_samples,
-                client_edges,
-                candidate_omega_components=omega_components_by_candidate,
+            stats_started_at = time.perf_counter()
+            replacement_stats = (
+                _LearningReplacementStats(
+                    config, evaluated.profile, client_samples, client_edges,
+                    evaluated.admitted_client_ids,
+                ) if objective == "pareto" and config.pareto_neighbor_top_k > 0
+                else None
             )
+            _perf_add(perf, "replacement_stats_build_sec", time.perf_counter() - stats_started_at)
             profile_neighbors: list[
                 tuple[
                     float,
                     dict[int, Candidate],
-                    _ProfileOmegaStats,
                     tuple[int, ...],
                     tuple[tuple[int, ...], float] | None,
                 ]
@@ -1636,18 +1660,9 @@ def choose_global_pareto_profile(
                     if key in visited_profiles:
                         continue
                     visited_profiles.add(key)
-                    stats = _replace_profile_omega_stats(
-                        config,
-                        base_stats,
-                        client_id,
-                        current,
-                        candidate,
-                        client_samples,
-                        client_edges,
-                        candidate_omega_components=omega_components_by_candidate,
-                    )
                     flow_objectives = None
                     if base_flow_stats is not None:
+                        flow_started_at = time.perf_counter()
                         flow_objectives = _replace_full_buffer_flow_objectives(
                             config,
                             base_flow_stats,
@@ -1656,6 +1671,7 @@ def choose_global_pareto_profile(
                                 _candidate_key(candidate)
                             ),
                         )
+                        _perf_add(perf, "flow_objective_update_sec", time.perf_counter() - flow_started_at)
                     profile_neighbors.append(
                         (
                             _global_replacement_priority(
@@ -1666,18 +1682,20 @@ def choose_global_pareto_profile(
                                 current=current,
                                 candidate=candidate,
                                 client_samples=client_samples,
-                                sample_total=sample_total,
-                                omega_stats=stats,
+                                client_edges=client_edges,
+                                trial_profile=profile,
                                 flow_objectives=flow_objectives,
+                                replacement_stats=replacement_stats,
+                                profiler=perf,
                             )
                             if config.pareto_neighbor_top_k > 0
                             else 0.0,
                             profile,
-                            stats,
                             key,
                             flow_objectives,
                         )
                     )
+            _perf_add(perf, "neighbor_candidates_generated", len(profile_neighbors))
             if (
                 config.pareto_neighbor_top_k > 0
                 and (
@@ -1687,22 +1705,25 @@ def choose_global_pareto_profile(
             ):
                 profile_neighbors.sort(key=lambda item: item[0])
                 profile_neighbors = profile_neighbors[: config.pareto_neighbor_top_k]
+            _perf_add(perf, "neighbor_candidates_retained", len(profile_neighbors))
             neighbors.extend(
-                (profile, stats, key, flow_objectives)
-                for _priority, profile, stats, key, flow_objectives in profile_neighbors
+                (profile, key, flow_objectives)
+                for _priority, profile, key, flow_objectives in profile_neighbors
             )
+        _perf_add(perf, "neighbor_generation_sec", time.perf_counter() - neighbor_started_at)
         if not neighbors:
             break
 
+        neighbor_eval_started_at = time.perf_counter()
         evaluated_neighbors = [
             evaluate(
                 profile,
-                omega_stats=stats,
                 profile_signature=profile_key,
                 flow_objectives=flow_objectives,
             )
-            for profile, stats, profile_key, flow_objectives in neighbors
+            for profile, profile_key, flow_objectives in neighbors
         ]
+        _perf_add(perf, "neighbor_evaluation_sec", time.perf_counter() - neighbor_eval_started_at)
         if objective == "pareto":
             evaluated_neighbors = [
                 item for item in evaluated_neighbors
@@ -1722,6 +1743,7 @@ def choose_global_pareto_profile(
             ]
         next_archive = archive_selector(expanded, config.pareto_archive_size)
         next_archive_keys = {_evaluation_key(item) for item in next_archive}
+        beam_started_at = time.perf_counter()
         beam = _bounded_search_beam(
             [
                 item
@@ -1741,6 +1763,7 @@ def choose_global_pareto_profile(
             limit=config.pareto_beam_size,
             norm_eps=config.pareto_norm_eps,
         )
+        _perf_add(perf, "beam_sec", time.perf_counter() - beam_started_at)
         if next_archive_keys == {_evaluation_key(item) for item in archive} and not beam:
             archive = next_archive
             break
@@ -1773,6 +1796,7 @@ def choose_global_pareto_profile(
             previous_choices=previous_choices,
             objective=objective,
         )
+    perf["search_total_sec"] = time.perf_counter() - search_started_at
     if diagnostics is not None:
         diagnostics.clear()
         diagnostics.update(
@@ -1809,6 +1833,7 @@ def choose_global_pareto_profile(
                 "mode_pool_after_stability": _mode_search_pool_audit(pools),
                 "mode_archive_presence": _mode_archive_audit(archive),
                 "mode_chosen": _mode_profile_distribution(chosen.profile),
+                "performance_profile": dict(perf),
             }
         )
     rewritten = [
@@ -1873,7 +1898,9 @@ def choose_cloud_dp_pareto_profile(
         )
     branches = ("packet", "aggregate") if plan == "pareto" else (plan,)
     outcomes = []
+    branch_performance: dict[str, dict[str, Any]] = {}
     for branch in branches:
+        branch_started_at = time.perf_counter()
         mapped = [
             (cid, _with_cloud_plan(current, branch),
              [_with_cloud_plan(c, branch) for c in pool], remaining)
@@ -1887,6 +1914,10 @@ def choose_cloud_dp_pareto_profile(
             diagnostics=branch_diagnostics, previous_client_updates=previous_client_updates,
             fusion_objective_enabled=fusion_objective_enabled,
         )
+        branch_elapsed = time.perf_counter() - branch_started_at
+        branch_profile = dict(branch_diagnostics.get("performance_profile", {}))
+        branch_profile["branch_wall_sec"] = branch_elapsed
+        branch_performance[branch] = branch_profile
         outcomes.append((branch, result, chosen, branch_diagnostics))
     if len(outcomes) == 1:
         branch, result, chosen, branch_diagnostics = outcomes[0]
@@ -1894,6 +1925,7 @@ def choose_cloud_dp_pareto_profile(
             diagnostics.clear()
             diagnostics.update(branch_diagnostics)
             diagnostics["selected_cloud_dp_plan"] = branch
+            diagnostics["cloud_dp_branch_performance"] = branch_performance
         return result, chosen
     combined_evaluations = [
         replace(evaluation, profile_signature=(branch_index, *evaluation.profile_signature))
@@ -1922,6 +1954,7 @@ def choose_cloud_dp_pareto_profile(
         diagnostics["archive"] = tuple(archive)
         diagnostics["chosen"] = winner
         diagnostics["selected_cloud_dp_plan"] = branch
+        diagnostics["cloud_dp_branch_performance"] = branch_performance
         diagnostics["cloud_dp_mode_branches"] = {
             name: {
                 "pool": d.get("mode_pool_after_stability", {}),
@@ -2382,7 +2415,7 @@ def _repair_edge_cloud_coverage(
                     repairs,
                     key=lambda item: (item.system_omega, item.system_latency, _evaluation_key(item)),
                 )
-                if objective == "omega"
+                if objective == "learning"
                 else _choose_tchebycheff(
                     _pareto_archive(repairs, config.pareto_archive_size),
                     config.pareto_norm_eps,
@@ -2496,72 +2529,121 @@ def _cloud_coverage_anchor_profiles(
     return _unique_profiles(anchors)
 
 
+def _selection_learning_cost(
+    config: SelectionConfig,
+    profile: dict[int, Candidate],
+    client_samples: dict[int, float],
+    client_edges: dict[int, int],
+    admitted_client_ids: tuple[int, ...],
+) -> float:
+    """The *same* formal J_learn used by complete-profile Pareto evaluation.
+
+    Fixed-admission lookahead is used for cheap seed/neighbor comparisons;
+    selected neighbors are subsequently evaluated using their actual flow.
+    """
+    r_cloud = _cloud_update_coverage_ratio(profile, client_samples, admitted_client_ids)
+    clip = max(float(config.omega_update_clip_norm), 0.0)
+    return (
+        4.0 * clip * clip * (1.0 - r_cloud) ** 2
+        + _global_dp_perturbation_cost(
+            config, profile, client_samples, client_edges,
+            admitted_client_ids=admitted_client_ids,
+        )
+    )
+
+
 def _initial_profiles(
     config: SelectionConfig,
     pools: dict[int, list[Candidate]],
     previous_choices: dict[int, Candidate],
     client_samples: dict[int, float] | None = None,
+    client_edges: dict[int, int] | None = None,
 ) -> list[dict[int, Candidate]]:
-    fastest = {client_id: min(candidates, key=lambda item: (item.time, _local_omega_proxy(item, config=config))) for client_id, candidates in pools.items()}
-    # Zero-DP HE candidates can tie on local Omega; retain the cloud-fusion endpoint in that tie.
-    lowest_omega = {
-        client_id: min(
-            candidates,
-            key=lambda item: (
-                _local_omega_proxy(item, config=config),
-                0 if _candidate_reaches_cloud(item) else 1,
-                item.time,
-            ),
-        )
-        for client_id, candidates in pools.items()
+    """Seed the bounded search from latency, Cloud coverage and formal J_learn.
+
+    No retired per-client Omega or independently released packet cost is used
+    when choosing a learning-oriented seed. All tentative comparisons share
+    the same provisional admission set; exact flow is checked after seeding.
+    """
+    fastest = {
+        cid: min(candidates, key=lambda item: (item.time, _candidate_key(item)))
+        for cid, candidates in pools.items()
     }
     previous = {}
-    for client_id, candidates in pools.items():
-        prior = previous_choices.get(client_id)
-        previous[client_id] = next(
-            (
-                item for item in candidates
-                if prior is not None and _candidate_key(item) == _candidate_key(prior)
-            ),
-            fastest[client_id],
+    for cid, candidates in pools.items():
+        prior = previous_choices.get(cid)
+        previous[cid] = next(
+            (item for item in candidates
+             if prior is not None and _candidate_key(item) == _candidate_key(prior)),
+            fastest[cid],
         )
+    coverage_anchors = _cloud_coverage_anchor_profiles(
+        pools, fastest, client_samples=client_samples,
+    )
+    masses = client_samples or {cid: 1.0 for cid in pools}
+    edges = client_edges or {cid: 0 for cid in pools}
+    admitted = tuple(sorted(pools))
+
+    # Start at maximum reachable Cloud coverage.  Only modify the seed when
+    # the paper's formal learning cost improves, using the real cohort masses.
+    lowest_learning = dict(coverage_anchors[-1] if coverage_anchors else fastest)
+    for cid in sorted(pools):
+        current = lowest_learning[cid]
+        best = current
+        best_cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
+        for item in pools[cid]:
+            if item == current:
+                continue
+            lowest_learning[cid] = item
+            cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
+            if (cost, item.time, _candidate_key(item)) < (
+                best_cost, best.time, _candidate_key(best)
+            ):
+                best_cost, best = cost, item
+        lowest_learning[cid] = best
+
+    # Evaluate the formal learning cost of single-client switches in the
+    # learning-oriented seed rather than an obsolete local convergence proxy.
+    reference_cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
+    learning_hint: dict[int, dict[tuple, float]] = {}
+    for cid, candidates in pools.items():
+        learning_hint[cid] = {}
+        current = lowest_learning[cid]
+        for item in candidates:
+            if item == current:
+                cost = reference_cost
+            else:
+                lowest_learning[cid] = item
+                cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
+                lowest_learning[cid] = current
+            learning_hint[cid][_candidate_key(item)] = cost
+
     intermediate_profiles: list[dict[int, Candidate]] = []
     for latency_weight in (0.25, 0.5, 0.75):
-        profile: dict[int, Candidate] = {}
-        for client_id, candidates in pools.items():
-            times = [candidate.time for candidate in candidates]
-            omegas = [
-                _local_omega_proxy(candidate, config=config)
-                for candidate in candidates
-            ]
+        profile = {}
+        for cid, candidates in pools.items():
+            times = [item.time for item in candidates]
+            costs = list(learning_hint[cid].values())
             t_min, t_max = min(times), max(times)
-            o_min, o_max = min(omegas), max(omegas)
-            profile[client_id] = min(
+            l_min, l_max = min(costs), max(costs)
+            profile[cid] = min(
                 candidates,
                 key=lambda item: (
                     max(
-                        latency_weight
-                        * _safe_norm_eps(item.time, t_min, t_max, config.pareto_norm_eps),
-                        (1.0 - latency_weight)
-                        * _safe_norm_eps(
-                            _local_omega_proxy(item, config=config),
-                            o_min,
-                            o_max,
-                            config.pareto_norm_eps,
+                        latency_weight * _safe_norm_eps(
+                            item.time, t_min, t_max, config.pareto_norm_eps
+                        ),
+                        (1.0 - latency_weight) * _safe_norm_eps(
+                            learning_hint[cid][_candidate_key(item)],
+                            l_min, l_max, config.pareto_norm_eps,
                         ),
                     ),
-                    item.time,
-                    _candidate_key(item),
+                    item.time, _candidate_key(item),
                 ),
             )
         intermediate_profiles.append(profile)
-    coverage_anchors = _cloud_coverage_anchor_profiles(
-        pools,
-        fastest,
-        client_samples=client_samples,
-    )
     return _unique_profiles(
-        [previous, fastest, *intermediate_profiles, *coverage_anchors, lowest_omega]
+        [previous, fastest, *intermediate_profiles, *coverage_anchors, lowest_learning]
     )
 
 
@@ -2610,41 +2692,192 @@ def _pareto_search_client_ids(
     return tuple(conflicting or sorted(pools))
 
 
-def _replacement_priority(
-    config: SelectionConfig,
-    evaluated: ProfileEvaluation,
-    client_id: int,
-    current: Candidate,
-    candidate: Candidate,
-    client_samples: dict[int, float],
-    sample_total: float,
-    stats: _ProfileOmegaStats,
-) -> float:
-    """Rank one-client replacements before exact profile evaluation.
 
-    This is only a neighbor-generation budget. Exact Pareto filtering and
-    Tchebycheff selection still run on evaluated system objectives.
+class _LearningReplacementStats:
+    """Fixed-admission O(affected-group) single-client J_learn lookahead.
+
+    The exact full-profile objective remains the reference; this snapshot
+    replaces the repeated scan of every client during neighbor ranking.
+    Cloud noise is stored in unnormalized sample-mass units, making changes
+    to the Cloud denominator an exact one-scalar update. Edge-local costs
+    need only recompute the client's own Edge group.
     """
-    weight = float(client_samples.get(client_id, 1.0)) / sample_total
-    current_local = _local_omega_proxy(current, config=config)
-    next_local = _local_omega_proxy(candidate, config=config)
-    delta_omega = weight * (next_local - current_local)
-    delta_time = candidate.time - current.time
-    cloud_gain = float(_candidate_reaches_cloud(candidate)) - float(
-        _candidate_reaches_cloud(current)
-    )
-    current_time_scale = max(abs(current.time), abs(candidate.time), 1.0)
-    current_omega_scale = max(
-        abs(evaluated.system_omega),
-        abs(current_local),
-        abs(next_local),
-        1.0,
-    )
-    return (
-        0.5 * (delta_time / current_time_scale)
-        + 0.5 * (delta_omega / current_omega_scale)
-        - 0.35 * cloud_gain
-    )
+
+    def __init__(
+        self,
+        config: SelectionConfig,
+        profile: dict[int, Candidate],
+        client_samples: dict[int, float],
+        client_edges: dict[int, int],
+        admitted_client_ids: tuple[int, ...] | list[int],
+    ) -> None:
+        self.config = config
+        self.profile = profile
+        self.samples = client_samples
+        self.edges = client_edges
+        self.admitted = frozenset(admitted_client_ids)
+        self.total_samples = sum(max(float(value), 0.0) for value in client_samples.values())
+        self.admitted_mass = sum(
+            max(float(client_samples.get(cid, 0.0)), 0.0)
+            for cid in self.admitted if cid in profile
+        )
+        self.dim = max(float(config.omega_update_dimension), 0.0)
+        self.clip = max(float(config.omega_update_clip_norm), 0.0)
+        self.factor = self.dim * (2.0 * self.clip) ** 2
+        self.default_sigma = max(
+            float(resolved_privacy_parameters(config)["update_noise_multiplier"]), 0.0
+        ) if self.factor > 0.0 and self.admitted else 0.0
+        self.cloud_mass = 0.0
+        self.secure: dict[int, tuple[float, float]] = {}
+        self.packets: dict[tuple[int, str, str], dict[int, tuple[float, float]]] = {}
+        self.independent: dict[int, tuple[float, float]] = {}
+        self.edge_groups: dict[int, dict[int, Candidate]] = {}
+        for cid in self.admitted:
+            candidate = profile.get(cid)
+            if candidate is None:
+                continue
+            if _candidate_reaches_cloud(candidate):
+                self.cloud_mass += self._mass(cid)
+            classification, key, pair = self._cloud_entry(cid, candidate)
+            if classification == "secure":
+                self.secure[cid] = pair
+            elif classification == "packet":
+                self.packets.setdefault(key, {})[cid] = pair
+            elif classification == "independent":
+                self.independent[cid] = pair
+            if candidate.mode == "LIIE":
+                self.edge_groups.setdefault(int(client_edges.get(cid, -1)), {})[cid] = candidate
+        self.secure_score = self._max_product_sq(self.secure)
+        self.packet_scores = {
+            key: self._max_product_sq(members)
+            for key, members in self.packets.items()
+        }
+        self.independent_score = sum((mass * sigma) ** 2 for mass, sigma in self.independent.values())
+        self.edge_scores = {
+            edge: self._edge_cost(members)
+            for edge, members in self.edge_groups.items()
+        } if self.factor > 0.0 else {}
+        self.edge_total = sum(self.edge_scores.values())
+
+    def _mass(self, cid: int) -> float:
+        return max(float(self.samples.get(cid, 0.0)), 0.0)
+
+    def _sigma(self, candidate: Candidate) -> float:
+        return max(float(candidate.update_noise_multiplier or self.default_sigma), 0.0)
+
+    @staticmethod
+    def _max_product_sq(members: dict[int, tuple[float, float]]) -> float:
+        if not members:
+            return 0.0
+        mass = max(pair[0] for pair in members.values())
+        sigma = max(pair[1] for pair in members.values())
+        return (mass * sigma) ** 2
+
+    def _cloud_entry(
+        self, cid: int, candidate: Candidate,
+    ) -> tuple[str, tuple[int, str, str] | None, tuple[float, float]]:
+        mass, sigma = self._mass(cid), self._sigma(candidate)
+        pair = (mass, sigma)
+        if not _candidate_reaches_cloud(candidate):
+            return "none", None, pair
+        if _candidate_uses_secure_aggregate_update_dp_for_selection(candidate):
+            return "secure", None, pair
+        if candidate.dp_execution_plan == "cloud_packet" and candidate.mode in EDGE_CLOUD_MODES:
+            key = (
+                int(self.edges.get(cid, -1)), candidate.mode,
+                candidate_link_mechanism(candidate, "E_C_upd"),
+            )
+            return "packet", key, pair
+        spec = MODE_SPECS.get(candidate.mode)
+        edge_loops = max(int(spec.E_edge_loops if spec is not None else 1), 1)
+        for link_id, obj, _count, privacy_eligible in _mode_link_transmissions(
+            candidate.mode, 1, edge_loops,
+        ):
+            if (obj == "upd" and privacy_eligible and link_id.endswith("_C_upd")
+                and mechanism_uses_dp(candidate_link_mechanism(candidate, link_id, fallback_object="upd"))):
+                return "independent", None, pair
+        return "none", None, pair
+
+    def _edge_cost(self, members: dict[int, Candidate]) -> float:
+        group_mass = sum(self._mass(cid) for cid in members)
+        if group_mass <= 0.0 or self.admitted_mass <= 0.0:
+            return 0.0
+        aggregate = [cid for cid, candidate in members.items()
+                     if _candidate_uses_edge_local_exact_update_dp(candidate)]
+        if aggregate:
+            if len(aggregate) != len(members) or len(members) < 2:
+                raise ValueError("Inconsistent LIIE aggregate DP cohort in profile")
+            group_sigma = max(self._sigma(members[cid]) for cid in members)
+            max_mass = max(self._mass(cid) for cid in members)
+            group_score = (group_sigma * max_mass / group_mass) ** 2
+        else:
+            group_score = sum(
+                (self._mass(cid) * self._sigma(candidate) / group_mass) ** 2
+                for cid, candidate in members.items()
+                if mechanism_uses_dp(candidate_link_mechanism(candidate, "L_E_upd"))
+            )
+        return self.factor * (group_mass / self.admitted_mass) * group_score
+
+    def replacement_cost(
+        self,
+        cid: int,
+        candidate: Candidate,
+        admitted_client_ids: tuple[int, ...] | list[int],
+    ) -> float | None:
+        """Return exact fixed-admission lookahead, or None for a changed cohort."""
+        if frozenset(admitted_client_ids) != self.admitted:
+            return None
+        old = self.profile[cid]
+        mass = self._mass(cid)
+        cloud_mass = self.cloud_mass + mass * (
+            int(_candidate_reaches_cloud(candidate)) - int(_candidate_reaches_cloud(old))
+        )
+        fusion_mass = cloud_mass / self.total_samples if self.total_samples > 0.0 else 0.0
+        fusion_bound = 4.0 * self.clip * self.clip * (1.0 - fusion_mass) ** 2
+        if self.factor <= 0.0 or not self.admitted:
+            return fusion_bound
+
+        old_type, old_key, old_pair = self._cloud_entry(cid, old)
+        new_type, new_key, new_pair = self._cloud_entry(cid, candidate)
+        secure_score = self.secure_score
+        if old_type == "secure" or new_type == "secure":
+            secure = dict(self.secure)
+            secure.pop(cid, None)
+            if new_type == "secure":
+                secure[cid] = new_pair
+            secure_score = self._max_product_sq(secure)
+
+        packet_score = sum(self.packet_scores.values())
+        keys = {key for key in (old_key if old_type == "packet" else None,
+                                new_key if new_type == "packet" else None) if key is not None}
+        for key in keys:
+            packet_score -= self.packet_scores.get(key, 0.0)
+            members = dict(self.packets.get(key, {}))
+            members.pop(cid, None)
+            if new_type == "packet" and new_key == key:
+                members[cid] = new_pair
+            packet_score += self._max_product_sq(members)
+
+        independent_score = self.independent_score
+        if old_type == "independent":
+            independent_score -= (old_pair[0] * old_pair[1]) ** 2
+        if new_type == "independent":
+            independent_score += (new_pair[0] * new_pair[1]) ** 2
+        cloud_dp = (
+            self.factor * (secure_score + packet_score + independent_score) / (cloud_mass ** 2)
+            if cloud_mass > 0.0 else 0.0
+        )
+
+        edge_dp = self.edge_total
+        if old.mode == "LIIE" or candidate.mode == "LIIE":
+            edge = int(self.edges.get(cid, -1))
+            edge_dp -= self.edge_scores.get(edge, 0.0)
+            members = dict(self.edge_groups.get(edge, {}))
+            members.pop(cid, None)
+            if candidate.mode == "LIIE":
+                members[cid] = candidate
+            edge_dp += self._edge_cost(members)
+        return float(fusion_bound + cloud_dp + edge_dp)
 
 
 def _global_replacement_priority(
@@ -2656,25 +2889,52 @@ def _global_replacement_priority(
     current: Candidate,
     candidate: Candidate,
     client_samples: dict[int, float],
-    sample_total: float,
-    omega_stats: _ProfileOmegaStats,
+    client_edges: dict[int, int],
+    trial_profile: dict[int, Candidate],
     flow_objectives: tuple[tuple[int, ...], float] | None,
+    replacement_stats: _LearningReplacementStats | None = None,
+    profiler: dict[str, Any] | None = None,
 ) -> float:
-    if objective == "latency":
-        if flow_objectives is not None:
-            return float(flow_objectives[1])
-        return float(evaluated.system_latency + candidate.time - current.time)
-    return _replacement_priority(
-        config,
-        evaluated,
-        client_id,
-        current,
-        candidate,
-        client_samples,
-        sample_total,
-        omega_stats,
-    )
+    """Rank neighbors by the two *formal* paper objectives.
 
+    This fixed-admission score is only a beam prefilter, not a proof of
+    dominance.  Exact flow and J_learn are evaluated for retained neighbors.
+    """
+    priority_started_at = time.perf_counter()
+    _perf_add(profiler, "replacement_priority_calls")
+    next_time = (
+        float(flow_objectives[1]) if flow_objectives is not None
+        else float(evaluated.system_latency + candidate.time - current.time)
+    )
+    if objective == "latency":
+        return next_time
+    admitted = (
+        tuple(flow_objectives[0]) if flow_objectives is not None
+        else evaluated.admitted_client_ids
+    )
+    next_learning = None
+    if replacement_stats is not None:
+        incremental_started_at = time.perf_counter()
+        next_learning = replacement_stats.replacement_cost(client_id, candidate, admitted)
+        _perf_add(profiler, "incremental_jlearn_calls")
+        _perf_add(profiler, "incremental_jlearn_sec", time.perf_counter() - incremental_started_at)
+    if next_learning is None:
+        fallback_started_at = time.perf_counter()
+        next_learning = _selection_learning_cost(
+            config, trial_profile, client_samples, client_edges, admitted,
+        )
+        _perf_add(profiler, "full_jlearn_fallback_calls")
+        _perf_add(profiler, "full_jlearn_fallback_sec", time.perf_counter() - fallback_started_at)
+    time_scale = max(abs(evaluated.system_latency), abs(next_time), 1.0)
+    learning_scale = max(
+        abs(evaluated.system_learning_error), abs(next_learning), 1e-12,
+    )
+    priority = (
+        0.5 * (next_time - evaluated.system_latency) / time_scale
+        + 0.5 * (next_learning - evaluated.system_learning_error) / learning_scale
+    )
+    _perf_add(profiler, "replacement_priority_sec", time.perf_counter() - priority_started_at)
+    return priority
 
 
 def _state_diff_vector(state_diff: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
@@ -2869,7 +3129,6 @@ def _evaluate_profile(
     client_samples: dict[int, float],
     client_edges: dict[int, int],
     previous_choices: dict[int, Candidate],
-    omega_stats: _ProfileOmegaStats | None = None,
     profile_signature: tuple[int, ...] = (),
     flow_inputs_by_candidate: dict[int, dict[tuple, ClientFlowInput]] | None = None,
     flow_objectives: tuple[tuple[int, ...], float] | None = None,
@@ -4344,22 +4603,33 @@ def _bounded_search_beam(
     return sorted(candidates, key=beam_key)[:limit]
 
 
-def _pareto_archive(evaluations: list[ProfileEvaluation], limit: int) -> list[ProfileEvaluation]:
+def _pareto_archive(
+    evaluations: list[ProfileEvaluation],
+    limit: int,
+    profiler: dict[str, Any] | None = None,
+) -> list[ProfileEvaluation]:
+    started_at = time.perf_counter()
+    _perf_add(profiler, "pareto_archive_calls")
     unique = _unique_evaluations(evaluations)
     if not unique:
+        _perf_add(profiler, "pareto_archive_sec", time.perf_counter() - started_at)
         return []
 
-    frontier = [
-        candidate
-        for candidate in unique
-        if not any(
-            _profile_objectives_dominate(other, candidate)
-            for other in unique
-            if other is not candidate
-        )
-    ]
+    frontier: list[ProfileEvaluation] = []
+    for candidate in unique:
+        dominated = False
+        for other in unique:
+            if other is candidate:
+                continue
+            _perf_add(profiler, "dominance_compare_count")
+            if _profile_objectives_dominate(other, candidate):
+                dominated = True
+                break
+        if not dominated:
+            frontier.append(candidate)
     frontier = frontier or unique
     if len(frontier) <= max(int(limit), 1):
+        _perf_add(profiler, "pareto_archive_sec", time.perf_counter() - started_at)
         return frontier
 
     # Deterministic normalized Tchebycheff truncation of a potentially large frontier.
@@ -4389,7 +4659,9 @@ def _pareto_archive(evaluations: list[ProfileEvaluation], limit: int) -> list[Pr
             repr(_evaluation_key(item)),
         )
 
-    return sorted(frontier, key=key)[:max(int(limit), 1)]
+    result = sorted(frontier, key=key)[:max(int(limit), 1)]
+    _perf_add(profiler, "pareto_archive_sec", time.perf_counter() - started_at)
+    return result
 
 
 def _latency_archive(

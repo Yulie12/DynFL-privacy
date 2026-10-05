@@ -117,7 +117,7 @@ def main() -> None:
         rounds = _read_rounds(source.policy_dir / "round_metrics.csv")
         run_observations: list[dict[str, float]] = []
         for index, row in enumerate(rounds):
-            omega = _finite_float(row, "system_omega_objective")
+            omega = _finite_float(row, "learning_error_objective")
             test_loss = _finite_float(row, "test_loss")
             test_accuracy = _finite_float(row, "test_accuracy")
             if omega is None or test_loss is None or test_accuracy is None:
@@ -130,7 +130,7 @@ def main() -> None:
             )
             item = {
                 "round": float(row["round"]),
-                "omega": omega,
+                "learning_cost": omega,
                 "post_update_test_loss": test_loss,
                 "test_loss_change": (
                     test_loss - previous_loss if previous_loss is not None else float("nan")
@@ -144,11 +144,11 @@ def main() -> None:
             run_observations.append(item)
             observations.append({"seed": seed, **item})
 
-        omega_values = [item["omega"] for item in run_observations]
+        omega_values = [item["learning_cost"] for item in run_observations]
         omega_z = _zscore(omega_values)
         for metric in pooled_by_metric:
             pairs = [
-                (item["omega"], item[metric])
+                (item["learning_cost"], item[metric])
                 for item in run_observations
                 if math.isfinite(item[metric])
             ]

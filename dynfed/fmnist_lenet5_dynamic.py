@@ -1511,11 +1511,6 @@ def _run_lenet5_policy(
                         "memory_requirement": audit_candidate.memory_requirement,
                         "memory_capacity": audit_candidate.memory_capacity,
                         "reaches_cloud": int(_mode_reaches_cloud(audit_candidate.mode)),
-                        "local_omega_proxy_singleton": selection_local_omega_proxy(
-                            audit_candidate,
-                            aggregation_size=1,
-                            config=effective_selection,
-                        ),
                     }
                 )
 
@@ -3356,6 +3351,84 @@ def _run_lenet5_policy(
                 "round_wall_time_sec": round_wall_time_sec,
                 "cumulative_wall_time_sec": cumulative_wall_time_sec,
                 "selection_wall_time_sec": selection_wall_time_sec,
+                "selection_perf_profile": json.dumps(
+                    selection_diagnostics.get("performance_profile", {}), sort_keys=True
+                ),
+                "selection_branch_perf_profile": json.dumps(
+                    selection_diagnostics.get("cloud_dp_branch_performance", {}), sort_keys=True
+                ),
+                "selection_evaluate_calls": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("evaluate_calls", 0),
+                "selection_evaluate_cache_hits": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("evaluate_cache_hits", 0),
+                "selection_evaluate_cache_misses": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("evaluate_cache_misses", 0),
+                "selection_evaluate_profile_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("evaluate_profile_sec", 0.0),
+                "selection_replacement_priority_calls": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("replacement_priority_calls", 0),
+                "selection_replacement_priority_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("replacement_priority_sec", 0.0),
+                "selection_incremental_jlearn_calls": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("incremental_jlearn_calls", 0),
+                "selection_incremental_jlearn_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("incremental_jlearn_sec", 0.0),
+                "selection_full_jlearn_fallback_calls": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("full_jlearn_fallback_calls", 0),
+                "selection_full_jlearn_fallback_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("full_jlearn_fallback_sec", 0.0),
+                "selection_replacement_stats_build_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("replacement_stats_build_sec", 0.0),
+                "selection_flow_objective_update_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("flow_objective_update_sec", 0.0),
+                "selection_neighbor_generation_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_generation_sec", 0.0),
+                "selection_neighbor_evaluation_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_evaluation_sec", 0.0),
+                "selection_neighbor_candidates_generated": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_candidates_generated", 0),
+                "selection_neighbor_candidates_retained": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_candidates_retained", 0),
+                "selection_pareto_archive_calls": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("pareto_archive_calls", 0),
+                "selection_pareto_archive_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("pareto_archive_sec", 0.0),
+                "selection_dominance_compare_count": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("dominance_compare_count", 0),
+                "selection_beam_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("beam_sec", 0.0),
+                "selection_search_iterations": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("search_iterations", 0),
+                "selection_internal_search_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("search_total_sec", 0.0),
+                "selection_packet_branch_search_sec": selection_diagnostics.get(
+                    "cloud_dp_branch_performance", {}
+                ).get("packet", {}).get("branch_wall_sec", 0.0),
+                "selection_aggregate_branch_search_sec": selection_diagnostics.get(
+                    "cloud_dp_branch_performance", {}
+                ).get("aggregate", {}).get("branch_wall_sec", 0.0),
                 "training_wall_time_sec": training_wall_time_sec,
                 "actual_local_batches": sum(r.get("actual_local_batches", 0) for r in worker_results.values()),
                 "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
@@ -3716,7 +3789,6 @@ def _run_lenet5_policy(
                 "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                 "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                 "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
-                "system_omega_objective": profile_evaluation.system_learning_error if profile_evaluation else "",  # legacy column name
                 "fusion_distortion_objective": profile_evaluation.fusion_distortion if profile_evaluation else "",
                 "fusion_cosine_distortion": profile_evaluation.fusion_cosine_distortion if profile_evaluation else "",
                 "fusion_objective_enabled": bool(profile_evaluation.fusion_objective_enabled) if profile_evaluation else False,
@@ -3865,7 +3937,6 @@ def _run_lenet5_policy(
             ),
             "he_max_abs_error": current_round["he_max_abs_error"],
             "system_latency_objective": current_round["system_latency_objective"],
-            "system_omega_objective": current_round["system_omega_objective"],
             "fusion_distortion_objective": current_round["fusion_distortion_objective"],
             "fusion_cosine_distortion": current_round["fusion_cosine_distortion"],
             "fusion_objective_enabled": current_round["fusion_objective_enabled"],

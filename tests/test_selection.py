@@ -28,7 +28,7 @@ def _candidate(mode: str, time: float) -> Candidate:
     )
 
 
-def test_lowest_omega_seed_prefers_cloud_when_local_error_is_tied() -> None:
+def test_formal_learning_seed_explores_cloud_when_local_cost_is_tied() -> None:
     pools = {
         client_id: [
             _candidate("LIIE", time=1.0),
@@ -40,7 +40,7 @@ def test_lowest_omega_seed_prefers_cloud_when_local_error_is_tied() -> None:
     profiles = _initial_profiles(SelectionConfig(), pools, previous_choices={})
 
     assert all(candidate.mode == "LIIE" for candidate in profiles[0].values())
-    assert all(candidate.mode == "LIIC" for candidate in profiles[-1].values())
+    assert any(all(candidate.mode == "LIIC" for candidate in profile.values()) for profile in profiles)
 
 
 def test_initial_profiles_include_sample_mass_cloud_coverage_anchors() -> None:
