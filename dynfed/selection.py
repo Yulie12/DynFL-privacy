@@ -534,6 +534,17 @@ class _FullBufferGroupSummary:
     cloud_payload_second: tuple[float, int, int, int] | None
 
 
+@dataclass(slots=True)
+class _FullBufferLatencySummary:
+    """Transient latency-only summary for one Pareto neighbor."""
+
+    kind: str
+    terminal_time: float
+    cloud_arrival_time: float
+    cloud_aggregation_payload: float
+    return_path_time: float
+
+
 @dataclass(frozen=True)
 class _FullBufferFlowStats:
     client_inputs: dict[int, ClientFlowInput]
@@ -1375,6 +1386,12 @@ def choose_global_pareto_profile(
         "pareto_archive_sec": 0.0,
         "dominance_compare_count": 0,
         "beam_sec": 0.0,
+        "coverage_repair_calls": 0,
+        "coverage_repair_total_sec": 0.0,
+        "coverage_repair_iterations": 0,
+        "coverage_repair_candidate_evaluations": 0,
+        "coverage_repair_candidate_evaluation_sec": 0.0,
+        "coverage_repair_final_evaluation_sec": 0.0,
     }
     search_started_at = time.perf_counter()
     previous_choices = previous_choices or {}
@@ -1489,6 +1506,23 @@ def choose_global_pareto_profile(
         for client_id in client_order
     }
 
+    # Stage 12F1:
+    # Materialize candidate key/token metadata once.  This preserves the
+    # existing candidate_tokens[key] semantics while removing repeated
+    # _candidate_key() construction from the million-call neighbor loop.
+    candidate_neighbor_rows = {
+        client_id: tuple(
+            (
+                candidate,
+                candidate_key,
+                candidate_tokens[client_id][candidate_key],
+            )
+            for candidate in pools[client_id]
+            for candidate_key in (_candidate_key(candidate),)
+        )
+        for client_id in client_order
+    }
+
     def signature(profile: dict[int, Candidate]) -> tuple[int, ...]:
         return tuple(
             candidate_tokens[client_id][_candidate_key(profile[client_id])]
@@ -1579,6 +1613,8 @@ def choose_global_pareto_profile(
                     client_edges=client_edges,
                     previous_choices=previous_choices,
                     objective=repair_objective,
+                    flow_inputs_by_candidate=flow_inputs_by_candidate,
+                    profiler=perf,
                 )
                 for repair_objective in repair_objectives
             )
@@ -1637,29 +1673,51 @@ def choose_global_pareto_profile(
             profile_neighbors: list[
                 tuple[
                     float,
-                    dict[int, Candidate],
                     tuple[int, ...],
                     tuple[tuple[int, ...], float] | None,
+                    int,
+                    Candidate,
+                    _LearningReplacementStats | None,
+                    float | None,
                 ]
             ] = []
             for client_id in search_client_ids:
-                candidates = pools[client_id]
                 current = evaluated.profile[client_id]
-                for candidate in candidates:
+
+                old_cloud_entry = (
+                    replacement_stats._cloud_entry(client_id, current)
+                    if (
+                        replacement_stats is not None
+                        and objective != "latency"
+                        and config.pareto_neighbor_top_k > 0
+                    )
+                    else None
+                )
+
+                for candidate, candidate_key, token in candidate_neighbor_rows[client_id]:
                     if candidate == current:
                         continue
-                    profile = dict(evaluated.profile)
-                    profile[client_id] = candidate
-                    token = candidate_tokens[client_id][_candidate_key(candidate)]
+                    key_started_at = time.perf_counter()
+
                     position = client_positions[client_id]
                     key = (
                         evaluated.profile_signature[:position]
                         + (token,)
                         + evaluated.profile_signature[position + 1:]
                     )
-                    if key in visited_profiles:
+
+                    already_visited = key in visited_profiles
+                    if not already_visited:
+                        visited_profiles.add(key)
+
+                    _perf_add(
+                        perf,
+                        "neighbor_key_visited_sec",
+                        time.perf_counter() - key_started_at,
+                    )
+
+                    if already_visited:
                         continue
-                    visited_profiles.add(key)
                     flow_objectives = None
                     if base_flow_stats is not None:
                         flow_started_at = time.perf_counter()
@@ -1668,32 +1726,51 @@ def choose_global_pareto_profile(
                             base_flow_stats,
                             client_id,
                             flow_inputs_by_candidate[client_id].get(
-                                _candidate_key(candidate)
+                                candidate_key
                             ),
                         )
                         _perf_add(perf, "flow_objective_update_sec", time.perf_counter() - flow_started_at)
+                    if config.pareto_neighbor_top_k > 0:
+                        (
+                            priority,
+                            priority_next_learning,
+                        ) = _global_replacement_priority(
+                            objective=objective,
+                            config=config,
+                            evaluated=evaluated,
+                            client_id=client_id,
+                            current=current,
+                            candidate=candidate,
+                            client_samples=client_samples,
+                            client_edges=client_edges,
+                            trial_profile=None,
+                            flow_objectives=flow_objectives,
+                            replacement_stats=replacement_stats,
+                            old_cloud_entry=old_cloud_entry,
+                            profiler=perf,
+                        )
+                    else:
+                        priority = 0.0
+                        priority_next_learning = None
+
+                    append_started_at = time.perf_counter()
+
                     profile_neighbors.append(
                         (
-                            _global_replacement_priority(
-                                objective=objective,
-                                config=config,
-                                evaluated=evaluated,
-                                client_id=client_id,
-                                current=current,
-                                candidate=candidate,
-                                client_samples=client_samples,
-                                client_edges=client_edges,
-                                trial_profile=profile,
-                                flow_objectives=flow_objectives,
-                                replacement_stats=replacement_stats,
-                                profiler=perf,
-                            )
-                            if config.pareto_neighbor_top_k > 0
-                            else 0.0,
-                            profile,
+                            priority,
                             key,
                             flow_objectives,
+                            client_id,
+                            candidate,
+                            replacement_stats,
+                            priority_next_learning,
                         )
+                    )
+
+                    _perf_add(
+                        perf,
+                        "neighbor_append_sec",
+                        time.perf_counter() - append_started_at,
                     )
             _perf_add(perf, "neighbor_candidates_generated", len(profile_neighbors))
             if (
@@ -1703,27 +1780,144 @@ def choose_global_pareto_profile(
                     or _evaluation_key(evaluated) != omega_endpoint_key
                 )
             ):
+                sort_started_at = time.perf_counter()
+
                 profile_neighbors.sort(key=lambda item: item[0])
-                profile_neighbors = profile_neighbors[: config.pareto_neighbor_top_k]
+                profile_neighbors = profile_neighbors[
+                    : config.pareto_neighbor_top_k
+                ]
+
+                _perf_add(
+                    perf,
+                    "neighbor_sort_topk_sec",
+                    time.perf_counter() - sort_started_at,
+                )
             _perf_add(perf, "neighbor_candidates_retained", len(profile_neighbors))
-            neighbors.extend(
-                (profile, key, flow_objectives)
-                for _priority, profile, key, flow_objectives in profile_neighbors
+            materialize_started_at = time.perf_counter()
+
+            for (
+                _priority,
+                key,
+                flow_objectives,
+                client_id,
+                candidate,
+                replacement_stats,
+                priority_next_learning,
+            ) in profile_neighbors:
+                profile = dict(evaluated.profile)
+                profile[client_id] = candidate
+
+                neighbors.append(
+                    (
+                        profile,
+                        key,
+                        flow_objectives,
+                        client_id,
+                        candidate,
+                        replacement_stats,
+                        priority_next_learning,
+                    )
+                )
+
+            _perf_add(
+                perf,
+                "neighbor_profile_materializations",
+                len(profile_neighbors),
+            )
+            _perf_add(
+                perf,
+                "neighbor_profile_materialization_sec",
+                time.perf_counter() - materialize_started_at,
             )
         _perf_add(perf, "neighbor_generation_sec", time.perf_counter() - neighbor_started_at)
         if not neighbors:
             break
 
         neighbor_eval_started_at = time.perf_counter()
-        evaluated_neighbors = [
-            evaluate(
-                profile,
-                profile_signature=profile_key,
-                flow_objectives=flow_objectives,
-            )
-            for profile, profile_key, flow_objectives in neighbors
-        ]
-        _perf_add(perf, "neighbor_evaluation_sec", time.perf_counter() - neighbor_eval_started_at)
+        evaluated_neighbors: list[ProfileEvaluation] = []
+
+        for (
+            profile,
+            profile_key,
+            flow_objectives,
+            changed_client_id,
+            changed_candidate,
+            replacement_stats,
+            priority_next_learning,
+        ) in neighbors:
+            incremental_evaluation = None
+
+            if (
+                objective == "pareto"
+                and flow_objectives is not None
+                and replacement_stats is not None
+            ):
+                admitted, next_latency = flow_objectives
+
+                next_learning = priority_next_learning
+
+                if next_learning is not None:
+                    _perf_add(
+                        perf,
+                        "neighbor_priority_learning_reuse_calls",
+                    )
+                else:
+                    recompute_started_at = time.perf_counter()
+                    next_learning = replacement_stats.replacement_cost(
+                        changed_client_id,
+                        changed_candidate,
+                        admitted,
+                    )
+                    _perf_add(
+                        perf,
+                        "neighbor_retained_jlearn_recompute_calls",
+                    )
+                    _perf_add(
+                        perf,
+                        "neighbor_retained_jlearn_recompute_sec",
+                        time.perf_counter() - recompute_started_at,
+                    )
+
+                if next_learning is not None:
+                    cloud_fusion_ratio = _cloud_update_coverage_ratio(
+                        profile,
+                        client_samples,
+                        admitted,
+                    )
+
+                    incremental_evaluation = ProfileEvaluation(
+                        profile=profile,
+                        system_latency=float(next_latency),
+                        system_omega=float(next_learning),
+                        cloud_fusion_ratio=float(cloud_fusion_ratio),
+                        admitted_client_ids=tuple(sorted(admitted)),
+                        profile_signature=profile_key,
+                    )
+
+                    _perf_add(
+                        perf,
+                        "neighbor_incremental_evaluation_calls",
+                    )
+
+            if incremental_evaluation is None:
+                incremental_evaluation = evaluate(
+                    profile,
+                    profile_signature=profile_key,
+                    flow_objectives=flow_objectives,
+                )
+
+                _perf_add(
+                    perf,
+                    "neighbor_full_evaluation_fallback_calls",
+                )
+
+            evaluated_neighbors.append(incremental_evaluation)
+
+        _perf_add(
+            perf,
+            "neighbor_evaluation_sec",
+            time.perf_counter() - neighbor_eval_started_at,
+        )
         if objective == "pareto":
             evaluated_neighbors = [
                 item for item in evaluated_neighbors
@@ -1795,6 +1989,8 @@ def choose_global_pareto_profile(
             client_edges=client_edges,
             previous_choices=previous_choices,
             objective=objective,
+            flow_inputs_by_candidate=flow_inputs_by_candidate,
+            profiler=perf,
         )
     perf["search_total_sec"] = time.perf_counter() - search_started_at
     if diagnostics is not None:
@@ -2133,16 +2329,40 @@ def _nsga2_fronts(
     return fronts
 
 
+_PARETO_OBJECTIVE_DIGITS = 10
+
+
+def _pareto_objective_value(value: float) -> float:
+    """Canonical numeric representation for Pareto comparisons.
+
+    Stage 10.1 measured incremental-vs-full implementation drift at roughly
+    1e-13 for latency and 1e-16 for J_learn.  Quantizing to 10 decimal places
+    prevents those machine-precision differences from changing the search
+    trajectory while remaining far below meaningful objective differences.
+    """
+    return round(float(value), _PARETO_OBJECTIVE_DIGITS)
+
+
 def _profile_objectives_dominate(
     left: ProfileEvaluation,
     right: ProfileEvaluation,
 ) -> bool:
-    values_left = [left.system_latency, left.system_omega]
-    values_right = [right.system_latency, right.system_omega]
+    values_left = [
+        _pareto_objective_value(left.system_latency),
+        _pareto_objective_value(left.system_omega),
+    ]
+    values_right = [
+        _pareto_objective_value(right.system_latency),
+        _pareto_objective_value(right.system_omega),
+    ]
     use_fusion = left.fusion_objective_enabled or right.fusion_objective_enabled
     if use_fusion:
-        values_left.append(left.fusion_distortion)
-        values_right.append(right.fusion_distortion)
+        values_left.append(
+            _pareto_objective_value(left.fusion_distortion)
+        )
+        values_right.append(
+            _pareto_objective_value(right.fusion_distortion)
+        )
     return (
         all(a <= b for a, b in zip(values_left, values_right))
         and any(a < b for a, b in zip(values_left, values_right))
@@ -2354,18 +2574,55 @@ def _repair_edge_cloud_coverage(
     client_edges: dict[int, int],
     previous_choices: dict[int, Candidate],
     objective: str = "pareto",
+    flow_inputs_by_candidate: dict[int, dict[tuple, ClientFlowInput]] | None = None,
+    profiler: dict[str, Any] | None = None,
 ) -> ProfileEvaluation:
-    """Repair a global profile so every represented edge reaches the cloud."""
+    """Repair edge-to-Cloud coverage with exact incremental candidate scoring.
+
+    For full-buffer round-synchronous flows, a one-client replacement has exact
+    O(affected-group) latency and J_learn updates. Only cases where those exact
+    incremental formulas do not apply fall back to a full profile evaluation.
+    """
+    repair_started_at = time.perf_counter()
+    _perf_add(profiler, "coverage_repair_calls")
+
     profile = dict(chosen.profile)
-    edge_ids = sorted({client_edges[client_id] for client_id in profile})
+
+    # Reuse the candidate-level flow inputs already prepared by the global
+    # selector. This avoids reconstructing the complete flow model for every
+    # repair candidate.
+    if flow_inputs_by_candidate is None:
+        flow_inputs_by_candidate = _profile_flow_inputs_by_candidate(
+            config,
+            pools,
+            client_samples,
+            client_edges,
+            previous_choices,
+            tuple(sorted(profile)),
+        )
+
+    edge_ids = sorted({
+        client_edges[client_id]
+        for client_id in profile
+    })
+
     for edge_id in edge_ids:
         edge_clients = [
             client_id
             for client_id in profile
             if client_edges[client_id] == edge_id
         ]
-        edge_samples = sum(client_samples[client_id] for client_id in edge_clients)
-        target_ratio = min(max(float(config.min_edge_cloud_fusion_ratio), 0.0), 1.0)
+
+        edge_samples = sum(
+            client_samples[client_id]
+            for client_id in edge_clients
+        )
+
+        target_ratio = min(
+            max(float(config.min_edge_cloud_fusion_ratio), 0.0),
+            1.0,
+        )
+
         target_samples = target_ratio * edge_samples
 
         def covered_samples() -> float:
@@ -2382,58 +2639,244 @@ def _repair_edge_cloud_coverage(
                 for client_id in edge_clients
             )
         ):
+            _perf_add(
+                profiler,
+                "coverage_repair_iterations",
+            )
+
             previous_covered = covered_samples()
+
+            # Exact incremental flow state for the current repair profile.
+            # For aggregation_fraction=1.0 this is the full-buffer path used
+            # by the current paper configuration.
+            base_flow_stats = _full_buffer_flow_stats(
+                config,
+                profile,
+                flow_inputs_by_candidate,
+            )
+
+            # Exact fixed-admission J_learn replacement statistics.
+            replacement_stats = None
+
+            if (
+                base_flow_stats is not None
+                and objective != "latency"
+            ):
+                replacement_stats = _LearningReplacementStats(
+                    config,
+                    profile,
+                    client_samples,
+                    client_edges,
+                    base_flow_stats.admitted_client_ids,
+                )
+
             repairs: list[ProfileEvaluation] = []
+
             for client_id in edge_clients:
-                if _candidate_reaches_cloud(profile[client_id]):
+                current = profile[client_id]
+
+                if _candidate_reaches_cloud(current):
                     continue
+
                 for candidate in pools[client_id]:
                     if not _candidate_reaches_cloud(candidate):
                         continue
+
                     repaired = dict(profile)
                     repaired[client_id] = candidate
-                    repairs.append(
-                        _evaluate_profile(
+
+                    candidate_started_at = time.perf_counter()
+
+                    evaluated: ProfileEvaluation | None = None
+
+                    # ----------------------------------------------------
+                    # Exact incremental path
+                    # ----------------------------------------------------
+                    if base_flow_stats is not None:
+                        new_input = flow_inputs_by_candidate[
+                            client_id
+                        ].get(
+                            _candidate_key(candidate)
+                        )
+
+                        flow_objectives = (
+                            _replace_full_buffer_flow_objectives(
+                                config,
+                                base_flow_stats,
+                                client_id,
+                                new_input,
+                            )
+                        )
+
+                        admitted, next_latency = flow_objectives
+
+                        if objective == "latency":
+                            # Latency is already exact; J_learn is irrelevant
+                            # for the latency-only repair objective.
+                            evaluated = ProfileEvaluation(
+                                profile=repaired,
+                                system_latency=float(next_latency),
+                                system_omega=0.0,
+                                cloud_fusion_ratio=0.0,
+                                admitted_client_ids=tuple(
+                                    sorted(admitted)
+                                ),
+                            )
+
+                        elif replacement_stats is not None:
+                            next_learning = (
+                                replacement_stats.replacement_cost(
+                                    client_id,
+                                    candidate,
+                                    admitted,
+                                )
+                            )
+
+                            if next_learning is not None:
+                                evaluated = ProfileEvaluation(
+                                    profile=repaired,
+                                    system_latency=float(next_latency),
+                                    system_omega=float(next_learning),
+                                    cloud_fusion_ratio=0.0,
+                                    admitted_client_ids=tuple(
+                                        sorted(admitted)
+                                    ),
+                                )
+
+                    # ----------------------------------------------------
+                    # Exact full-evaluation fallback
+                    # ----------------------------------------------------
+                    if evaluated is None:
+                        fallback_started_at = time.perf_counter()
+
+                        evaluated = _evaluate_profile(
                             config,
                             repaired,
                             client_samples,
                             client_edges,
                             previous_choices,
+                            flow_inputs_by_candidate=(
+                                flow_inputs_by_candidate
+                            ),
                         )
+
+                        fallback_elapsed = (
+                            time.perf_counter()
+                            - fallback_started_at
+                        )
+
+                        _perf_add(
+                            profiler,
+                            "coverage_repair_full_fallback_evaluations",
+                        )
+
+                        _perf_add(
+                            profiler,
+                            "coverage_repair_full_fallback_evaluation_sec",
+                            fallback_elapsed,
+                        )
+
+                        # Keep the Stage-8 field meaningful: it now measures
+                        # actual full candidate evaluations only.
+                        _perf_add(
+                            profiler,
+                            "coverage_repair_candidate_evaluation_sec",
+                            fallback_elapsed,
+                        )
+
+                    else:
+                        _perf_add(
+                            profiler,
+                            "coverage_repair_incremental_candidates",
+                        )
+
+                    _perf_add(
+                        profiler,
+                        "coverage_repair_candidate_evaluations",
                     )
+
+                    _perf_add(
+                        profiler,
+                        "coverage_repair_candidate_scoring_sec",
+                        (
+                            time.perf_counter()
+                            - candidate_started_at
+                        ),
+                    )
+
+                    repairs.append(evaluated)
+
             if not repairs:
                 raise RuntimeError(
-                    f"No feasible cloud-reaching candidate exists for edge {edge_id}"
-                )
-            profile = (
-                min(
-                    repairs,
-                    key=lambda item: (item.system_latency, _evaluation_key(item)),
-                )
-                if objective == "latency"
-                else min(
-                    repairs,
-                    key=lambda item: (item.system_omega, item.system_latency, _evaluation_key(item)),
-                )
-                if objective == "learning"
-                else _choose_tchebycheff(
-                    _pareto_archive(repairs, config.pareto_archive_size),
-                    config.pareto_norm_eps,
-                )
-            ).profile
-            if covered_samples() <= previous_covered + 1e-12:
-                raise RuntimeError(
-                    f"Cloud-coverage repair made no progress for edge {edge_id}"
+                    "No feasible cloud-reaching candidate exists "
+                    f"for edge {edge_id}"
                 )
 
-    return _evaluate_profile(
+            # Same decision semantics as the original implementation.
+            if objective == "latency":
+                selected = min(
+                    repairs,
+                    key=lambda item: (
+                        item.system_latency,
+                        _evaluation_key(item),
+                    ),
+                )
+
+            elif objective == "learning":
+                selected = min(
+                    repairs,
+                    key=lambda item: (
+                        item.system_omega,
+                        item.system_latency,
+                        _evaluation_key(item),
+                    ),
+                )
+
+            else:
+                selected = _choose_tchebycheff(
+                    _pareto_archive(
+                        repairs,
+                        config.pareto_archive_size,
+                    ),
+                    config.pareto_norm_eps,
+                )
+
+            profile = selected.profile
+
+            if (
+                covered_samples()
+                <= previous_covered + 1e-12
+            ):
+                raise RuntimeError(
+                    "Cloud-coverage repair made no progress "
+                    f"for edge {edge_id}"
+                )
+
+    # Only the final repaired profile needs the complete diagnostics.
+    final_eval_started_at = time.perf_counter()
+
+    result = _evaluate_profile(
         config,
         profile,
         client_samples,
         client_edges,
         previous_choices,
+        flow_inputs_by_candidate=flow_inputs_by_candidate,
     )
 
+    _perf_add(
+        profiler,
+        "coverage_repair_final_evaluation_sec",
+        time.perf_counter() - final_eval_started_at,
+    )
+
+    _perf_add(
+        profiler,
+        "coverage_repair_total_sec",
+        time.perf_counter() - repair_started_at,
+    )
+
+    return result
 
 def evaluate_global_profile(
     *,
@@ -2586,36 +3029,105 @@ def _initial_profiles(
 
     # Start at maximum reachable Cloud coverage.  Only modify the seed when
     # the paper's formal learning cost improves, using the real cohort masses.
+    #
+    # Candidate trials replace exactly one client while the provisional
+    # admission cohort remains fixed.  Reuse the exact incremental replacement
+    # accounting already used by bounded neighbor search instead of rescanning
+    # the complete profile for every trial.
     lowest_learning = dict(coverage_anchors[-1] if coverage_anchors else fastest)
+
     for cid in sorted(pools):
         current = lowest_learning[cid]
         best = current
-        best_cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
+
+        # Keep one exact full-profile evaluation for the current seed.
+        best_cost = _selection_learning_cost(
+            config, lowest_learning, masses, edges, admitted
+        )
+
+        replacement_stats = _LearningReplacementStats(
+            config,
+            lowest_learning,
+            masses,
+            edges,
+            admitted,
+        )
+
         for item in pools[cid]:
             if item == current:
                 continue
-            lowest_learning[cid] = item
-            cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
+
+            cost = replacement_stats.replacement_cost(
+                cid,
+                item,
+                admitted,
+            )
+
+            # Defensive exact fallback.  This should normally not be needed
+            # because the admission cohort is fixed during seed construction.
+            if cost is None:
+                lowest_learning[cid] = item
+                cost = _selection_learning_cost(
+                    config,
+                    lowest_learning,
+                    masses,
+                    edges,
+                    admitted,
+                )
+                lowest_learning[cid] = current
+
             if (cost, item.time, _candidate_key(item)) < (
                 best_cost, best.time, _candidate_key(best)
             ):
                 best_cost, best = cost, item
+
         lowest_learning[cid] = best
 
     # Evaluate the formal learning cost of single-client switches in the
     # learning-oriented seed rather than an obsolete local convergence proxy.
-    reference_cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
+    reference_cost = _selection_learning_cost(
+        config,
+        lowest_learning,
+        masses,
+        edges,
+        admitted,
+    )
+
+    hint_stats = _LearningReplacementStats(
+        config,
+        lowest_learning,
+        masses,
+        edges,
+        admitted,
+    )
+
     learning_hint: dict[int, dict[tuple, float]] = {}
+
     for cid, candidates in pools.items():
         learning_hint[cid] = {}
         current = lowest_learning[cid]
+
         for item in candidates:
             if item == current:
                 cost = reference_cost
             else:
-                lowest_learning[cid] = item
-                cost = _selection_learning_cost(config, lowest_learning, masses, edges, admitted)
-                lowest_learning[cid] = current
+                cost = hint_stats.replacement_cost(
+                    cid,
+                    item,
+                    admitted,
+                )
+
+                if cost is None:
+                    lowest_learning[cid] = item
+                    cost = _selection_learning_cost(
+                        config,
+                        lowest_learning,
+                        masses,
+                        edges,
+                        admitted,
+                    )
+                    lowest_learning[cid] = current
+
             learning_hint[cid][_candidate_key(item)] = cost
 
     intermediate_profiles: list[dict[int, Candidate]] = []
@@ -2715,7 +3227,8 @@ class _LearningReplacementStats:
         self.profile = profile
         self.samples = client_samples
         self.edges = client_edges
-        self.admitted = frozenset(admitted_client_ids)
+        self.admitted_ids = tuple(admitted_client_ids)
+        self.admitted = frozenset(self.admitted_ids)
         self.total_samples = sum(max(float(value), 0.0) for value in client_samples.values())
         self.admitted_mass = sum(
             max(float(client_samples.get(cid, 0.0)), 0.0)
@@ -2748,16 +3261,141 @@ class _LearningReplacementStats:
             if candidate.mode == "LIIE":
                 self.edge_groups.setdefault(int(client_edges.get(cid, -1)), {})[cid] = candidate
         self.secure_score = self._max_product_sq(self.secure)
+
+        # Stage 12E1:
+        # _max_product_sq(secure) depends only on the independent maxima of
+        # mass and sigma.  A single-client replacement can remove at most one
+        # member, so top-2 is sufficient for an exact O(1) update.
+        self.secure_mass_top2 = tuple(
+            sorted(
+                (
+                    (float(pair[0]), int(cid))
+                    for cid, pair in self.secure.items()
+                ),
+                reverse=True,
+            )[:2]
+        )
+        self.secure_sigma_top2 = tuple(
+            sorted(
+                (
+                    (float(pair[1]), int(cid))
+                    for cid, pair in self.secure.items()
+                ),
+                reverse=True,
+            )[:2]
+        )
+
         self.packet_scores = {
             key: self._max_product_sq(members)
             for key, members in self.packets.items()
         }
-        self.independent_score = sum((mass * sigma) ** 2 for mass, sigma in self.independent.values())
+
+        # Stage 12E2:
+        # Exact O(1) single-client replacement inside each packet group.
+        self.packet_mass_top2 = {
+            key: tuple(
+                sorted(
+                    (
+                        (float(pair[0]), int(cid))
+                        for cid, pair in members.items()
+                    ),
+                    reverse=True,
+                )[:2]
+            )
+            for key, members in self.packets.items()
+        }
+
+        self.packet_sigma_top2 = {
+            key: tuple(
+                sorted(
+                    (
+                        (float(pair[1]), int(cid))
+                        for cid, pair in members.items()
+                    ),
+                    reverse=True,
+                )[:2]
+            )
+            for key, members in self.packets.items()
+        }
+
+        self.packet_score_total = sum(self.packet_scores.values())
+        self.independent_score = sum(
+            (mass * sigma) ** 2
+            for mass, sigma in self.independent.values()
+        )
         self.edge_scores = {
             edge: self._edge_cost(members)
             for edge, members in self.edge_groups.items()
         } if self.factor > 0.0 else {}
         self.edge_total = sum(self.edge_scores.values())
+
+        # Stage 12E3:
+        # Exact fast path for LIIE -> LIIE replacement. Membership and
+        # group sample mass stay fixed, so only the candidate-dependent
+        # DP mechanism/sigma contribution needs updating.
+        self.edge_group_masses: dict[int, float] = {}
+        self.edge_member_counts: dict[int, int] = {}
+        self.edge_aggregate_counts: dict[int, int] = {}
+        self.edge_independent_group_scores: dict[int, float] = {}
+        self.edge_mass_max: dict[int, float] = {}
+        self.edge_sigma_top2: dict[int, tuple[tuple[float, int], ...]] = {}
+
+        for edge, members in self.edge_groups.items():
+            group_mass = sum(
+                self._mass(member_cid)
+                for member_cid in members
+            )
+
+            self.edge_group_masses[edge] = group_mass
+            self.edge_member_counts[edge] = len(members)
+
+            self.edge_aggregate_counts[edge] = sum(
+                1
+                for member_candidate in members.values()
+                if _candidate_uses_edge_local_exact_update_dp(
+                    member_candidate
+                )
+            )
+
+            if group_mass > 0.0:
+                self.edge_independent_group_scores[edge] = sum(
+                    (
+                        self._mass(member_cid)
+                        * self._sigma(member_candidate)
+                        / group_mass
+                    ) ** 2
+                    for member_cid, member_candidate in members.items()
+                    if mechanism_uses_dp(
+                        candidate_link_mechanism(
+                            member_candidate,
+                            "L_E_upd",
+                        )
+                    )
+                )
+            else:
+                self.edge_independent_group_scores[edge] = 0.0
+
+            self.edge_mass_max[edge] = max(
+                (
+                    self._mass(member_cid)
+                    for member_cid in members
+                ),
+                default=0.0,
+            )
+
+            self.edge_sigma_top2[edge] = tuple(
+                sorted(
+                    (
+                        (
+                            float(self._sigma(member_candidate)),
+                            int(member_cid),
+                        )
+                        for member_cid, member_candidate
+                        in members.items()
+                    ),
+                    reverse=True,
+                )[:2]
+            )
 
     def _mass(self, cid: int) -> float:
         return max(float(self.samples.get(cid, 0.0)), 0.0)
@@ -2772,6 +3410,26 @@ class _LearningReplacementStats:
         mass = max(pair[0] for pair in members.values())
         sigma = max(pair[1] for pair in members.values())
         return (mass * sigma) ** 2
+
+    @staticmethod
+    def _replacement_max_from_top2(
+        top2: tuple[tuple[float, int], ...],
+        cid: int,
+        new_value: float | None,
+    ) -> float:
+        """Exact max after removing cid and optionally inserting new_value."""
+        if not top2:
+            remaining = 0.0
+        elif top2[0][1] == cid:
+            remaining = top2[1][0] if len(top2) > 1 else 0.0
+        else:
+            remaining = top2[0][0]
+
+        if new_value is not None:
+            remaining = max(remaining, float(new_value))
+
+        return float(remaining)
+
 
     def _cloud_entry(
         self, cid: int, candidate: Candidate,
@@ -2823,10 +3481,12 @@ class _LearningReplacementStats:
         cid: int,
         candidate: Candidate,
         admitted_client_ids: tuple[int, ...] | list[int],
+        old_cloud_entry: tuple[Any, Any, Any] | None = None,
     ) -> float | None:
         """Return exact fixed-admission lookahead, or None for a changed cohort."""
-        if frozenset(admitted_client_ids) != self.admitted:
-            return None
+        if admitted_client_ids != self.admitted_ids:
+            if frozenset(admitted_client_ids) != self.admitted:
+                return None
         old = self.profile[cid]
         mass = self._mass(cid)
         cloud_mass = self.cloud_mass + mass * (
@@ -2837,26 +3497,78 @@ class _LearningReplacementStats:
         if self.factor <= 0.0 or not self.admitted:
             return fusion_bound
 
-        old_type, old_key, old_pair = self._cloud_entry(cid, old)
+        if old_cloud_entry is None:
+            old_type, old_key, old_pair = self._cloud_entry(cid, old)
+        else:
+            old_type, old_key, old_pair = old_cloud_entry
+
         new_type, new_key, new_pair = self._cloud_entry(cid, candidate)
         secure_score = self.secure_score
         if old_type == "secure" or new_type == "secure":
-            secure = dict(self.secure)
-            secure.pop(cid, None)
-            if new_type == "secure":
-                secure[cid] = new_pair
-            secure_score = self._max_product_sq(secure)
+            new_mass = (
+                float(new_pair[0])
+                if new_type == "secure"
+                else None
+            )
+            new_sigma = (
+                float(new_pair[1])
+                if new_type == "secure"
+                else None
+            )
 
-        packet_score = sum(self.packet_scores.values())
-        keys = {key for key in (old_key if old_type == "packet" else None,
-                                new_key if new_type == "packet" else None) if key is not None}
+            secure_mass_max = self._replacement_max_from_top2(
+                self.secure_mass_top2,
+                cid,
+                new_mass,
+            )
+            secure_sigma_max = self._replacement_max_from_top2(
+                self.secure_sigma_top2,
+                cid,
+                new_sigma,
+            )
+
+            secure_score = (
+                secure_mass_max * secure_sigma_max
+            ) ** 2
+
+        packet_score = self.packet_score_total
+        keys = {
+            key
+            for key in (
+                old_key if old_type == "packet" else None,
+                new_key if new_type == "packet" else None,
+            )
+            if key is not None
+        }
+
         for key in keys:
             packet_score -= self.packet_scores.get(key, 0.0)
-            members = dict(self.packets.get(key, {}))
-            members.pop(cid, None)
-            if new_type == "packet" and new_key == key:
-                members[cid] = new_pair
-            packet_score += self._max_product_sq(members)
+
+            new_mass = (
+                float(new_pair[0])
+                if new_type == "packet" and new_key == key
+                else None
+            )
+            new_sigma = (
+                float(new_pair[1])
+                if new_type == "packet" and new_key == key
+                else None
+            )
+
+            mass_max = self._replacement_max_from_top2(
+                self.packet_mass_top2.get(key, ()),
+                cid,
+                new_mass,
+            )
+            sigma_max = self._replacement_max_from_top2(
+                self.packet_sigma_top2.get(key, ()),
+                cid,
+                new_sigma,
+            )
+
+            packet_score += (
+                mass_max * sigma_max
+            ) ** 2
 
         independent_score = self.independent_score
         if old_type == "independent":
@@ -2872,11 +3584,200 @@ class _LearningReplacementStats:
         if old.mode == "LIIE" or candidate.mode == "LIIE":
             edge = int(self.edges.get(cid, -1))
             edge_dp -= self.edge_scores.get(edge, 0.0)
-            members = dict(self.edge_groups.get(edge, {}))
-            members.pop(cid, None)
-            if candidate.mode == "LIIE":
-                members[cid] = candidate
-            edge_dp += self._edge_cost(members)
+
+            if old.mode == "LIIE" and candidate.mode == "LIIE":
+                # Membership is unchanged. Therefore member_count,
+                # group_mass and mass maximum are fixed.
+                group_mass = self.edge_group_masses.get(edge, 0.0)
+                member_count = self.edge_member_counts.get(edge, 0)
+
+                old_aggregate = (
+                    _candidate_uses_edge_local_exact_update_dp(old)
+                )
+                new_aggregate = (
+                    _candidate_uses_edge_local_exact_update_dp(candidate)
+                )
+
+                aggregate_count = (
+                    self.edge_aggregate_counts.get(edge, 0)
+                    - int(old_aggregate)
+                    + int(new_aggregate)
+                )
+
+                if group_mass <= 0.0 or self.admitted_mass <= 0.0:
+                    next_edge_cost = 0.0
+
+                elif aggregate_count:
+                    # Preserve the exact consistency check from _edge_cost().
+                    if (
+                        aggregate_count != member_count
+                        or member_count < 2
+                    ):
+                        raise ValueError(
+                            "Inconsistent LIIE aggregate DP cohort in profile"
+                        )
+
+                    group_sigma = self._replacement_max_from_top2(
+                        self.edge_sigma_top2.get(edge, ()),
+                        cid,
+                        self._sigma(candidate),
+                    )
+
+                    max_mass = self.edge_mass_max.get(edge, 0.0)
+
+                    group_score = (
+                        group_sigma
+                        * max_mass
+                        / group_mass
+                    ) ** 2
+
+                    next_edge_cost = (
+                        self.factor
+                        * (group_mass / self.admitted_mass)
+                        * group_score
+                    )
+
+                else:
+                    # Independent-DP cohort. group_mass is unchanged, so
+                    # update only this client's normalized squared term.
+                    group_score = (
+                        self.edge_independent_group_scores.get(
+                            edge,
+                            0.0,
+                        )
+                    )
+
+                    old_uses_dp = mechanism_uses_dp(
+                        candidate_link_mechanism(
+                            old,
+                            "L_E_upd",
+                        )
+                    )
+                    new_uses_dp = mechanism_uses_dp(
+                        candidate_link_mechanism(
+                            candidate,
+                            "L_E_upd",
+                        )
+                    )
+
+                    if old_uses_dp:
+                        group_score -= (
+                            mass
+                            * self._sigma(old)
+                            / group_mass
+                        ) ** 2
+
+                    if new_uses_dp:
+                        group_score += (
+                            mass
+                            * self._sigma(candidate)
+                            / group_mass
+                        ) ** 2
+
+                    next_edge_cost = (
+                        self.factor
+                        * (group_mass / self.admitted_mass)
+                        * group_score
+                    )
+
+                edge_dp += next_edge_cost
+
+            else:
+                # Stage 12F13:
+                # Exact O(1) fast path for membership changes when the
+                # resulting LIIE cohort uses independent DP.
+                #
+                # The existing normalized independent score is rescaled
+                # from the old group mass to the new group mass, then only
+                # this client's contribution is removed/added.
+                base_group_mass = self.edge_group_masses.get(edge, 0.0)
+                new_group_mass = base_group_mass
+                new_aggregate_count = self.edge_aggregate_counts.get(edge, 0)
+
+                if old.mode == "LIIE":
+                    new_group_mass -= mass
+                    new_aggregate_count -= int(
+                        _candidate_uses_edge_local_exact_update_dp(old)
+                    )
+                else:
+                    new_group_mass += mass
+                    new_aggregate_count += int(
+                        _candidate_uses_edge_local_exact_update_dp(candidate)
+                    )
+
+                if new_group_mass <= 0.0 or self.admitted_mass <= 0.0:
+                    next_edge_cost = 0.0
+
+                elif new_aggregate_count == 0:
+                    group_score = self.edge_independent_group_scores.get(
+                        edge,
+                        0.0,
+                    )
+
+                    # Remove this client's old contribution while still
+                    # expressed using the original denominator.
+                    if (
+                        old.mode == "LIIE"
+                        and base_group_mass > 0.0
+                        and mechanism_uses_dp(
+                            candidate_link_mechanism(
+                                old,
+                                "L_E_upd",
+                            )
+                        )
+                    ):
+                        group_score -= (
+                            mass
+                            * self._sigma(old)
+                            / base_group_mass
+                        ) ** 2
+
+                    # Rescale all unchanged members to the new denominator.
+                    if base_group_mass > 0.0:
+                        group_score *= (
+                            base_group_mass / new_group_mass
+                        ) ** 2
+                    else:
+                        group_score = 0.0
+
+                    # Add this client's new contribution using the new
+                    # denominator.
+                    if (
+                        candidate.mode == "LIIE"
+                        and mechanism_uses_dp(
+                            candidate_link_mechanism(
+                                candidate,
+                                "L_E_upd",
+                            )
+                        )
+                    ):
+                        group_score += (
+                            mass
+                            * self._sigma(candidate)
+                            / new_group_mass
+                        ) ** 2
+
+                    next_edge_cost = (
+                        self.factor
+                        * (new_group_mass / self.admitted_mass)
+                        * group_score
+                    )
+
+                    edge_dp += next_edge_cost
+
+                else:
+                    # Aggregate-DP membership changes retain the original
+                    # reference path, including its consistency checks.
+                    members = dict(
+                        self.edge_groups.get(edge, {})
+                    )
+                    members.pop(cid, None)
+
+                    if candidate.mode == "LIIE":
+                        members[cid] = candidate
+
+                    edge_dp += self._edge_cost(members)
+
         return float(fusion_bound + cloud_dp + edge_dp)
 
 
@@ -2890,11 +3791,12 @@ def _global_replacement_priority(
     candidate: Candidate,
     client_samples: dict[int, float],
     client_edges: dict[int, int],
-    trial_profile: dict[int, Candidate],
+    trial_profile: dict[int, Candidate] | None,
     flow_objectives: tuple[tuple[int, ...], float] | None,
     replacement_stats: _LearningReplacementStats | None = None,
+    old_cloud_entry: tuple[Any, Any, Any] | None = None,
     profiler: dict[str, Any] | None = None,
-) -> float:
+) -> tuple[float, float | None]:
     """Rank neighbors by the two *formal* paper objectives.
 
     This fixed-admission score is only a beam prefilter, not a proof of
@@ -2907,7 +3809,7 @@ def _global_replacement_priority(
         else float(evaluated.system_latency + candidate.time - current.time)
     )
     if objective == "latency":
-        return next_time
+        return next_time, None
     admitted = (
         tuple(flow_objectives[0]) if flow_objectives is not None
         else evaluated.admitted_client_ids
@@ -2915,16 +3817,43 @@ def _global_replacement_priority(
     next_learning = None
     if replacement_stats is not None:
         incremental_started_at = time.perf_counter()
-        next_learning = replacement_stats.replacement_cost(client_id, candidate, admitted)
+        next_learning = replacement_stats.replacement_cost(
+            client_id,
+            candidate,
+            admitted,
+            old_cloud_entry=old_cloud_entry,
+        )
         _perf_add(profiler, "incremental_jlearn_calls")
         _perf_add(profiler, "incremental_jlearn_sec", time.perf_counter() - incremental_started_at)
     if next_learning is None:
         fallback_started_at = time.perf_counter()
+
+        # Stage 11B: materialize the complete trial profile only when the
+        # incremental learning-cost path is unavailable.
+        fallback_profile = trial_profile
+        if fallback_profile is None:
+            fallback_profile = dict(evaluated.profile)
+            fallback_profile[client_id] = candidate
+            _perf_add(
+                profiler,
+                "neighbor_priority_fallback_profile_materializations",
+            )
+
         next_learning = _selection_learning_cost(
-            config, trial_profile, client_samples, client_edges, admitted,
+            config,
+            fallback_profile,
+            client_samples,
+            client_edges,
+            admitted,
         )
         _perf_add(profiler, "full_jlearn_fallback_calls")
-        _perf_add(profiler, "full_jlearn_fallback_sec", time.perf_counter() - fallback_started_at)
+        _perf_add(
+            profiler,
+            "full_jlearn_fallback_sec",
+            time.perf_counter() - fallback_started_at,
+        )
+    arithmetic_started_at = time.perf_counter()
+
     time_scale = max(abs(evaluated.system_latency), abs(next_time), 1.0)
     learning_scale = max(
         abs(evaluated.system_learning_error), abs(next_learning), 1e-12,
@@ -2933,8 +3862,19 @@ def _global_replacement_priority(
         0.5 * (next_time - evaluated.system_latency) / time_scale
         + 0.5 * (next_learning - evaluated.system_learning_error) / learning_scale
     )
-    _perf_add(profiler, "replacement_priority_sec", time.perf_counter() - priority_started_at)
-    return priority
+
+    _perf_add(
+        profiler,
+        "replacement_priority_arithmetic_sec",
+        time.perf_counter() - arithmetic_started_at,
+    )
+    _perf_add(
+        profiler,
+        "replacement_priority_sec",
+        time.perf_counter() - priority_started_at,
+    )
+
+    return priority, float(next_learning)
 
 
 def _state_diff_vector(state_diff: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
@@ -3348,7 +4288,7 @@ def _replace_full_buffer_flow_objectives(
         if key not in affected_keys
     ]
     for key in affected_keys:
-        summary = _replace_full_buffer_group_summary(
+        summary = _replace_full_buffer_group_latency_summary(
             config,
             key,
             stats.summaries.get(key),
@@ -3436,6 +4376,149 @@ def _summarize_full_buffer_group(
         edge_upload_second=edge_upload_second,
         cloud_payload_top=cloud_payload_top,
         cloud_payload_second=cloud_payload_second,
+    )
+
+
+def _replace_full_buffer_group_latency_summary(
+    config: SelectionConfig,
+    key: tuple[str, int, str],
+    summary: _FullBufferGroupSummary | None,
+    old_input: ClientFlowInput | None,
+    new_input: ClientFlowInput | None,
+) -> _FullBufferLatencySummary | None:
+    old_count = 0 if old_input is None else 1
+    new_count = 0 if new_input is None else 1
+    member_count = (
+        (0 if summary is None else summary.member_count)
+        - old_count
+        + new_count
+    )
+    if member_count <= 0:
+        return None
+
+    old_client_id = None if old_input is None else old_input.client_id
+
+    if summary is None:
+        arrival_top = None
+        return_top = None
+        edge_upload_top = None
+        cloud_payload_top = None
+    else:
+        arrival_top = (
+            summary.arrival_second
+            if summary.arrival_top[-2] == old_client_id
+            else summary.arrival_top
+        )
+        return_top = (
+            summary.return_second
+            if summary.return_top[-2] == old_client_id
+            else summary.return_top
+        )
+        edge_upload_top = (
+            summary.edge_upload_second
+            if summary.edge_upload_top[-2] == old_client_id
+            else summary.edge_upload_top
+        )
+        cloud_payload_top = (
+            summary.cloud_payload_second
+            if summary.cloud_payload_top[-2] == old_client_id
+            else summary.cloud_payload_top
+        )
+
+    if new_input is not None:
+        dispatch_sequence = new_input.dispatch_sequence
+        new_client_id = new_input.client_id
+
+        new_arrival_top = (
+            new_input.arrival_time,
+            dispatch_sequence,
+            new_client_id,
+            max(1, int(new_input.edge_loops)),
+        )
+        if arrival_top is None or new_arrival_top > arrival_top:
+            arrival_top = new_arrival_top
+
+        new_return_top = (
+            new_input.return_path_time,
+            dispatch_sequence,
+            new_client_id,
+            0,
+        )
+        if return_top is None or new_return_top > return_top:
+            return_top = new_return_top
+
+        new_edge_upload_top = (
+            new_input.edge_to_cloud_time,
+            dispatch_sequence,
+            new_client_id,
+            0,
+        )
+        if edge_upload_top is None or new_edge_upload_top > edge_upload_top:
+            edge_upload_top = new_edge_upload_top
+
+        new_cloud_payload_top = (
+            new_input.cloud_aggregation_payload,
+            dispatch_sequence,
+            new_client_id,
+            0,
+        )
+        if (
+            cloud_payload_top is None
+            or new_cloud_payload_top > cloud_payload_top
+        ):
+            cloud_payload_top = new_cloud_payload_top
+
+    assert arrival_top is not None
+    assert return_top is not None
+    assert edge_upload_top is not None
+    assert cloud_payload_top is not None
+
+    edge_payload_sum = (
+        (0.0 if summary is None else summary.edge_payload_sum)
+        - (0.0 if old_input is None else old_input.edge_aggregation_payload)
+        + (0.0 if new_input is None else new_input.edge_aggregation_payload)
+    )
+    cloud_payload_sum = (
+        (0.0 if summary is None else summary.cloud_payload_sum)
+        - (0.0 if old_input is None else old_input.cloud_aggregation_payload)
+        + (0.0 if new_input is None else new_input.cloud_aggregation_payload)
+    )
+
+    start_time = arrival_top[0]
+    return_path_time = return_top[0]
+
+    kind = "edge_cloud"
+    terminal_time = 0.0
+    cloud_arrival_time = 0.0
+    cloud_aggregation_payload = cloud_payload_top[0]
+
+    if key[0] == "__direct_cloud__":
+        kind = "direct_cloud"
+        cloud_arrival_time = start_time
+        cloud_aggregation_payload = cloud_payload_sum
+    else:
+        edge_aggregation_time = arrival_top[3] * (
+            config.edge_aggregation_beta * edge_payload_sum
+            + config.edge_aggregation_fixed
+        )
+        edge_finish_time = start_time + edge_aggregation_time
+
+        if key[0] in EDGE_ONLY_MODES:
+            kind = "edge_only"
+            terminal_time = edge_finish_time + return_path_time
+            cloud_aggregation_payload = 0.0
+        else:
+            cloud_arrival_time = (
+                edge_finish_time
+                + edge_upload_top[0]
+            )
+
+    return _FullBufferLatencySummary(
+        kind=kind,
+        terminal_time=terminal_time,
+        cloud_arrival_time=cloud_arrival_time,
+        cloud_aggregation_payload=cloud_aggregation_payload,
+        return_path_time=return_path_time,
     )
 
 
@@ -3615,27 +4698,58 @@ def _updated_top(first, second, old_client_id: int | None, new_value):
 
 def _full_buffer_system_latency(
     config: SelectionConfig,
-    summaries: list[_FullBufferGroupSummary],
+    summaries: list[
+        _FullBufferGroupSummary | _FullBufferLatencySummary
+    ],
 ) -> float:
-    terminal_times = [
-        summary.terminal_time
-        for summary in summaries
-        if summary.kind == "edge_only"
-    ]
-    cloud_sources = [
-        summary
-        for summary in summaries
-        if summary.kind in {"direct_cloud", "edge_cloud"}
-    ]
-    if cloud_sources:
-        terminal_times.append(
-            max(summary.cloud_arrival_time for summary in cloud_sources)
-            + config.cloud_aggregation_beta
-            * sum(summary.cloud_aggregation_payload for summary in cloud_sources)
+    edge_terminal_max: float | None = None
+    cloud_arrival_max: float | None = None
+    cloud_payload_sum = 0.0
+    cloud_return_max: float | None = None
+
+    for summary in summaries:
+        kind = summary.kind
+        if kind == "edge_only":
+            terminal_time = summary.terminal_time
+            if (
+                edge_terminal_max is None
+                or terminal_time > edge_terminal_max
+            ):
+                edge_terminal_max = terminal_time
+        elif kind == "direct_cloud" or kind == "edge_cloud":
+            cloud_arrival_time = summary.cloud_arrival_time
+            if (
+                cloud_arrival_max is None
+                or cloud_arrival_time > cloud_arrival_max
+            ):
+                cloud_arrival_max = cloud_arrival_time
+
+            cloud_payload_sum += summary.cloud_aggregation_payload
+
+            return_path_time = summary.return_path_time
+            if (
+                cloud_return_max is None
+                or return_path_time > cloud_return_max
+            ):
+                cloud_return_max = return_path_time
+
+    terminal_max = edge_terminal_max
+
+    if cloud_arrival_max is not None:
+        assert cloud_return_max is not None
+        cloud_terminal_time = (
+            cloud_arrival_max
+            + config.cloud_aggregation_beta * cloud_payload_sum
             + config.cloud_aggregation_fixed
-            + max(summary.return_path_time for summary in cloud_sources)
+            + cloud_return_max
         )
-    return max(terminal_times, default=0.0)
+        if (
+            terminal_max is None
+            or cloud_terminal_time > terminal_max
+        ):
+            terminal_max = cloud_terminal_time
+
+    return 0.0 if terminal_max is None else terminal_max
 
 
 def _admitted_clients_for_profile(
@@ -4574,29 +5688,65 @@ def _bounded_search_beam(
         return []
     candidates = _unique_evaluations(evaluations)
     bounds_source = reference + candidates
-    t_values = [item.system_latency for item in bounds_source]
-    o_values = [item.system_omega for item in bounds_source]
+    t_values = [
+        _pareto_objective_value(item.system_latency)
+        for item in bounds_source
+    ]
+    o_values = [
+        _pareto_objective_value(item.system_omega)
+        for item in bounds_source
+    ]
     t_min, t_max = min(t_values), max(t_values)
     o_min, o_max = min(o_values), max(o_values)
     use_fusion = any(item.fusion_objective_enabled for item in bounds_source)
     if use_fusion:
-        f_values = [item.fusion_distortion for item in bounds_source]
+        f_values = [
+            _pareto_objective_value(item.fusion_distortion)
+            for item in bounds_source
+        ]
         f_min, f_max = min(f_values), max(f_values)
     else:
         f_min = f_max = 0.0
 
     def beam_key(item: ProfileEvaluation) -> tuple:
+        stable_latency = _pareto_objective_value(
+            item.system_latency
+        )
+        stable_learning = _pareto_objective_value(
+            item.system_omega
+        )
+        stable_fusion = _pareto_objective_value(
+            item.fusion_distortion
+        )
+
         values = [
-            _safe_norm_eps(item.system_latency, t_min, t_max, norm_eps),
-            _safe_norm_eps(item.system_omega, o_min, o_max, norm_eps),
+            _safe_norm_eps(
+                stable_latency,
+                t_min,
+                t_max,
+                norm_eps,
+            ),
+            _safe_norm_eps(
+                stable_learning,
+                o_min,
+                o_max,
+                norm_eps,
+            ),
         ]
         if use_fusion:
-            values.append(_safe_norm_eps(item.fusion_distortion, f_min, f_max, norm_eps))
+            values.append(
+                _safe_norm_eps(
+                    stable_fusion,
+                    f_min,
+                    f_max,
+                    norm_eps,
+                )
+            )
         return (
             max(values),
-            item.system_latency,
-            item.system_omega,
-            item.fusion_distortion,
+            stable_latency,
+            stable_learning,
+            stable_fusion,
             _evaluation_key(item),
         )
 
@@ -4633,29 +5783,65 @@ def _pareto_archive(
         return frontier
 
     # Deterministic normalized Tchebycheff truncation of a potentially large frontier.
-    t_values = [item.system_latency for item in frontier]
-    o_values = [item.system_omega for item in frontier]
+    t_values = [
+        _pareto_objective_value(item.system_latency)
+        for item in frontier
+    ]
+    o_values = [
+        _pareto_objective_value(item.system_omega)
+        for item in frontier
+    ]
     t_min, t_max = min(t_values), max(t_values)
     o_min, o_max = min(o_values), max(o_values)
     use_fusion = any(item.fusion_objective_enabled for item in frontier)
     if use_fusion:
-        f_values = [item.fusion_distortion for item in frontier]
+        f_values = [
+            _pareto_objective_value(item.fusion_distortion)
+            for item in frontier
+        ]
         f_min, f_max = min(f_values), max(f_values)
     else:
         f_min = f_max = 0.0
 
     def key(item: ProfileEvaluation) -> tuple:
+        stable_latency = _pareto_objective_value(
+            item.system_latency
+        )
+        stable_learning = _pareto_objective_value(
+            item.system_omega
+        )
+        stable_fusion = _pareto_objective_value(
+            item.fusion_distortion
+        )
+
         vals = [
-            _safe_norm_eps(item.system_latency, t_min, t_max, 1e-9),
-            _safe_norm_eps(item.system_omega, o_min, o_max, 1e-9),
+            _safe_norm_eps(
+                stable_latency,
+                t_min,
+                t_max,
+                1e-9,
+            ),
+            _safe_norm_eps(
+                stable_learning,
+                o_min,
+                o_max,
+                1e-9,
+            ),
         ]
         if use_fusion:
-            vals.append(_safe_norm_eps(item.fusion_distortion, f_min, f_max, 1e-9))
+            vals.append(
+                _safe_norm_eps(
+                    stable_fusion,
+                    f_min,
+                    f_max,
+                    1e-9,
+                )
+            )
         return (
             max(vals),
-            item.system_latency,
-            item.system_omega,
-            item.fusion_distortion,
+            stable_latency,
+            stable_learning,
+            stable_fusion,
             repr(_evaluation_key(item)),
         )
 
@@ -4678,29 +5864,65 @@ def _latency_archive(
 def _choose_tchebycheff(archive: list[ProfileEvaluation], norm_eps: float) -> ProfileEvaluation:
     if not archive:
         return ProfileEvaluation({}, 0.0, 0.0, 0.0, ())
-    t_values = [item.system_latency for item in archive]
-    o_values = [item.system_omega for item in archive]
+    t_values = [
+        _pareto_objective_value(item.system_latency)
+        for item in archive
+    ]
+    o_values = [
+        _pareto_objective_value(item.system_omega)
+        for item in archive
+    ]
     t_min, t_max = min(t_values), max(t_values)
     o_min, o_max = min(o_values), max(o_values)
     use_fusion = any(item.fusion_objective_enabled for item in archive)
     if use_fusion:
-        f_values = [item.fusion_distortion for item in archive]
+        f_values = [
+            _pareto_objective_value(item.fusion_distortion)
+            for item in archive
+        ]
         f_min, f_max = min(f_values), max(f_values)
     else:
         f_min = f_max = 0.0
 
     def distance(item: ProfileEvaluation) -> tuple[float, float, float, float, str]:
+        stable_latency = _pareto_objective_value(
+            item.system_latency
+        )
+        stable_learning = _pareto_objective_value(
+            item.system_omega
+        )
+        stable_fusion = _pareto_objective_value(
+            item.fusion_distortion
+        )
+
         values = [
-            _safe_norm_eps(item.system_latency, t_min, t_max, norm_eps),
-            _safe_norm_eps(item.system_omega, o_min, o_max, norm_eps),
+            _safe_norm_eps(
+                stable_latency,
+                t_min,
+                t_max,
+                norm_eps,
+            ),
+            _safe_norm_eps(
+                stable_learning,
+                o_min,
+                o_max,
+                norm_eps,
+            ),
         ]
         if use_fusion:
-            values.append(_safe_norm_eps(item.fusion_distortion, f_min, f_max, norm_eps))
+            values.append(
+                _safe_norm_eps(
+                    stable_fusion,
+                    f_min,
+                    f_max,
+                    norm_eps,
+                )
+            )
         return (
             max(abs(value) for value in values),
-            item.system_latency,
-            item.system_omega,
-            item.fusion_distortion,
+            stable_latency,
+            stable_learning,
+            stable_fusion,
             repr(_evaluation_key(item)),
         )
 
