@@ -120,6 +120,7 @@ class SelectionConfig:
     dp_noise_multiplier: float = 0.0002
     dp_delta: float = 1e-5
     dp_accounting_mode: str = "rdp_auto"
+    privacy_unit: str = "client"
     dp_feature_epsilon_budget: float | None = None
     dp_update_epsilon_budget: float | None = None
     dp_feature_noise_multiplier: float | None = None

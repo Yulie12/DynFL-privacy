@@ -160,6 +160,7 @@ def build_command(
         "edge_cloud_base_latency_sec": network["edge_cloud_base_latency_sec"],
         "min_edge_cloud_fusion_ratio": system["min_edge_cloud_fusion_ratio"],
         "dp_accounting_mode": privacy["accounting_mode"],
+        "privacy_unit": privacy.get("unit", "client"),
         "update_protection_goal": privacy.get("update_protection_goal", "packet_protection"),
         "liie_edge_dp_plan": liie_edge_dp_plan or privacy.get("liie_edge_dp_plan", "independent"),
         "cloud_dp_plan": cloud_dp_plan or privacy.get("cloud_dp_plan", "legacy"),

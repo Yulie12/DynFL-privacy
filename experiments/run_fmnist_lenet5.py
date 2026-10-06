@@ -129,6 +129,12 @@ def parse_args() -> argparse.Namespace:
         choices=["rdp_auto", "rdp_manual"],
         help="Auto calibrates Gaussian noise from the fixed total target and round horizon.",
     )
+    parser.add_argument(
+        "--privacy-unit",
+        default="client",
+        choices=["client", "sample"],
+        help="Privacy adjacency unit. 'client' preserves the existing client-level DP path; 'sample' enables the sample-level path.",
+    )
     parser.add_argument("--dp-feature-epsilon-budget", type=float, default=None)
     parser.add_argument("--dp-update-epsilon-budget", type=float, default=None)
     parser.add_argument("--dp-feature-noise-multiplier", type=float, default=None)
@@ -324,6 +330,7 @@ def main() -> None:
         dp_upd_epsilon=args.dp_upd_epsilon,
         dp_noise_multiplier=args.dp_noise_multiplier,
         dp_accounting_mode=args.dp_accounting_mode,
+        privacy_unit=args.privacy_unit,
         dp_feature_epsilon_budget=args.dp_feature_epsilon_budget,
         dp_update_epsilon_budget=args.dp_update_epsilon_budget,
         dp_feature_noise_multiplier=args.dp_feature_noise_multiplier,
