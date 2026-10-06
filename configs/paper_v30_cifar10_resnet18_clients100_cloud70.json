@@ -44,6 +44,7 @@
                    "split_interaction_mode":  "workload",
                    "split_batch_size":  128,
                    "fl_first_split_on_demand":  true,
+                   "edge_only_requires_fast_deadline": true,
                    "pareto_neighbor_top_k":  16
                },
     "network":  {

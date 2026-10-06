@@ -196,6 +196,14 @@ def parse_args() -> argparse.Namespace:
             "full-local/update mode is device-feasible; fixed baselines are unchanged."
         ),
     )
+    parser.add_argument(
+        "--edge-only-requires-fast-deadline",
+        action="store_true",
+        help=(
+            "Reserve Edge-only modes for clients with an explicit fast-response "
+            "deadline; ordinary clients must use Cloud-reaching modes."
+        ),
+    )
     parser.add_argument("--time-limit", type=float, default=8.0)
     parser.add_argument(
         "--fast-client-deadlines",
@@ -329,6 +337,7 @@ def main() -> None:
         split_interaction_mode=args.split_interaction_mode,
         split_batch_size=args.split_batch_size,
         fl_first_split_on_demand=args.fl_first_split_on_demand,
+        edge_only_requires_fast_deadline=args.edge_only_requires_fast_deadline,
         time_limit=args.time_limit,
         fast_client_deadlines=tuple(fast_client_deadlines),
         risk_limit=args.risk_limit,

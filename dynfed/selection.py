@@ -145,6 +145,9 @@ class SelectionConfig:
     memory_limit: float = 1.35
     time_limit: float = 8.0  # reporting/reference only; not a universal hard deadline
     fast_client_deadlines: tuple[tuple[int, float], ...] = ()
+    # When enabled, only clients carrying an explicit fast-response deadline
+    # may terminate at Edge. Ordinary clients must use a Cloud-reaching mode.
+    edge_only_requires_fast_deadline: bool = False
     risk_limit: float = 0.5
     aggregation_fraction: float = 1.0
     output_dir: str = "out/selection"
@@ -880,16 +883,112 @@ def enumerate_candidates(
             for mode in MODE_SPECS
         }
 
+    # ------------------------------------------------------------
+    # Admission-first mode pruning.
+    #
+    # Cheap client resource/QoS state decides which modes are worth
+    # expanding.  DP/HE mechanism enumeration and candidate estimation
+    # happen only after this mode-level pruning.
+    # ------------------------------------------------------------
+    admitted_mode_specs = []
+
     for mode, spec in MODE_SPECS.items():
         if mode in config.excluded_modes:
             audit_exclusions[mode] = "excluded_mode"
             continue
+
         if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
             audit_exclusions[mode] = "trusted_edge_or_mainline_excludes_LIC"
             continue
+
         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
             audit_exclusions[mode] = "cloud_participation_required"
             continue
+
+        # Ordinary clients are not allowed to terminate at Edge.
+        # The existence of a fast-response deadline grants Edge-only
+        # modes admission; exact deadline satisfaction is checked later.
+        if (
+            config.edge_only_requires_fast_deadline
+            and fast_response_deadline is None
+            and not _mode_reaches_cloud(spec)
+        ):
+            audit_exclusions[mode] = "ordinary_client_requires_cloud"
+            continue
+
+        admitted_mode_specs.append((mode, spec))
+
+    # For the new QoS-conditioned admission scheme, perform the FL-first
+    # resource decision before mechanism expansion as well.
+    #
+    # If at least one full-local mode fits the device, split modes are
+    # unnecessary.  Otherwise only device-feasible split modes are admitted.
+    if (
+        config.edge_only_requires_fast_deadline
+        and config.fl_first_split_on_demand
+        and _policy_uses_fl_first_mode_admissibility(policy)
+    ):
+        full_local_modes = {"LIIE", "LIIC", "LIIEIIIC"}
+        device_feasible_specs = []
+
+        for mode, spec in admitted_mode_specs:
+            (
+                _sample_scale,
+                _local_load,
+                feasible_resource,
+                _memory_requirement,
+                _memory_capacity,
+                feasible_memory,
+            ) = _mode_device_feasibility_metrics(
+                config=config,
+                local_work=spec.local_work,
+                local_memory=spec.local_memory,
+                samples=samples,
+                memory_capacity_factor=memory_capacity_factor,
+            )
+
+            if not feasible_resource:
+                audit_exclusions.setdefault(
+                    mode,
+                    "resource_infeasible_before_generation",
+                )
+                continue
+
+            if not feasible_memory:
+                audit_exclusions.setdefault(
+                    mode,
+                    "memory_infeasible_before_generation",
+                )
+                continue
+
+            device_feasible_specs.append((mode, spec))
+
+        full_local_device_feasible = any(
+            mode in full_local_modes
+            for mode, _spec in device_feasible_specs
+        )
+
+        if full_local_device_feasible:
+            for mode, _spec in device_feasible_specs:
+                if mode not in full_local_modes:
+                    audit_exclusions.setdefault(
+                        mode,
+                        "full_local_feasible_excludes_split",
+                    )
+
+            admitted_mode_specs = [
+                (mode, spec)
+                for mode, spec in device_feasible_specs
+                if mode in full_local_modes
+            ]
+        else:
+            admitted_mode_specs = [
+                (mode, spec)
+                for mode, spec in device_feasible_specs
+                if mode not in full_local_modes
+            ]
+
+    for mode, spec in admitted_mode_specs:
         policy_allow_none = allow_none or policy in {
             "performance_only",
             "best_accuracy",
@@ -977,14 +1076,30 @@ def enumerate_candidates(
                     )
                 )
     snapshot("generated")
-    if config.fl_first_split_on_demand and _policy_uses_fl_first_mode_admissibility(policy):
+
+    # These legacy audit stage names are retained for CSV compatibility.
+    # Under admission-first, QoS/resource pruning has already happened before
+    # candidate/mechanism generation.
+    snapshot("after_qos_cloud_admissibility")
+
+    # Preserve the historical post-generation FL-first behavior for configs
+    # that have not opted into the new admission-first rule.
+    if (
+        not config.edge_only_requires_fast_deadline
+        and config.fl_first_split_on_demand
+        and _policy_uses_fl_first_mode_admissibility(policy)
+    ):
         full_local_modes = {"LIIE", "LIIC", "LIIEIIIC"}
         full_local_device_feasible = any(
             candidate.mode in full_local_modes and candidate.feasible_device
             for candidate in candidates
         )
         if full_local_device_feasible:
-            candidates = [candidate for candidate in candidates if candidate.mode in full_local_modes]
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.mode in full_local_modes
+            ]
 
     # Q72/Q73: fast-response QoS is a hard feasibility gate only for clients
     # that explicitly carry a per-client deadline. Ordinary clients keep time
@@ -6266,6 +6381,37 @@ def _profile_object_size(config: SelectionConfig, obj: str) -> float:
     return max(float(OBJECT_SIZES[obj]), 0.0)
 
 
+def _mode_device_feasibility_metrics(
+    *,
+    config: SelectionConfig,
+    local_work: float,
+    local_memory: float,
+    samples: int,
+    memory_capacity_factor: float,
+) -> tuple[float, float, bool, float, float, bool]:
+    """Cheap mode-level resource/memory check used before candidate expansion."""
+    sample_scale = samples / max(config.minibatch_reference_samples, 1e-9)
+    local_load = local_work * sample_scale
+
+    if config.assume_encoder_feasible:
+        feasible_resource = True
+    else:
+        feasible_resource = local_load <= config.resource_limit
+
+    memory_requirement = local_memory * (0.75 + 0.25 * sample_scale)
+    memory_capacity = config.memory_limit * max(float(memory_capacity_factor), 1e-6)
+    feasible_memory = memory_requirement <= memory_capacity + 1e-12
+
+    return (
+        sample_scale,
+        local_load,
+        feasible_resource,
+        memory_requirement,
+        memory_capacity,
+        feasible_memory,
+    )
+
+
 def _estimate_candidate(
     *,
     config: SelectionConfig,
@@ -6290,15 +6436,20 @@ def _estimate_candidate(
     L = _split_interaction_count(config, samples)
     E = spec.E_edge_loops
 
-    local_load = spec.local_work * samples / max(config.minibatch_reference_samples, 1e-9)
-    if config.assume_encoder_feasible:
-        feasible_resource = True
-    else:
-        feasible_resource = local_load <= config.resource_limit
-    sample_scale = samples / max(config.minibatch_reference_samples, 1e-9)
-    memory_requirement = spec.local_memory * (0.75 + 0.25 * sample_scale)
-    memory_capacity = config.memory_limit * max(float(memory_capacity_factor), 1e-6)
-    feasible_memory = memory_requirement <= memory_capacity + 1e-12
+    (
+        sample_scale,
+        local_load,
+        feasible_resource,
+        memory_requirement,
+        memory_capacity,
+        feasible_memory,
+    ) = _mode_device_feasibility_metrics(
+        config=config,
+        local_work=spec.local_work,
+        local_memory=spec.local_memory,
+        samples=samples,
+        memory_capacity_factor=memory_capacity_factor,
+    )
 
     # Per-block computation (total load spread across L cycles)
     local_time = (local_load / max(L, 1)) * compute_factor

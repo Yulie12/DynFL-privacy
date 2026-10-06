@@ -1,3 +1,5 @@
+import random
+
 import dynfed.selection as selection_module
 from dynfed.flow_executor import execute_mixed_round_flow
 from dynfed.selection import Candidate, SelectionConfig, _initial_profiles
@@ -25,6 +27,94 @@ def _candidate(mode: str, time: float) -> Candidate:
         feasible_privacy=True,
         feasible_risk=True,
         feasible_time=True,
+    )
+
+
+
+def test_qos_admission_requires_cloud_for_ordinary_client() -> None:
+    config = SelectionConfig(
+        edge_only_requires_fast_deadline=True,
+        fl_first_split_on_demand=True,
+    )
+
+    candidates = selection_module.enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        memory_capacity_factor=1.35,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(42),
+        policy="full_dynfl",
+        fast_response_deadline=None,
+    )
+
+    modes = {candidate.mode for candidate in candidates}
+
+    assert not (modes & {"LIE", "LIIE"})
+    assert modes
+    assert all(
+        selection_module._candidate_reaches_cloud(candidate)
+        for candidate in candidates
+    )
+
+
+def test_qos_admission_allows_edge_only_for_fast_client() -> None:
+    config = SelectionConfig(
+        edge_only_requires_fast_deadline=True,
+        fl_first_split_on_demand=True,
+    )
+
+    candidates = selection_module.enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        memory_capacity_factor=1.35,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(42),
+        policy="full_dynfl",
+        fast_response_deadline=1e9,
+    )
+
+    modes = {candidate.mode for candidate in candidates}
+
+    assert "LIIE" in modes
+
+
+def test_qos_admission_opens_split_cloud_when_full_local_memory_is_insufficient() -> None:
+    config = SelectionConfig(
+        edge_only_requires_fast_deadline=True,
+        fl_first_split_on_demand=True,
+    )
+
+    candidates = selection_module.enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        memory_capacity_factor=0.6,
+        samples=100,
+        remaining_epsilon=8.0,
+        round_idx=0,
+        rng=random.Random(42),
+        policy="full_dynfl",
+        fast_response_deadline=None,
+    )
+
+    modes = {candidate.mode for candidate in candidates}
+    feasible = [candidate for candidate in candidates if candidate.feasible_device]
+    split_modes = {"LIC", "LIEIIC", "LIEIIIC"}
+
+    assert not (modes & {"LIE", "LIIE"})
+    assert any(candidate.mode in split_modes for candidate in feasible)
+    assert all(
+        selection_module._candidate_reaches_cloud(candidate)
+        for candidate in feasible
     )
 
 

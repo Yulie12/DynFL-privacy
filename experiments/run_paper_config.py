@@ -200,6 +200,8 @@ def build_command(
     command.extend(["--update-mechanisms", *privacy.get("candidate_mechanisms", ["dp", "he3", "dp_he3"])])
     if system.get("fl_first_split_on_demand", False):
         command.append("--fl-first-split-on-demand")
+    if system.get("edge_only_requires_fast_deadline", False):
+        command.append("--edge-only-requires-fast-deadline")
     if equal_optimizer_work_control:
         command.append("--equal-optimizer-work-control")
     if max_new_rounds is not None:
