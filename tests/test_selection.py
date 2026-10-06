@@ -701,3 +701,54 @@ def test_infeasible_edge_cloud_coverage_uses_skip_fallback_instead_of_crashing()
     assert all(candidate.mode == "SKIP" for candidate in evaluation.profile.values())
     assert diagnostics["coverage_infeasible_fallback"] is True
     assert diagnostics["archive"] == ()
+
+
+def test_sample_dp_optimizer_event_count_matches_runtime_step_limit():
+    from dynfed.selection import _sample_dp_optimizer_event_count
+
+    batch_size = 128
+    epochs = 3
+    local_steps = 5
+
+    expected = {
+        0: 0,
+        1: 3,
+        128: 3,
+        129: 5,
+        240: 5,
+        640: 5,
+        641: 5,
+    }
+
+    for samples, event_count in expected.items():
+        assert (
+            _sample_dp_optimizer_event_count(
+                samples,
+                batch_size,
+                epochs,
+                local_steps,
+            )
+            == event_count
+        )
+
+
+def test_sample_dp_optimizer_event_count_without_step_limit():
+    from dynfed.selection import _sample_dp_optimizer_event_count
+
+    assert _sample_dp_optimizer_event_count(
+        samples=240,
+        batch_size=128,
+        epochs=3,
+        local_steps=None,
+    ) == 6
+
+
+def test_sample_dp_optimizer_event_count_zero_step_limit():
+    from dynfed.selection import _sample_dp_optimizer_event_count
+
+    assert _sample_dp_optimizer_event_count(
+        samples=240,
+        batch_size=128,
+        epochs=3,
+        local_steps=0,
+    ) == 0

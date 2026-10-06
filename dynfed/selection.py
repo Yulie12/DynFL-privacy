@@ -125,6 +125,10 @@ class SelectionConfig:
     dp_update_epsilon_budget: float | None = None
     dp_feature_noise_multiplier: float | None = None
     dp_update_noise_multiplier: float | None = None
+    dp_sample_epsilon_budget: float | None = None
+    dp_sample_embedding_noise_multiplier: float | None = None
+    dp_sample_label_grad_noise_multiplier: float | None = None
+    dp_sample_optimizer_noise_multiplier: float | None = None
     client_heterogeneity: float = 2.0
     edge_heterogeneity: float = 1.5
     # Q86/Q87: optional staged Normal -> Constrained -> Normal resource scenario.
@@ -260,6 +264,16 @@ class Candidate:
     feature_noise_multiplier: float | None = None
     update_noise_multiplier: float | None = None
     dp_execution_plan: str = "independent"
+
+    # Sample-level DP metadata. Keep these separate from the existing
+    # client-level feature/update accounting fields above.
+    sample_embedding_events: int = 0
+    sample_label_grad_events: int = 0
+    sample_optimizer_events: int = 0
+    sample_epsilon_after: float = 0.0
+    sample_embedding_noise_multiplier: float | None = None
+    sample_label_grad_noise_multiplier: float | None = None
+    sample_optimizer_noise_multiplier: float | None = None
 
     @property
     def feasible(self) -> bool:
@@ -425,6 +439,85 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
     }
 
 
+@lru_cache(maxsize=512)
+def resolved_sample_privacy_parameters(
+    config: SelectionConfig,
+    horizon_events: int,
+) -> dict[str, float | int | str]:
+    """Resolve the unified sample-level DP target and Gaussian multipliers.
+
+    Sample-level privacy uses one epsilon budget and one RDP composition state.
+    Under rdp_auto all sample-DP Gaussian mechanisms share one multiplier,
+    calibrated against the supplied total horizon event count. Under
+    rdp_manual the three mechanism classes may use distinct multipliers.
+    """
+    sample_budget = float(
+        config.initial_epsilon
+        if config.dp_sample_epsilon_budget is None
+        else config.dp_sample_epsilon_budget
+    )
+    if sample_budget <= 0.0:
+        raise ValueError("sample-level DP epsilon target must be positive")
+
+    total_horizon_events = int(horizon_events)
+    if total_horizon_events != horizon_events or total_horizon_events < 0:
+        raise ValueError("horizon_events must be a non-negative integer")
+
+    if config.dp_accounting_mode == "rdp_auto":
+        shared_sigma = (
+            calibrate_gaussian_noise(
+                sample_budget,
+                config.dp_delta,
+                total_horizon_events,
+            )
+            if total_horizon_events > 0
+            else 1.0
+        )
+        embedding_sigma = shared_sigma
+        label_grad_sigma = shared_sigma
+        optimizer_sigma = shared_sigma
+
+    elif config.dp_accounting_mode == "rdp_manual":
+        embedding_sigma = float(
+            config.dp_noise_multiplier
+            if config.dp_sample_embedding_noise_multiplier is None
+            else config.dp_sample_embedding_noise_multiplier
+        )
+        label_grad_sigma = float(
+            config.dp_noise_multiplier
+            if config.dp_sample_label_grad_noise_multiplier is None
+            else config.dp_sample_label_grad_noise_multiplier
+        )
+        optimizer_sigma = float(
+            config.dp_noise_multiplier
+            if config.dp_sample_optimizer_noise_multiplier is None
+            else config.dp_sample_optimizer_noise_multiplier
+        )
+
+        if (
+            embedding_sigma <= 0.0
+            or label_grad_sigma <= 0.0
+            or optimizer_sigma <= 0.0
+        ):
+            raise ValueError(
+                "sample-level DP noise multipliers must be positive"
+            )
+
+    else:
+        raise ValueError(
+            "dp_accounting_mode must be 'rdp_auto' or 'rdp_manual'"
+        )
+
+    return {
+        "accounting_mode": config.dp_accounting_mode,
+        "sample_budget": sample_budget,
+        "delta": float(config.dp_delta),
+        "horizon_events": total_horizon_events,
+        "embedding_noise_multiplier": embedding_sigma,
+        "label_grad_noise_multiplier": label_grad_sigma,
+        "optimizer_noise_multiplier": optimizer_sigma,
+    }
+
 def mode_aware_feature_noise_multiplier(
     config: SelectionConfig,
     feature_events: int,
@@ -463,6 +556,30 @@ def build_client_privacy_ledger(config: SelectionConfig) -> ClientPrivacyLedger:
         feature_noise_multiplier=float(resolved["feature_noise_multiplier"]),
         update_noise_multiplier=float(resolved["update_noise_multiplier"]),
     )
+
+
+def build_sample_privacy_ledger(config: SelectionConfig) -> SamplePrivacyLedger:
+    """Build the unified sample-level RDP ledger for one client."""
+    sample_budget = float(
+        config.initial_epsilon
+        if config.dp_sample_epsilon_budget is None
+        else config.dp_sample_epsilon_budget
+    )
+    return SamplePrivacyLedger(
+        budget=sample_budget,
+        delta=float(config.dp_delta),
+    )
+
+
+def build_privacy_ledger(
+    config: SelectionConfig,
+) -> ClientPrivacyLedger | SamplePrivacyLedger:
+    """Dispatch to the ledger matching the configured privacy unit."""
+    if config.privacy_unit == "client":
+        return build_client_privacy_ledger(config)
+    if config.privacy_unit == "sample":
+        return build_sample_privacy_ledger(config)
+    raise ValueError("privacy_unit must be 'client' or 'sample'")
 
 
 @dataclass(frozen=True)
@@ -6751,6 +6868,46 @@ def _estimate_candidate(
         ),
     )
 
+
+def _sample_dp_optimizer_event_count(
+    samples: int,
+    batch_size: int,
+    epochs: int,
+    local_steps: int | None,
+) -> int:
+    """Return the actual number of sample-DP optimizer minibatch events.
+
+    This mirrors split_local_train_lenet5() and _training_batches():
+
+    - empty data or zero epochs -> zero events;
+    - without a local step limit, every minibatch in every epoch is used;
+    - with a local step limit, the dataset is first capped at
+      ``local_steps * batch_size`` samples and the step limit applies across
+      the whole training call, not separately to each epoch.
+    """
+    sample_count = max(0, int(samples))
+    batch = max(1, int(batch_size))
+    epoch_count = max(0, int(epochs))
+
+    if sample_count == 0 or epoch_count == 0:
+        return 0
+
+    if local_steps is None:
+        batches_per_epoch = math.ceil(sample_count / batch)
+        return epoch_count * batches_per_epoch
+
+    step_limit = max(0, int(local_steps))
+    if step_limit == 0:
+        return 0
+
+    max_local_samples = max(1, step_limit) * batch
+    effective_samples = min(sample_count, max_local_samples)
+    batches_per_epoch = math.ceil(effective_samples / batch)
+
+    return min(
+        step_limit,
+        epoch_count * batches_per_epoch,
+    )
 
 def _record_dp_event_count(
     config: SelectionConfig,

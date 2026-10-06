@@ -254,6 +254,190 @@ class PrivacyProjection:
         return max(0.0, self.update_epsilon_after - self.update_epsilon_before)
 
 
+@dataclass(frozen=True)
+class SamplePrivacyProjection:
+    epsilon_before: float
+    epsilon_after: float
+    embedding_events: int
+    label_grad_events: int
+    optimizer_events: int
+    embedding_noise_multiplier: float
+    label_grad_noise_multiplier: float
+    optimizer_noise_multiplier: float
+
+    @property
+    def epsilon_increment(self) -> float:
+        return max(0.0, self.epsilon_after - self.epsilon_before)
+
+
+class SamplePrivacyLedger:
+    """Unified RDP ledger for sample-level adjacency.
+
+    All Gaussian mechanisms that may depend on the same protected sample are
+    composed in one RDP state. Event categories are retained only for audit
+    and diagnostics; they are not separate privacy budgets.
+    """
+
+    def __init__(self, budget: float, delta: float = 1e-5):
+        self.total = PrivacyAccountant(budget=budget, delta=delta)
+        self.embedding_events = 0
+        self.label_grad_events = 0
+        self.optimizer_events = 0
+
+    @staticmethod
+    def _validate_event_count(name: str, value: int) -> int:
+        count = int(value)
+        if count != value or count < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+        return count
+
+    @staticmethod
+    def _add_schedule(
+        accountant: PrivacyAccountant,
+        *,
+        embedding_events: int,
+        label_grad_events: int,
+        optimizer_events: int,
+        embedding_noise_multiplier: float,
+        label_grad_noise_multiplier: float,
+        optimizer_noise_multiplier: float,
+    ) -> None:
+        schedule = (
+            (embedding_events, embedding_noise_multiplier),
+            (label_grad_events, label_grad_noise_multiplier),
+            (optimizer_events, optimizer_noise_multiplier),
+        )
+        for event_count, noise_multiplier in schedule:
+            if event_count > 0:
+                accountant.add_events(
+                    float(noise_multiplier),
+                    int(event_count),
+                )
+
+    def project(
+        self,
+        *,
+        embedding_events: int,
+        label_grad_events: int,
+        optimizer_events: int,
+        embedding_noise_multiplier: float,
+        label_grad_noise_multiplier: float,
+        optimizer_noise_multiplier: float,
+    ) -> SamplePrivacyProjection:
+        embedding_events = self._validate_event_count(
+            "embedding_events",
+            embedding_events,
+        )
+        label_grad_events = self._validate_event_count(
+            "label_grad_events",
+            label_grad_events,
+        )
+        optimizer_events = self._validate_event_count(
+            "optimizer_events",
+            optimizer_events,
+        )
+
+        epsilon_before = self.total.current_epsilon()
+
+        projected = PrivacyAccountant.from_state_dict(
+            self.total.state_dict()
+        )
+        self._add_schedule(
+            projected,
+            embedding_events=embedding_events,
+            label_grad_events=label_grad_events,
+            optimizer_events=optimizer_events,
+            embedding_noise_multiplier=embedding_noise_multiplier,
+            label_grad_noise_multiplier=label_grad_noise_multiplier,
+            optimizer_noise_multiplier=optimizer_noise_multiplier,
+        )
+
+        return SamplePrivacyProjection(
+            epsilon_before=epsilon_before,
+            epsilon_after=projected.current_epsilon(),
+            embedding_events=embedding_events,
+            label_grad_events=label_grad_events,
+            optimizer_events=optimizer_events,
+            embedding_noise_multiplier=float(embedding_noise_multiplier),
+            label_grad_noise_multiplier=float(label_grad_noise_multiplier),
+            optimizer_noise_multiplier=float(optimizer_noise_multiplier),
+        )
+
+    def can_apply(self, projection: SamplePrivacyProjection) -> bool:
+        return projection.epsilon_after <= self.total.budget + 1e-12
+
+    def add(
+        self,
+        *,
+        embedding_events: int,
+        label_grad_events: int,
+        optimizer_events: int,
+        embedding_noise_multiplier: float,
+        label_grad_noise_multiplier: float,
+        optimizer_noise_multiplier: float,
+    ) -> SamplePrivacyProjection:
+        projection = self.project(
+            embedding_events=embedding_events,
+            label_grad_events=label_grad_events,
+            optimizer_events=optimizer_events,
+            embedding_noise_multiplier=embedding_noise_multiplier,
+            label_grad_noise_multiplier=label_grad_noise_multiplier,
+            optimizer_noise_multiplier=optimizer_noise_multiplier,
+        )
+
+        if not self.can_apply(projection):
+            raise ValueError(
+                "Sample-level DP events would exceed the configured privacy target"
+            )
+
+        self._add_schedule(
+            self.total,
+            embedding_events=projection.embedding_events,
+            label_grad_events=projection.label_grad_events,
+            optimizer_events=projection.optimizer_events,
+            embedding_noise_multiplier=projection.embedding_noise_multiplier,
+            label_grad_noise_multiplier=projection.label_grad_noise_multiplier,
+            optimizer_noise_multiplier=projection.optimizer_noise_multiplier,
+        )
+
+        self.embedding_events += projection.embedding_events
+        self.label_grad_events += projection.label_grad_events
+        self.optimizer_events += projection.optimizer_events
+
+        return projection
+
+    @property
+    def remaining_budget(self) -> float:
+        return self.total.remaining_budget
+
+    def current_epsilon(self) -> float:
+        return self.total.current_epsilon()
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "privacy_unit": "sample",
+            "total": self.total.state_dict(),
+            "embedding_events": self.embedding_events,
+            "label_grad_events": self.label_grad_events,
+            "optimizer_events": self.optimizer_events,
+        }
+
+    @classmethod
+    def from_state_dict(
+        cls,
+        state: dict[str, Any],
+    ) -> "SamplePrivacyLedger":
+        total_state = state["total"]
+        ledger = cls(
+            budget=float(total_state["budget"]),
+            delta=float(total_state["delta"]),
+        )
+        ledger.total = PrivacyAccountant.from_state_dict(total_state)
+        ledger.embedding_events = int(state.get("embedding_events", 0))
+        ledger.label_grad_events = int(state.get("label_grad_events", 0))
+        ledger.optimizer_events = int(state.get("optimizer_events", 0))
+        return ledger
+
 class ClientPrivacyLedger:
     """Per-client RDP ledgers for feature and update releases.
 
