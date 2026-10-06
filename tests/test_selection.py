@@ -752,3 +752,235 @@ def test_sample_dp_optimizer_event_count_zero_step_limit():
         epochs=3,
         local_steps=0,
     ) == 0
+
+def test_sample_mechanisms_split_force_embedding_and_gradient_dp():
+    from dynfed.selection import _sample_mechanism_assignments
+    from dynfed.training import MODE_SPECS
+
+    assignments = _sample_mechanism_assignments(
+        MODE_SPECS["LIEIIC"],
+        allow_he=True,
+    )
+
+    assert len(assignments) == 1
+    _summary, links = assignments[0]
+
+    assert links["L_E_emb"] == "dp"
+    assert links["L_E_grad"] == "dp"
+    assert links["E_C_upd"] == "he3"
+
+
+def test_sample_mechanisms_full_local_do_not_add_update_dp():
+    from dynfed.selection import _sample_mechanism_assignments
+    from dynfed.training import MODE_SPECS
+
+    edge_assignments = _sample_mechanism_assignments(
+        MODE_SPECS["LIIE"],
+        allow_he=True,
+    )
+    cloud_assignments = _sample_mechanism_assignments(
+        MODE_SPECS["LIIC"],
+        allow_he=True,
+    )
+
+    assert edge_assignments[0][1]["L_E_upd"] == "none"
+    assert cloud_assignments[0][1]["L_C_upd"] == "he3"
+
+
+def test_sample_mechanisms_reject_cloud_update_when_he_is_unavailable():
+    from dynfed.selection import _sample_mechanism_assignments
+    from dynfed.training import MODE_SPECS
+
+    assert _sample_mechanism_assignments(
+        MODE_SPECS["LIIC"],
+        allow_he=False,
+    ) == []
+
+    assert _sample_mechanism_assignments(
+        MODE_SPECS["LIEIIC"],
+        allow_he=False,
+    ) == []
+
+def test_sample_dp_event_counts_follow_actual_minibatch_steps():
+    from dynfed.selection import SelectionConfig, _sample_dp_event_counts
+
+    config = SelectionConfig(
+        split_batch_size=128,
+        privacy_local_epochs=3,
+        L_block_cycles=5,
+        mainline_fusion=False,
+    )
+
+    assert _sample_dp_event_counts(
+        config,
+        "LIIC",
+        240,
+    ) == (0, 0, 5)
+
+    assert _sample_dp_event_counts(
+        config,
+        "LIEIIC",
+        240,
+    ) == (5, 5, 5)
+
+
+def test_sample_dp_event_counts_small_split_client_follow_epochs():
+    from dynfed.selection import SelectionConfig, _sample_dp_event_counts
+
+    config = SelectionConfig(
+        split_batch_size=128,
+        privacy_local_epochs=3,
+        L_block_cycles=5,
+        mainline_fusion=False,
+    )
+
+    assert _sample_dp_event_counts(
+        config,
+        "LIEIIC",
+        1,
+    ) == (3, 3, 3)
+
+
+def test_sample_dp_event_counts_full_local_have_no_split_releases():
+    from dynfed.selection import SelectionConfig, _sample_dp_event_counts
+
+    config = SelectionConfig(
+        split_batch_size=128,
+        privacy_local_epochs=3,
+        L_block_cycles=5,
+        mainline_fusion=False,
+    )
+
+    assert _sample_dp_event_counts(
+        config,
+        "LIIE",
+        240,
+    ) == (0, 0, 5)
+
+def test_sample_selector_accounting_full_local_uses_optimizer_only():
+    import random
+
+    from dynfed.selection import (
+        SelectionConfig,
+        build_sample_privacy_ledger,
+        enumerate_candidates,
+    )
+    from dynfed.training import MODE_SPECS
+
+    config = SelectionConfig(
+        privacy_unit="sample",
+        excluded_modes=tuple(
+            mode
+            for mode in MODE_SPECS
+            if mode != "LIIC"
+        ),
+        rounds=100,
+        split_batch_size=128,
+        privacy_local_epochs=3,
+        L_block_cycles=5,
+    )
+
+    ledger = build_sample_privacy_ledger(config)
+
+    candidates = enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=240,
+        remaining_epsilon=ledger.remaining_budget,
+        round_idx=0,
+        rng=random.Random(0),
+        policy="ours",
+        privacy_ledger=ledger,
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+
+    assert candidate.mode == "LIIC"
+    assert candidate.link_mechanisms["L_C_upd"] == "he3"
+
+    assert candidate.sample_embedding_events == 0
+    assert candidate.sample_label_grad_events == 0
+    assert candidate.sample_optimizer_events == 5
+
+    assert candidate.sample_epsilon_after > 0.0
+
+    assert candidate.feature_dp_events == 0
+    assert candidate.update_dp_events == 0
+
+    assert (
+        candidate.sample_optimizer_noise_multiplier
+        is not None
+    )
+
+
+def test_sample_selector_accounting_split_composes_three_event_classes():
+    import random
+
+    from dynfed.selection import (
+        SelectionConfig,
+        build_sample_privacy_ledger,
+        enumerate_candidates,
+    )
+    from dynfed.training import MODE_SPECS
+
+    config = SelectionConfig(
+        privacy_unit="sample",
+        excluded_modes=tuple(
+            mode
+            for mode in MODE_SPECS
+            if mode != "LIEIIC"
+        ),
+        rounds=100,
+        split_batch_size=128,
+        privacy_local_epochs=3,
+        L_block_cycles=5,
+    )
+
+    ledger = build_sample_privacy_ledger(config)
+
+    candidates = enumerate_candidates(
+        config=config,
+        client_id=0,
+        edge_factor=1.0,
+        compute_factor=1.0,
+        samples=240,
+        remaining_epsilon=ledger.remaining_budget,
+        round_idx=0,
+        rng=random.Random(0),
+        policy="ours",
+        privacy_ledger=ledger,
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+
+    assert candidate.mode == "LIEIIC"
+
+    assert candidate.link_mechanisms["L_E_emb"] == "dp"
+    assert candidate.link_mechanisms["L_E_grad"] == "dp"
+    assert candidate.link_mechanisms["E_C_upd"] == "he3"
+
+    assert candidate.sample_embedding_events == 5
+    assert candidate.sample_label_grad_events == 5
+    assert candidate.sample_optimizer_events == 5
+
+    assert candidate.sample_epsilon_after > 0.0
+
+    assert candidate.feature_dp_events == 0
+    assert candidate.update_dp_events == 0
+
+    assert (
+        candidate.sample_embedding_noise_multiplier
+        is not None
+    )
+    assert (
+        candidate.sample_label_grad_noise_multiplier
+        is not None
+    )
+    assert (
+        candidate.sample_optimizer_noise_multiplier
+        is not None
+    )

@@ -978,7 +978,7 @@ def enumerate_candidates(
     current_cloud_load: float = 0.0,
     memory_capacity_factor: float = 1.0,
     allow_none: bool = False,
-    privacy_ledger: ClientPrivacyLedger | None = None,
+    privacy_ledger: ClientPrivacyLedger | SamplePrivacyLedger | None = None,
     privacy_requirement: ExposurePrivacyRequirement | None = None,
     fast_response_deadline: float | None = None,
     fixed_privacy_profile: tuple[dict[str, str], float | None] | None = None,
@@ -986,6 +986,21 @@ def enumerate_candidates(
     mode_audit: dict[str, Any] | None = None,
 ) -> list[Candidate]:
     validate_update_protection_goal(config, policy)
+    if privacy_ledger is not None:
+        if config.privacy_unit == "client" and not isinstance(
+            privacy_ledger,
+            ClientPrivacyLedger,
+        ):
+            raise TypeError(
+                "client privacy_unit requires ClientPrivacyLedger"
+            )
+        if config.privacy_unit == "sample" and not isinstance(
+            privacy_ledger,
+            SamplePrivacyLedger,
+        ):
+            raise TypeError(
+                "sample privacy_unit requires SamplePrivacyLedger"
+            )
     candidates: list[Candidate] = []
     # Counts describe candidates, not clients. Stages are snapshots; their
     # differences must not be conflated with Pareto rejection.
@@ -1113,15 +1128,23 @@ def enumerate_candidates(
             "best_accuracy",
             "accuracy_oracle",
         }
-        assignments = _mechanism_assignments(
-            spec,
-            policy,
-            config.allow_he,
-            policy_allow_none,
-            trusted_edge_split_execution=config.trusted_edge_split_execution,
-            update_mechanism_options=config.update_mechanism_options,
-            mainline_fusion=config.mainline_fusion,
-            privacy_requirement=privacy_requirement,
+        assignments = (
+            _sample_mechanism_assignments(
+                spec,
+                allow_he=config.allow_he,
+                mainline_fusion=config.mainline_fusion,
+            )
+            if config.privacy_unit == "sample"
+            else _mechanism_assignments(
+                spec,
+                policy,
+                config.allow_he,
+                policy_allow_none,
+                trusted_edge_split_execution=config.trusted_edge_split_execution,
+                update_mechanism_options=config.update_mechanism_options,
+                mainline_fusion=config.mainline_fusion,
+                privacy_requirement=privacy_requirement,
+            )
         )
         audit_counts["mechanism_assignments"][mode] = len(assignments)
         if not assignments:
@@ -1132,6 +1155,168 @@ def enumerate_candidates(
                 if mechanisms != fixed_mechanisms:
                     audit_counts["fixed_profile_mismatches"][mode] += 1
                     continue
+            # sample selector accounting branch
+            if config.privacy_unit == "sample":
+                (
+                    sample_embedding_events,
+                    sample_label_grad_events,
+                    sample_optimizer_events,
+                ) = _sample_dp_event_counts(
+                    config,
+                    mode,
+                    samples,
+                )
+
+                total_sample_events = (
+                    sample_embedding_events
+                    + sample_label_grad_events
+                    + sample_optimizer_events
+                )
+
+                fixed_sigma = (
+                    fixed_privacy_profile[1]
+                    if fixed_privacy_profile is not None
+                    else None
+                )
+
+                try:
+                    if total_sample_events <= 0:
+                        sample_parameters = (
+                            resolved_sample_privacy_parameters(
+                                config,
+                                0,
+                            )
+                        )
+                        embedding_sigma = float(
+                            sample_parameters[
+                                "embedding_noise_multiplier"
+                            ]
+                        )
+                        label_grad_sigma = float(
+                            sample_parameters[
+                                "label_grad_noise_multiplier"
+                            ]
+                        )
+                        optimizer_sigma = float(
+                            sample_parameters[
+                                "optimizer_noise_multiplier"
+                            ]
+                        )
+
+                    elif fixed_privacy_profile is not None:
+                        if fixed_sigma is None:
+                            audit_counts[
+                                "missing_fixed_sigma"
+                            ][mode] += 1
+                            continue
+
+                        embedding_sigma = float(fixed_sigma)
+                        label_grad_sigma = float(fixed_sigma)
+                        optimizer_sigma = float(fixed_sigma)
+
+                    elif config.dp_accounting_mode == "rdp_auto":
+                        remaining_rounds = max(
+                            1,
+                            int(config.rounds)
+                            - int(round_idx),
+                        )
+
+                        planned_sample_events = (
+                            int(total_sample_events)
+                            * remaining_rounds
+                        )
+
+                        if isinstance(
+                            privacy_ledger,
+                            SamplePrivacyLedger,
+                        ):
+                            shared_sigma = (
+                                privacy_ledger
+                                .minimum_feasible_shared_noise(
+                                    planned_sample_events
+                                )
+                            )
+                        else:
+                            sample_parameters = (
+                                resolved_sample_privacy_parameters(
+                                    config,
+                                    planned_sample_events,
+                                )
+                            )
+                            shared_sigma = float(
+                                sample_parameters[
+                                    "optimizer_noise_multiplier"
+                                ]
+                            )
+
+                        embedding_sigma = float(shared_sigma)
+                        label_grad_sigma = float(shared_sigma)
+                        optimizer_sigma = float(shared_sigma)
+
+                    else:
+                        sample_parameters = (
+                            resolved_sample_privacy_parameters(
+                                config,
+                                0,
+                            )
+                        )
+                        embedding_sigma = float(
+                            sample_parameters[
+                                "embedding_noise_multiplier"
+                            ]
+                        )
+                        label_grad_sigma = float(
+                            sample_parameters[
+                                "label_grad_noise_multiplier"
+                            ]
+                        )
+                        optimizer_sigma = float(
+                            sample_parameters[
+                                "optimizer_noise_multiplier"
+                            ]
+                        )
+
+                except ValueError:
+                    audit_counts[
+                        "budget_calibration_failures"
+                    ][mode] += 1
+                    continue
+
+                candidates.append(
+                    _estimate_candidate(
+                        config=config,
+                        mode=mode,
+                        spec=spec,
+                        mechanisms=mechanisms,
+                        link_mechanisms=link_mechanisms,
+                        client_id=client_id,
+                        edge_factor=edge_factor,
+                        compute_factor=compute_factor,
+                        samples=samples,
+                        remaining_epsilon=remaining_epsilon,
+                        round_idx=round_idx,
+                        rng=rng,
+                        current_edge_load=current_edge_load,
+                        current_cloud_load=current_cloud_load,
+                        memory_capacity_factor=memory_capacity_factor,
+                        privacy_ledger=privacy_ledger,
+                        update_noise_multiplier=None,
+                        sample_embedding_noise_multiplier=(
+                            embedding_sigma
+                        ),
+                        sample_label_grad_noise_multiplier=(
+                            label_grad_sigma
+                        ),
+                        sample_optimizer_noise_multiplier=(
+                            optimizer_sigma
+                        ),
+                        fast_response_deadline=(
+                            fast_response_deadline
+                        ),
+                    )
+                )
+                continue
+
             update_events = sum(
                 count
                 for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
@@ -6281,6 +6466,67 @@ def _safe_norm(value: float, low: float, high: float) -> float:
     return (value - low) / span
 
 
+def _sample_mechanism_assignments(
+    spec: ModeSpec,
+    *,
+    allow_he: bool = True,
+    mainline_fusion: bool = False,
+) -> list[tuple[dict[str, str], dict[str, str]]]:
+    """Return the fixed protection layout for the sample-level DP path.
+
+    Sample privacy is provided by local DP-SGD plus explicit DP protection
+    of split embeddings and label gradients. Model-update packet DP is
+    intentionally disabled here to avoid applying a second client-level
+    Gaussian mechanism to an already sample-DP-trained update.
+
+    HE remains a confidentiality layer for updates crossing into Cloud.
+    """
+    all_transmissions = _mode_link_transmissions(
+        spec.name,
+        local_block_cycles=1,
+        edge_loops=spec.E_edge_loops,
+    )
+    if mainline_fusion:
+        all_transmissions = _fusion_link_transmissions(
+            spec.name,
+            1,
+            spec.E_edge_loops,
+        )
+
+    transmissions = [
+        event
+        for event in all_transmissions
+        if event[3]
+    ]
+    link_objects = {
+        link_id: obj
+        for link_id, obj, _count, _eligible in all_transmissions
+    }
+
+    assignment: dict[str, str] = {}
+
+    for link_id, obj, _count, _privacy_eligible in transmissions:
+        if obj in {"emb", "grad"}:
+            mechanism = "dp"
+        elif obj == "upd" and link_id.endswith("_C_upd"):
+            if not allow_he:
+                return []
+            mechanism = "he3"
+        else:
+            mechanism = "none"
+
+        assignment[link_id] = mechanism
+
+    return [
+        (
+            _object_mechanism_summary(
+                assignment,
+                link_objects,
+            ),
+            assignment,
+        )
+    ]
+
 def _mechanism_assignments(
     spec: ModeSpec,
     policy: str,
@@ -6548,8 +6794,11 @@ def _estimate_candidate(
     current_edge_load: float = 0.0,
     current_cloud_load: float = 0.0,
     memory_capacity_factor: float = 1.0,
-    privacy_ledger: ClientPrivacyLedger | None = None,
+    privacy_ledger: ClientPrivacyLedger | SamplePrivacyLedger | None = None,
     update_noise_multiplier: float | None = None,
+    sample_embedding_noise_multiplier: float | None = None,
+    sample_label_grad_noise_multiplier: float | None = None,
+    sample_optimizer_noise_multiplier: float | None = None,
     fast_response_deadline: float | None = None,
 ) -> Candidate:
     L = _split_interaction_count(config, samples)
@@ -6720,56 +6969,197 @@ def _estimate_candidate(
     )
     pre_aggregation_time = first_aggregation_arrival_time
 
-    # Split modes release an intermediate embedding outside the client. When
-    # that embedding link is assigned DP, charge one record-level feature-DP
-    # event per local epoch (and per explicit edge loop for repeated split
-    # execution), consistently with _record_dp_event_count().
-    feature_dp_events = sum(
-        _record_dp_event_count(config, mode, count)
-        for link_id, obj, count, privacy_eligible in link_events
-        if privacy_eligible
-        and obj == "emb"
-        and mechanism_uses_dp(actual_link_mechanisms[link_id])
-    )
-    update_dp_events = sum(
-        count
-        for link_id, obj, count, privacy_eligible in link_events
-        if privacy_eligible
-        and obj == "upd"
-        and mechanism_uses_dp(actual_link_mechanisms[link_id])
-    )
-    feature_noise_multiplier = mode_aware_feature_noise_multiplier(
-        config,
-        feature_dp_events,
-    )
-    feature_epsilon_after = 0.0
-    update_epsilon_after = 0.0
-    if privacy_ledger is not None:
-        projection = privacy_ledger.project(
-            feature_dp_events,
-            update_dp_events,
-            feature_noise_multiplier=feature_noise_multiplier,
-            update_noise_multiplier=update_noise_multiplier,
+    sample_embedding_events = 0
+    sample_label_grad_events = 0
+    sample_optimizer_events = 0
+    sample_epsilon_after = 0.0
+
+    resolved_sample_embedding_sigma = None
+    resolved_sample_label_grad_sigma = None
+    resolved_sample_optimizer_sigma = None
+
+    if config.privacy_unit == "sample":
+        feature_dp_events = 0
+        update_dp_events = 0
+        feature_noise_multiplier = None
+        feature_epsilon_after = 0.0
+        update_epsilon_after = 0.0
+
+        (
+            sample_embedding_events,
+            sample_label_grad_events,
+            sample_optimizer_events,
+        ) = _sample_dp_event_counts(
+            config,
+            mode,
+            samples,
         )
-        # Legacy scalar used only for diagnostics/old local policies. The
-        # formal feasibility test remains two-ledger (feature, update).
-        epsilon_used = max(
-            projection.feature_epsilon_increment,
-            projection.update_epsilon_increment,
+
+        total_sample_events = (
+            sample_embedding_events
+            + sample_label_grad_events
+            + sample_optimizer_events
         )
-        feature_epsilon_after = projection.feature_epsilon_after
-        update_epsilon_after = projection.update_epsilon_after
-        feasible_privacy = privacy_ledger.can_apply(projection)
+
+        sample_parameters = (
+            resolved_sample_privacy_parameters(
+                config,
+                total_sample_events,
+            )
+        )
+
+        resolved_sample_embedding_sigma = float(
+            sample_embedding_noise_multiplier
+            if sample_embedding_noise_multiplier is not None
+            else sample_parameters[
+                "embedding_noise_multiplier"
+            ]
+        )
+
+        resolved_sample_label_grad_sigma = float(
+            sample_label_grad_noise_multiplier
+            if sample_label_grad_noise_multiplier is not None
+            else sample_parameters[
+                "label_grad_noise_multiplier"
+            ]
+        )
+
+        resolved_sample_optimizer_sigma = float(
+            sample_optimizer_noise_multiplier
+            if sample_optimizer_noise_multiplier is not None
+            else sample_parameters[
+                "optimizer_noise_multiplier"
+            ]
+        )
+
+        if privacy_ledger is not None:
+            if not isinstance(
+                privacy_ledger,
+                SamplePrivacyLedger,
+            ):
+                raise TypeError(
+                    "sample privacy_unit requires "
+                    "SamplePrivacyLedger"
+                )
+
+            projection = privacy_ledger.project(
+                embedding_events=(
+                    sample_embedding_events
+                ),
+                label_grad_events=(
+                    sample_label_grad_events
+                ),
+                optimizer_events=(
+                    sample_optimizer_events
+                ),
+                embedding_noise_multiplier=(
+                    resolved_sample_embedding_sigma
+                ),
+                label_grad_noise_multiplier=(
+                    resolved_sample_label_grad_sigma
+                ),
+                optimizer_noise_multiplier=(
+                    resolved_sample_optimizer_sigma
+                ),
+            )
+
+            epsilon_used = projection.epsilon_increment
+            sample_epsilon_after = (
+                projection.epsilon_after
+            )
+            feasible_privacy = (
+                privacy_ledger.can_apply(projection)
+            )
+
+        else:
+            temporary_sample_ledger = (
+                build_sample_privacy_ledger(config)
+            )
+
+            projection = (
+                temporary_sample_ledger.project(
+                    embedding_events=(
+                        sample_embedding_events
+                    ),
+                    label_grad_events=(
+                        sample_label_grad_events
+                    ),
+                    optimizer_events=(
+                        sample_optimizer_events
+                    ),
+                    embedding_noise_multiplier=(
+                        resolved_sample_embedding_sigma
+                    ),
+                    label_grad_noise_multiplier=(
+                        resolved_sample_label_grad_sigma
+                    ),
+                    optimizer_noise_multiplier=(
+                        resolved_sample_optimizer_sigma
+                    ),
+                )
+            )
+
+            epsilon_used = projection.epsilon_after
+            sample_epsilon_after = (
+                projection.epsilon_after
+            )
+
+            feasible_privacy = (
+                sample_epsilon_after
+                <= remaining_epsilon + 1e-12
+            )
+
     else:
-        # Compatibility path for callers that have not yet supplied an RDP ledger.
-        epsilon_used = sum(
-            count * _dp_event_epsilon(config, obj)
+        # Split modes release an intermediate embedding outside the client. When
+        # that embedding link is assigned DP, charge one record-level feature-DP
+        # event per local epoch (and per explicit edge loop for repeated split
+        # execution), consistently with _record_dp_event_count().
+        feature_dp_events = sum(
+            _record_dp_event_count(config, mode, count)
+            for link_id, obj, count, privacy_eligible in link_events
+            if privacy_eligible
+            and obj == "emb"
+            and mechanism_uses_dp(actual_link_mechanisms[link_id])
+        )
+        update_dp_events = sum(
+            count
             for link_id, obj, count, privacy_eligible in link_events
             if privacy_eligible
             and obj == "upd"
             and mechanism_uses_dp(actual_link_mechanisms[link_id])
         )
-        feasible_privacy = epsilon_used <= remaining_epsilon + 1e-12
+        feature_noise_multiplier = mode_aware_feature_noise_multiplier(
+            config,
+            feature_dp_events,
+        )
+        feature_epsilon_after = 0.0
+        update_epsilon_after = 0.0
+        if privacy_ledger is not None:
+            projection = privacy_ledger.project(
+                feature_dp_events,
+                update_dp_events,
+                feature_noise_multiplier=feature_noise_multiplier,
+                update_noise_multiplier=update_noise_multiplier,
+            )
+            # Legacy scalar used only for diagnostics/old local policies. The
+            # formal feasibility test remains two-ledger (feature, update).
+            epsilon_used = max(
+                projection.feature_epsilon_increment,
+                projection.update_epsilon_increment,
+            )
+            feature_epsilon_after = projection.feature_epsilon_after
+            update_epsilon_after = projection.update_epsilon_after
+            feasible_privacy = privacy_ledger.can_apply(projection)
+        else:
+            # Compatibility path for callers that have not yet supplied an RDP ledger.
+            epsilon_used = sum(
+                count * _dp_event_epsilon(config, obj)
+                for link_id, obj, count, privacy_eligible in link_events
+                if privacy_eligible
+                and obj == "upd"
+                and mechanism_uses_dp(actual_link_mechanisms[link_id])
+            )
+            feasible_privacy = epsilon_used <= remaining_epsilon + 1e-12
 
     risk = max(
         (
@@ -6806,8 +7196,15 @@ def _estimate_candidate(
                     actual_link_mechanisms[link_id],
                     max(
                         float(
-                            resolved_privacy_parameters(config)[
-                                "update_budget" if obj == "upd" else "feature_budget"
+                            resolved_sample_privacy_parameters(
+                                config,
+                                0,
+                            )["sample_budget"]
+                            if config.privacy_unit == "sample"
+                            else resolved_privacy_parameters(config)[
+                                "update_budget"
+                                if obj == "upd"
+                                else "feature_budget"
                             ]
                         ),
                         1e-6,
@@ -6848,6 +7245,25 @@ def _estimate_candidate(
         update_dp_events=update_dp_events,
         feature_epsilon_after=feature_epsilon_after,
         update_epsilon_after=update_epsilon_after,
+        sample_embedding_events=sample_embedding_events,
+        sample_label_grad_events=sample_label_grad_events,
+        sample_optimizer_events=sample_optimizer_events,
+        sample_epsilon_after=sample_epsilon_after,
+        sample_embedding_noise_multiplier=(
+            resolved_sample_embedding_sigma
+            if sample_embedding_events > 0
+            else None
+        ),
+        sample_label_grad_noise_multiplier=(
+            resolved_sample_label_grad_sigma
+            if sample_label_grad_events > 0
+            else None
+        ),
+        sample_optimizer_noise_multiplier=(
+            resolved_sample_optimizer_sigma
+            if sample_optimizer_events > 0
+            else None
+        ),
         link_mechanisms=actual_link_mechanisms,
         memory_requirement=memory_requirement,
         memory_capacity=memory_capacity,
@@ -6908,6 +7324,75 @@ def _sample_dp_optimizer_event_count(
     return min(
         step_limit,
         epoch_count * batches_per_epoch,
+    )
+
+def _sample_dp_event_counts(
+    config: SelectionConfig,
+    mode: str,
+    samples: int,
+) -> tuple[int, int, int]:
+    """Return (embedding, label-gradient, optimizer) sample-DP events.
+
+    Sample-level accounting follows the actual local optimizer minibatch
+    schedule rather than the legacy static link execution count.
+
+    For split training, every executed minibatch releases one protected
+    embedding and one protected label gradient. All modes execute one
+    sample-DP optimizer event per actual local optimizer minibatch.
+    """
+    spec = MODE_SPECS[mode]
+
+    local_steps = (
+        None
+        if config.mainline_fusion
+        else int(config.L_block_cycles)
+    )
+
+    optimizer_events = _sample_dp_optimizer_event_count(
+        samples=int(samples),
+        batch_size=int(config.split_batch_size),
+        epochs=int(config.privacy_local_epochs),
+        local_steps=local_steps,
+    )
+
+    if optimizer_events <= 0:
+        return 0, 0, 0
+
+    link_events = (
+        _fusion_link_transmissions(
+            mode,
+            1,
+            spec.E_edge_loops,
+        )
+        if config.mainline_fusion
+        else _mode_link_transmissions(
+            mode,
+            1,
+            spec.E_edge_loops,
+        )
+    )
+
+    released_objects = {
+        obj
+        for _link_id, obj, _count, privacy_eligible in link_events
+        if privacy_eligible
+    }
+
+    embedding_events = (
+        optimizer_events
+        if "emb" in released_objects
+        else 0
+    )
+    label_grad_events = (
+        optimizer_events
+        if "grad" in released_objects
+        else 0
+    )
+
+    return (
+        embedding_events,
+        label_grad_events,
+        optimizer_events,
     )
 
 def _record_dp_event_count(

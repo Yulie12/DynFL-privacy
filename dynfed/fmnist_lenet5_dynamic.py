@@ -54,7 +54,7 @@ from .split_learning import (
     split_local_train_lenet5,
 )
 from .nodes import build_profiles
-from .privacy import ClientPrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
+from .privacy import ClientPrivacyLedger, SamplePrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
 from .protection_rules import audit_update_release
 from .streaming_secagg import streaming_secure_aggregate_exact_target
 from .selection import (
@@ -76,7 +76,9 @@ from .selection import (
     enumerate_candidates,
     paper_client_privacy_requirement,
     build_client_privacy_ledger,
+    build_privacy_ledger,
     resolved_privacy_parameters,
+    resolved_sample_privacy_parameters,
     mode_aware_feature_noise_multiplier,
     _local_omega_proxy as selection_local_omega_proxy,
 )
@@ -127,6 +129,7 @@ class Lenet5Config:
     dp_clip_norm: float = 1.0
     dp_feature_clip_norm: float | None = None
     dp_update_clip_norm: float | None = None
+    dp_sample_optimizer_clip_norm: float = 1.0
     dp_noise_multiplier: float = 0.0002
     dp_update_mode: str = "upd_only"
     dp_release_calibration: str = "tex_packet"
@@ -188,6 +191,11 @@ def _feature_clip_norm(config: Lenet5Config) -> float:
 
 def _update_clip_norm(config: Lenet5Config) -> float:
     return float(config.dp_update_clip_norm if config.dp_update_clip_norm is not None else config.dp_clip_norm)
+
+
+def _sample_optimizer_clip_norm(config: Lenet5Config) -> float:
+    """Per-sample joint parameter-gradient clipping norm for Sample DP-SGD."""
+    return float(config.dp_sample_optimizer_clip_norm)
 
 
 def _validate_mainline_fusion(selection: SelectionConfig, train_config: Lenet5Config) -> None:
@@ -445,6 +453,23 @@ def _client_train_worker(
     training_diagnostics = {}
     state_diff = split_local_train_lenet5(
         training_diagnostics=training_diagnostics,
+        privacy_unit=payload.get(
+            "privacy_unit",
+            "client",
+        ),
+        sample_embedding_noise_multiplier=payload.get(
+            "sample_embedding_noise_multiplier"
+        ),
+        sample_label_grad_noise_multiplier=payload.get(
+            "sample_label_grad_noise_multiplier"
+        ),
+        sample_optimizer_noise_multiplier=payload.get(
+            "sample_optimizer_noise_multiplier"
+        ),
+        sample_optimizer_clip_norm=payload.get(
+            "sample_optimizer_clip_norm",
+            1.0,
+        ),
         mode=payload["mode"],
         global_end_state=payload["global_end_state"],
         global_edge_state=payload["global_edge_state"],
@@ -466,10 +491,16 @@ def _client_train_worker(
         training_seed=payload["training_seed"],
         model_cache=model_cache,
     )
-    has_dp = _should_apply_update_dp(
-        payload["mechanisms"],
-        payload["dp_update_mode"],
-        payload["mode"],
+    # Sample-level DP is already applied inside local DP-SGD.
+    # Never apply the legacy client-update Gaussian mechanism on top.
+    has_dp = (
+        False
+        if payload.get("privacy_unit", "client") == "sample"
+        else _should_apply_update_dp(
+            payload["mechanisms"],
+            payload["dp_update_mode"],
+            payload["mode"],
+        )
     )
     worker_update_dp_audit: dict[str, float] = {}
     state_diff = apply_unified_dp(
@@ -1153,6 +1184,14 @@ def _run_lenet5_policy(
         )
     emit_stage_status("Preparing privacy accountant", stage="privacy_accounting")
     privacy_parameters = resolved_privacy_parameters(effective_selection)
+    sample_privacy_parameters = (
+        resolved_sample_privacy_parameters(
+            effective_selection,
+            0,
+        )
+        if effective_selection.privacy_unit == "sample"
+        else None
+    )
     release_account = None
     if effective_selection.mainline_fusion:
         release_counts = [int(len(indices)) for indices in train_client_indices]
@@ -1176,7 +1215,7 @@ def _run_lenet5_policy(
         num_classes=num_classes,
     )
     privacy_ledgers = {
-        client.client_id: build_client_privacy_ledger(effective_selection)
+        client.client_id: build_privacy_ledger(effective_selection)
         for client in clients
     }
     remaining_epsilon = {
@@ -1271,29 +1310,104 @@ def _run_lenet5_policy(
                 f"checkpoint T={saved_rounds}, requested T={selection.rounds}. Start a new run "
                 "so the Gaussian noise is calibrated for the complete horizon."
             )
-        privacy_ledgers = {
-            int(client_id): ClientPrivacyLedger.from_state_dict(state)
-            for client_id, state in saved_privacy_ledgers.items()
-        }
-        for ledger in privacy_ledgers.values():
-            expected = privacy_parameters
-            if (
-                abs(ledger.feature.budget - float(expected["feature_budget"])) > 1e-12
-                or abs(ledger.update.budget - float(expected["update_budget"])) > 1e-12
-                or abs(ledger.feature.delta - float(expected["delta"])) > 1e-15
-                or abs(
-                    ledger.feature_noise_multiplier
-                    - float(expected["feature_noise_multiplier"])
-                ) > 1e-12
-                or abs(
-                    ledger.update_noise_multiplier
-                    - float(expected["update_noise_multiplier"])
-                ) > 1e-12
-            ):
-                raise RuntimeError(
-                    "Cannot resume with different RDP targets, delta, or calibrated noise. "
-                    "Start a new run for the changed privacy configuration."
+        saved_privacy_unit = str(
+            saved_selection.get(
+                "privacy_unit",
+                "client",
+            )
+        )
+        if saved_privacy_unit != effective_selection.privacy_unit:
+            raise RuntimeError(
+                "Cannot change privacy_unit when resuming: "
+                f"checkpoint={saved_privacy_unit!r}, "
+                f"requested={effective_selection.privacy_unit!r}."
+            )
+
+        if effective_selection.privacy_unit == "sample":
+            privacy_ledgers = {
+                int(client_id): SamplePrivacyLedger.from_state_dict(
+                    state
                 )
+                for client_id, state in saved_privacy_ledgers.items()
+            }
+
+            expected_sample = sample_privacy_parameters
+            if expected_sample is None:
+                raise RuntimeError(
+                    "Missing Sample-level privacy parameters "
+                    "while restoring Sample ledgers"
+                )
+
+            for ledger in privacy_ledgers.values():
+                if (
+                    abs(
+                        ledger.total.budget
+                        - float(
+                            expected_sample["sample_budget"]
+                        )
+                    )
+                    > 1e-12
+                    or abs(
+                        ledger.total.delta
+                        - float(expected_sample["delta"])
+                    )
+                    > 1e-15
+                ):
+                    raise RuntimeError(
+                        "Cannot resume with different Sample-level "
+                        "epsilon target or delta."
+                    )
+
+        else:
+            privacy_ledgers = {
+                int(client_id): ClientPrivacyLedger.from_state_dict(
+                    state
+                )
+                for client_id, state in saved_privacy_ledgers.items()
+            }
+
+            for ledger in privacy_ledgers.values():
+                expected = privacy_parameters
+                if (
+                    abs(
+                        ledger.feature.budget
+                        - float(expected["feature_budget"])
+                    )
+                    > 1e-12
+                    or abs(
+                        ledger.update.budget
+                        - float(expected["update_budget"])
+                    )
+                    > 1e-12
+                    or abs(
+                        ledger.feature.delta
+                        - float(expected["delta"])
+                    )
+                    > 1e-15
+                    or abs(
+                        ledger.feature_noise_multiplier
+                        - float(
+                            expected[
+                                "feature_noise_multiplier"
+                            ]
+                        )
+                    )
+                    > 1e-12
+                    or abs(
+                        ledger.update_noise_multiplier
+                        - float(
+                            expected[
+                                "update_noise_multiplier"
+                            ]
+                        )
+                    )
+                    > 1e-12
+                ):
+                    raise RuntimeError(
+                        "Cannot resume with different RDP targets, "
+                        "delta, or calibrated noise. Start a new run "
+                        "for the changed privacy configuration."
+                    )
         remaining_epsilon = {
             client_id: ledger.remaining_budget
             for client_id, ledger in privacy_ledgers.items()
@@ -1736,15 +1850,132 @@ def _run_lenet5_policy(
             round_risk = max(round_risk, candidate.risk)
             infeasible += int(not candidate.feasible)
             ledger = privacy_ledgers[client_id]
-            projection = ledger.project(
-                candidate.feature_dp_events,
-                candidate.update_dp_events,
-                feature_noise_multiplier=candidate.feature_noise_multiplier,
-                update_noise_multiplier=candidate.update_noise_multiplier,
-            )
-            if (effective_selection.update_protection_goal == "released_model_dp"
-                    and not ledger.can_apply(projection)):
-                raise ValueError("Selected DP release exceeds the recorded event budget")
+
+            if effective_selection.privacy_unit == "sample":
+                if not isinstance(
+                    ledger,
+                    SamplePrivacyLedger,
+                ):
+                    raise TypeError(
+                        "Sample privacy_unit requires "
+                        "SamplePrivacyLedger at runtime"
+                    )
+
+                sample_optimizer_sigma = (
+                    candidate.sample_optimizer_noise_multiplier
+                )
+                if (
+                    candidate.sample_optimizer_events > 0
+                    and sample_optimizer_sigma is None
+                ):
+                    raise RuntimeError(
+                        "Selected Sample-DP candidate is missing "
+                        "optimizer noise multiplier"
+                    )
+
+                sample_embedding_sigma = (
+                    candidate.sample_embedding_noise_multiplier
+                    if candidate.sample_embedding_noise_multiplier
+                    is not None
+                    else sample_optimizer_sigma
+                    if sample_optimizer_sigma is not None
+                    else 1.0
+                )
+                sample_label_grad_sigma = (
+                    candidate.sample_label_grad_noise_multiplier
+                    if candidate.sample_label_grad_noise_multiplier
+                    is not None
+                    else sample_optimizer_sigma
+                    if sample_optimizer_sigma is not None
+                    else 1.0
+                )
+
+                projection = ledger.project(
+                    embedding_events=(
+                        candidate.sample_embedding_events
+                    ),
+                    label_grad_events=(
+                        candidate.sample_label_grad_events
+                    ),
+                    optimizer_events=(
+                        candidate.sample_optimizer_events
+                    ),
+                    embedding_noise_multiplier=(
+                        sample_embedding_sigma
+                    ),
+                    label_grad_noise_multiplier=(
+                        sample_label_grad_sigma
+                    ),
+                    optimizer_noise_multiplier=(
+                        sample_optimizer_sigma
+                        if sample_optimizer_sigma is not None
+                        else 1.0
+                    ),
+                )
+
+                if not ledger.can_apply(projection):
+                    raise ValueError(
+                        "Selected Sample-DP release exceeds "
+                        "the unified privacy budget"
+                    )
+
+                current_feature_epsilon = 0.0
+                current_update_epsilon = 0.0
+                current_sample_epsilon = (
+                    ledger.current_epsilon()
+                )
+                projected_feature_epsilon = 0.0
+                projected_update_epsilon = 0.0
+                projected_sample_epsilon = (
+                    projection.epsilon_after
+                )
+
+            else:
+                if not isinstance(
+                    ledger,
+                    ClientPrivacyLedger,
+                ):
+                    raise TypeError(
+                        "Client privacy_unit requires "
+                        "ClientPrivacyLedger at runtime"
+                    )
+
+                projection = ledger.project(
+                    candidate.feature_dp_events,
+                    candidate.update_dp_events,
+                    feature_noise_multiplier=(
+                        candidate.feature_noise_multiplier
+                    ),
+                    update_noise_multiplier=(
+                        candidate.update_noise_multiplier
+                    ),
+                )
+
+                if (
+                    effective_selection.update_protection_goal
+                    == "released_model_dp"
+                    and not ledger.can_apply(projection)
+                ):
+                    raise ValueError(
+                        "Selected DP release exceeds the "
+                        "recorded event budget"
+                    )
+
+                current_feature_epsilon = (
+                    ledger.feature.current_epsilon()
+                )
+                current_update_epsilon = (
+                    ledger.update.current_epsilon()
+                )
+                current_sample_epsilon = 0.0
+                projected_feature_epsilon = (
+                    projection.feature_epsilon_after
+                )
+                projected_update_epsilon = (
+                    projection.update_epsilon_after
+                )
+                projected_sample_epsilon = 0.0
+
             rem = ledger.remaining_budget
             has_feasible_candidate = any(
                 item.mode != "SKIP" and item.feasible for item in candidates
@@ -1810,10 +2041,15 @@ def _run_lenet5_policy(
                     "remaining_epsilon": rem,
                     "feature_dp_events": candidate.feature_dp_events,
                     "update_dp_events": candidate.update_dp_events,
-                    "feature_epsilon": ledger.feature.current_epsilon(),
-                    "update_epsilon": ledger.update.current_epsilon(),
-                    "projected_feature_epsilon": projection.feature_epsilon_after,
-                    "projected_update_epsilon": projection.update_epsilon_after,
+                    "sample_embedding_events": candidate.sample_embedding_events,
+                    "sample_label_grad_events": candidate.sample_label_grad_events,
+                    "sample_optimizer_events": candidate.sample_optimizer_events,
+                    "feature_epsilon": current_feature_epsilon,
+                    "update_epsilon": current_update_epsilon,
+                    "sample_epsilon": current_sample_epsilon,
+                    "projected_feature_epsilon": projected_feature_epsilon,
+                    "projected_update_epsilon": projected_update_epsilon,
+                    "projected_sample_epsilon": projected_sample_epsilon,
                     # Step32.2 runtime audit: preserve the exact sigma selected by
                     # the candidate so it can be reconciled with execution and
                     # realized accounting after the round.
@@ -1827,7 +2063,34 @@ def _run_lenet5_policy(
                         if candidate.update_noise_multiplier is not None
                         else None
                     ),
+                    "selected_sample_embedding_noise_multiplier": (
+                        float(
+                            candidate.sample_embedding_noise_multiplier
+                        )
+                        if candidate.sample_embedding_noise_multiplier
+                        is not None
+                        else None
+                    ),
+                    "selected_sample_label_grad_noise_multiplier": (
+                        float(
+                            candidate.sample_label_grad_noise_multiplier
+                        )
+                        if candidate.sample_label_grad_noise_multiplier
+                        is not None
+                        else None
+                    ),
+                    "selected_sample_optimizer_noise_multiplier": (
+                        float(
+                            candidate.sample_optimizer_noise_multiplier
+                        )
+                        if candidate.sample_optimizer_noise_multiplier
+                        is not None
+                        else None
+                    ),
                     "accounted_update_noise_multiplier": None,
+                    "accounted_sample_embedding_noise_multiplier": None,
+                    "accounted_sample_label_grad_noise_multiplier": None,
+                    "accounted_sample_optimizer_noise_multiplier": None,
                     "communication_volume": candidate.communication_volume,
                     "feasible": candidate.feasible,
                     "feasible_resource": candidate.feasible_resource,
@@ -2103,26 +2366,159 @@ def _run_lenet5_policy(
             ledger = privacy_ledgers[client_id]
             row = round_decision_rows_by_client[client_id]
             if client_id in admitted_client_ids:
-                projection = ledger.add(
-                    candidate.feature_dp_events,
-                    candidate.update_dp_events,
-                    update_noise_multiplier=candidate.update_noise_multiplier,
-                )
-                row["feature_dp_events"] = projection.feature_events
-                row["update_dp_events"] = projection.update_events
-                row["accounted_update_noise_multiplier"] = (
-                    float(candidate.update_noise_multiplier)
-                    if projection.update_events > 0
-                    and candidate.update_noise_multiplier is not None
-                    else None
-                )
+                if effective_selection.privacy_unit == "sample":
+                    if not isinstance(
+                        ledger,
+                        SamplePrivacyLedger,
+                    ):
+                        raise TypeError(
+                            "Sample privacy_unit requires "
+                            "SamplePrivacyLedger at commit"
+                        )
+
+                    optimizer_sigma = (
+                        candidate.sample_optimizer_noise_multiplier
+                    )
+                    if (
+                        candidate.sample_optimizer_events > 0
+                        and optimizer_sigma is None
+                    ):
+                        raise RuntimeError(
+                            "Executed Sample-DP candidate is missing "
+                            "optimizer noise multiplier"
+                        )
+
+                    embedding_sigma = (
+                        candidate.sample_embedding_noise_multiplier
+                        if candidate.sample_embedding_noise_multiplier
+                        is not None
+                        else optimizer_sigma
+                        if optimizer_sigma is not None
+                        else 1.0
+                    )
+                    label_grad_sigma = (
+                        candidate.sample_label_grad_noise_multiplier
+                        if candidate.sample_label_grad_noise_multiplier
+                        is not None
+                        else optimizer_sigma
+                        if optimizer_sigma is not None
+                        else 1.0
+                    )
+
+                    projection = ledger.add(
+                        embedding_events=(
+                            candidate.sample_embedding_events
+                        ),
+                        label_grad_events=(
+                            candidate.sample_label_grad_events
+                        ),
+                        optimizer_events=(
+                            candidate.sample_optimizer_events
+                        ),
+                        embedding_noise_multiplier=(
+                            embedding_sigma
+                        ),
+                        label_grad_noise_multiplier=(
+                            label_grad_sigma
+                        ),
+                        optimizer_noise_multiplier=(
+                            optimizer_sigma
+                            if optimizer_sigma is not None
+                            else 1.0
+                        ),
+                    )
+
+                    row["feature_dp_events"] = 0
+                    row["update_dp_events"] = 0
+                    row["sample_embedding_events"] = (
+                        projection.embedding_events
+                    )
+                    row["sample_label_grad_events"] = (
+                        projection.label_grad_events
+                    )
+                    row["sample_optimizer_events"] = (
+                        projection.optimizer_events
+                    )
+
+                    row[
+                        "accounted_sample_embedding_noise_multiplier"
+                    ] = (
+                        embedding_sigma
+                        if projection.embedding_events > 0
+                        else None
+                    )
+                    row[
+                        "accounted_sample_label_grad_noise_multiplier"
+                    ] = (
+                        label_grad_sigma
+                        if projection.label_grad_events > 0
+                        else None
+                    )
+                    row[
+                        "accounted_sample_optimizer_noise_multiplier"
+                    ] = (
+                        optimizer_sigma
+                        if projection.optimizer_events > 0
+                        else None
+                    )
+
+                else:
+                    projection = ledger.add(
+                        candidate.feature_dp_events,
+                        candidate.update_dp_events,
+                        update_noise_multiplier=(
+                            candidate.update_noise_multiplier
+                        ),
+                    )
+                    row["feature_dp_events"] = (
+                        projection.feature_events
+                    )
+                    row["update_dp_events"] = (
+                        projection.update_events
+                    )
+                    row[
+                        "accounted_update_noise_multiplier"
+                    ] = (
+                        float(
+                            candidate.update_noise_multiplier
+                        )
+                        if projection.update_events > 0
+                        and candidate.update_noise_multiplier
+                        is not None
+                        else None
+                    )
+                    row["sample_embedding_events"] = 0
+                    row["sample_label_grad_events"] = 0
+                    row["sample_optimizer_events"] = 0
+
             else:
                 row["feature_dp_events"] = 0
                 row["update_dp_events"] = 0
-            remaining_epsilon[client_id] = ledger.remaining_budget
-            row["remaining_epsilon"] = ledger.remaining_budget
-            row["feature_epsilon"] = ledger.feature.current_epsilon()
-            row["update_epsilon"] = ledger.update.current_epsilon()
+                row["sample_embedding_events"] = 0
+                row["sample_label_grad_events"] = 0
+                row["sample_optimizer_events"] = 0
+
+            remaining_epsilon[client_id] = (
+                ledger.remaining_budget
+            )
+            row["remaining_epsilon"] = (
+                ledger.remaining_budget
+            )
+
+            if effective_selection.privacy_unit == "sample":
+                row["feature_epsilon"] = 0.0
+                row["update_epsilon"] = 0.0
+                row["sample_epsilon"] = (
+                    ledger.current_epsilon()
+                )
+            else:
+                row["feature_epsilon"] = (
+                    ledger.feature.current_epsilon()
+                )
+                row["update_epsilon"] = (
+                    ledger.update.current_epsilon()
+                )
+                row["sample_epsilon"] = 0.0
         round_real_he_used = False
         round_real_he_clients = 0
         multi_edge_loop_client_cycles = (
@@ -3206,8 +3602,15 @@ def _run_lenet5_policy(
                     <= release_account.ledger.budget + 1e-12
                     if effective_selection.mainline_fusion
                     else all(
-                        privacy_ledgers[cid].update.current_epsilon()
-                        <= privacy_ledgers[cid].update.budget + 1e-12
+                        (
+                            privacy_ledgers[cid].current_epsilon()
+                            <= privacy_ledgers[cid].total.budget + 1e-12
+                        )
+                        if effective_selection.privacy_unit == "sample"
+                        else (
+                            privacy_ledgers[cid].update.current_epsilon()
+                            <= privacy_ledgers[cid].update.budget + 1e-12
+                        )
                         for cid in client_ids
                     )
                 ),
@@ -3485,11 +3888,29 @@ def _run_lenet5_policy(
                     flow_inputs, selected_by_id, effective_selection.mainline_fusion),
                 "max_risk": round_risk,
                 "min_remaining_epsilon": min(remaining_epsilon.values()),
-                "max_feature_epsilon": max(
-                    ledger.feature.current_epsilon() for ledger in privacy_ledgers.values()
+                "max_feature_epsilon": (
+                    0.0
+                    if effective_selection.privacy_unit == "sample"
+                    else max(
+                        ledger.feature.current_epsilon()
+                        for ledger in privacy_ledgers.values()
+                    )
                 ),
-                "max_update_epsilon": max(
-                    ledger.update.current_epsilon() for ledger in privacy_ledgers.values()
+                "max_update_epsilon": (
+                    0.0
+                    if effective_selection.privacy_unit == "sample"
+                    else max(
+                        ledger.update.current_epsilon()
+                        for ledger in privacy_ledgers.values()
+                    )
+                ),
+                "max_sample_epsilon": (
+                    max(
+                        ledger.current_epsilon()
+                        for ledger in privacy_ledgers.values()
+                    )
+                    if effective_selection.privacy_unit == "sample"
+                    else 0.0
                 ),
                 "privacy_guarantee": (
                     privacy_reporting_scope["privacy_guarantee"]
@@ -3837,15 +4258,39 @@ def _run_lenet5_policy(
             }
         )
         current_round = round_rows[-1]
-        current_round.update(training_privacy_diagnostics(current_round))
+
+        if effective_selection.privacy_unit == "sample":
+            current_round["privacy_unit"] = "sample"
+            current_round["privacy_guarantee"] = (
+                "sample_level_dp_unified_rdp"
+            )
+        else:
+            current_round["privacy_unit"] = "client"
+
+        current_round.update(
+            training_privacy_diagnostics(current_round)
+        )
         max_feature_epsilon = current_round["max_feature_epsilon"]
         max_update_epsilon = current_round["max_update_epsilon"]
+        max_sample_epsilon = float(
+            current_round.get(
+                "max_sample_epsilon",
+                0.0,
+            )
+        )
         reported_update_epsilon = (
             float(current_round["global_release_epsilon"])
             if effective_selection.mainline_fusion
             else max_update_epsilon
         )
-        larger_channel_epsilon = max(max_feature_epsilon, reported_update_epsilon)
+        larger_channel_epsilon = (
+            max_sample_epsilon
+            if effective_selection.privacy_unit == "sample"
+            else max(
+                max_feature_epsilon,
+                reported_update_epsilon,
+            )
+        )
         cumulative_comm = sum(float(row["communication_volume"]) for row in round_rows)
         selected_details = [
             {
@@ -3876,17 +4321,63 @@ def _run_lenet5_policy(
             "larger_channel_epsilon": larger_channel_epsilon,
             "feature_epsilon": max_feature_epsilon,
             "update_epsilon": reported_update_epsilon,
+            "sample_epsilon": max_sample_epsilon,
             "global_release_count": current_round["global_release_count"],
             "global_release_epsilon": current_round["global_release_epsilon"],
             "global_release_contract": current_round["global_release_contract"],
+            "privacy_unit": effective_selection.privacy_unit,
             "privacy_guarantee": current_round["privacy_guarantee"],
-            "dp_delta": privacy_parameters["delta"],
-            "dp_feature_noise_multiplier": float(
-                candidate.feature_noise_multiplier
-                if candidate.feature_noise_multiplier is not None
-                else privacy_parameters["feature_noise_multiplier"]
+            "dp_delta": (
+                float(sample_privacy_parameters["delta"])
+                if (
+                    effective_selection.privacy_unit == "sample"
+                    and sample_privacy_parameters is not None
+                )
+                else privacy_parameters["delta"]
             ),
-            "dp_update_noise_multiplier": privacy_parameters["update_noise_multiplier"],
+            "dp_feature_noise_multiplier": (
+                None
+                if effective_selection.privacy_unit == "sample"
+                else float(
+                    candidate.feature_noise_multiplier
+                    if candidate.feature_noise_multiplier is not None
+                    else privacy_parameters[
+                        "feature_noise_multiplier"
+                    ]
+                )
+            ),
+            "dp_update_noise_multiplier": (
+                None
+                if effective_selection.privacy_unit == "sample"
+                else privacy_parameters[
+                    "update_noise_multiplier"
+                ]
+            ),
+            "dp_sample_epsilon_target": (
+                float(
+                    sample_privacy_parameters["sample_budget"]
+                )
+                if (
+                    effective_selection.privacy_unit == "sample"
+                    and sample_privacy_parameters is not None
+                )
+                else None
+            ),
+            "dp_sample_embedding_noise_multiplier": (
+                candidate.sample_embedding_noise_multiplier
+                if effective_selection.privacy_unit == "sample"
+                else None
+            ),
+            "dp_sample_label_grad_noise_multiplier": (
+                candidate.sample_label_grad_noise_multiplier
+                if effective_selection.privacy_unit == "sample"
+                else None
+            ),
+            "dp_sample_optimizer_noise_multiplier": (
+                candidate.sample_optimizer_noise_multiplier
+                if effective_selection.privacy_unit == "sample"
+                else None
+            ),
             "min_remaining_epsilon": current_round["min_remaining_epsilon"],
             "effective_clients": current_round["num_effective_clients"],
             "effective_edges": current_round["num_effective_edges"],
@@ -4004,15 +4495,19 @@ def _run_lenet5_policy(
             mainline_release_account=release_account,
         )
         privacy_progress = (
-            f"global_release_eps={reported_update_epsilon:.3f} "
-            f"release_count={current_round['global_release_count']}"
-            if effective_selection.mainline_fusion
+            f"sample_eps={max_sample_epsilon:.3f}"
+            if effective_selection.privacy_unit == "sample"
             else (
-                f"feature_dp=off update_eps={max_update_epsilon:.3f}"
-                if effective_selection.trusted_edge_split_execution
+                f"global_release_eps={reported_update_epsilon:.3f} "
+                f"release_count={current_round['global_release_count']}"
+                if effective_selection.mainline_fusion
                 else (
-                    f"feature_eps={max_feature_epsilon:.3f} "
-                    f"update_eps={max_update_epsilon:.3f}"
+                    f"feature_dp=off update_eps={max_update_epsilon:.3f}"
+                    if effective_selection.trusted_edge_split_execution
+                    else (
+                        f"feature_eps={max_feature_epsilon:.3f} "
+                        f"update_eps={max_update_epsilon:.3f}"
+                    )
                 )
             )
         )
@@ -4132,10 +4627,71 @@ def _run_lenet5_policy(
             fixed_mode_assignments.values()
         )
         partial_summary.update(privacy_reporting_scope)
-        partial_summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
-        partial_summary.update(_global_release_summary(release_account, enabled=mainline_dp_enabled))
-        if release_account is not None:
-            partial_summary["larger_channel_epsilon"] = release_account.ledger.current_epsilon()
+
+        if effective_selection.privacy_unit == "sample":
+            if sample_privacy_parameters is None:
+                raise RuntimeError(
+                    "Missing Sample privacy parameters "
+                    "while preparing partial summary"
+                )
+
+            partial_summary.update(
+                {
+                    "privacy_unit": "sample",
+                    "dp_accountant_scope": (
+                        "unified_sample_rdp"
+                    ),
+                    "privacy_policy_scope": (
+                        "sample_level_record"
+                    ),
+                    "protected_object": (
+                        "individual_training_sample_record"
+                    ),
+                    "privacy_mechanism_scope": (
+                        "per_sample_clipping_gaussian_"
+                        "composition_no_amplification"
+                    ),
+                    "privacy_guarantee": (
+                        "sample_level_dp_unified_rdp"
+                    ),
+                    "dp_delta": float(
+                        sample_privacy_parameters["delta"]
+                    ),
+                    "dp_sample_epsilon_target": float(
+                        sample_privacy_parameters[
+                            "sample_budget"
+                        ]
+                    ),
+                    "dp_feature_epsilon_target": None,
+                    "dp_update_epsilon_target": None,
+                    "dp_feature_noise_multiplier": None,
+                    "dp_update_noise_multiplier": None,
+                    "dp_feature_horizon_events": None,
+                    "dp_update_horizon_events": None,
+                    "dp_feature_enabled": False,
+                    "legacy_update_dp_fields_semantics": (
+                        "communication_security_diagnostic_only"
+                    ),
+                }
+            )
+
+        partial_summary["mainline_fusion"] = bool(
+            effective_selection.mainline_fusion
+        )
+        partial_summary.update(
+            _global_release_summary(
+                release_account,
+                enabled=mainline_dp_enabled,
+            )
+        )
+
+        if (
+            release_account is not None
+            and effective_selection.privacy_unit != "sample"
+        ):
+            partial_summary["larger_channel_epsilon"] = (
+                release_account.ledger.current_epsilon()
+            )
         _write_csv(output_dir / "client_decisions.csv", decision_rows)
         _write_csv(output_dir / "candidate_mode_audit.csv", candidate_mode_audit_rows)
         _write_csv(output_dir / "mode_selection_audit.csv", _mode_selection_csv_rows(round_rows))
@@ -4260,25 +4816,109 @@ def _run_lenet5_policy(
     summary["global_pareto_selection_rounds"] = global_pareto_selection_rounds
     summary["execution_revision"] = train_config.execution_revision
     summary["equal_optimizer_work_control"] = bool(train_config.equal_optimizer_work_control)
-    summary["dp_accounting_mode"] = privacy_parameters["accounting_mode"]
-    summary["dp_delta"] = privacy_parameters["delta"]
-    summary["dp_feature_epsilon_target"] = privacy_parameters["feature_budget"]
-    summary["dp_update_epsilon_target"] = privacy_parameters["update_budget"]
-    summary["dp_feature_noise_multiplier"] = privacy_parameters["feature_noise_multiplier"]
-    summary["dp_update_noise_multiplier"] = privacy_parameters["update_noise_multiplier"]
-    summary["dp_feature_horizon_events"] = privacy_parameters["feature_horizon_events"]
-    summary["dp_update_horizon_events"] = privacy_parameters["update_horizon_events"]
-    summary["dp_feature_enabled"] = privacy_parameters["feature_dp_enabled"]
+    summary["privacy_unit"] = (
+        effective_selection.privacy_unit
+    )
+    summary["dp_accounting_mode"] = (
+        privacy_parameters["accounting_mode"]
+    )
+
+    if effective_selection.privacy_unit == "sample":
+        if sample_privacy_parameters is None:
+            raise RuntimeError(
+                "Missing Sample privacy parameters "
+                "while preparing completed summary"
+            )
+
+        summary["dp_delta"] = float(
+            sample_privacy_parameters["delta"]
+        )
+        summary["dp_sample_epsilon_target"] = float(
+            sample_privacy_parameters["sample_budget"]
+        )
+
+        # These fields belong to the Client-level accountant.
+        # Keep their schema but do not present them as formal
+        # privacy parameters in Sample mode.
+        summary["dp_feature_epsilon_target"] = None
+        summary["dp_update_epsilon_target"] = None
+        summary["dp_feature_noise_multiplier"] = None
+        summary["dp_update_noise_multiplier"] = None
+        summary["dp_feature_horizon_events"] = None
+        summary["dp_update_horizon_events"] = None
+        summary["dp_feature_enabled"] = False
+
+    else:
+        summary["dp_delta"] = privacy_parameters["delta"]
+        summary["dp_feature_epsilon_target"] = (
+            privacy_parameters["feature_budget"]
+        )
+        summary["dp_update_epsilon_target"] = (
+            privacy_parameters["update_budget"]
+        )
+        summary["dp_feature_noise_multiplier"] = (
+            privacy_parameters[
+                "feature_noise_multiplier"
+            ]
+        )
+        summary["dp_update_noise_multiplier"] = (
+            privacy_parameters[
+                "update_noise_multiplier"
+            ]
+        )
+        summary["dp_feature_horizon_events"] = (
+            privacy_parameters["feature_horizon_events"]
+        )
+        summary["dp_update_horizon_events"] = (
+            privacy_parameters["update_horizon_events"]
+        )
+        summary["dp_feature_enabled"] = (
+            privacy_parameters["feature_dp_enabled"]
+        )
     summary["trusted_edge_split_execution"] = effective_selection.trusted_edge_split_execution
     summary["tracks_returned_client_models"] = True
-    summary["privacy_policy_scope"] = privacy_reporting_scope["privacy_policy_scope"]
-    summary["protected_object"] = privacy_reporting_scope["protected_object"]
-    summary["privacy_mechanism_scope"] = privacy_reporting_scope["privacy_mechanism_scope"]
-    summary["privacy_guarantee"] = privacy_reporting_scope["privacy_guarantee"]
+    summary["privacy_policy_scope"] = (
+        privacy_reporting_scope["privacy_policy_scope"]
+    )
+    summary["protected_object"] = (
+        privacy_reporting_scope["protected_object"]
+    )
+    summary["privacy_mechanism_scope"] = (
+        privacy_reporting_scope["privacy_mechanism_scope"]
+    )
+    summary["privacy_guarantee"] = (
+        privacy_reporting_scope["privacy_guarantee"]
+    )
+
+    if effective_selection.privacy_unit == "sample":
+        summary["dp_accountant_scope"] = (
+            "unified_sample_rdp"
+        )
+        summary["privacy_policy_scope"] = (
+            "sample_level_record"
+        )
+        summary["protected_object"] = (
+            "individual_training_sample_record"
+        )
+        summary["privacy_mechanism_scope"] = (
+            "per_sample_clipping_gaussian_"
+            "composition_no_amplification"
+        )
+        summary["privacy_guarantee"] = (
+            "sample_level_dp_unified_rdp"
+        )
+        summary["legacy_update_dp_fields_semantics"] = (
+            "communication_security_diagnostic_only"
+        )
     summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
     summary.update(_global_release_summary(release_account, enabled=mainline_dp_enabled))
-    if release_account is not None:
-        summary["larger_channel_epsilon"] = release_account.ledger.current_epsilon()
+    if (
+        release_account is not None
+        and effective_selection.privacy_unit != "sample"
+    ):
+        summary["larger_channel_epsilon"] = (
+            release_account.ledger.current_epsilon()
+        )
         summary["he_ciphertext_bytes_semantics"] = "serialized_bytes"
     summary["aggregate_dp_protocol"] = "distributed_noise_before_ckks_aggregation"
     summary["aggregate_dp_release_rounds"] = sum(
@@ -4492,6 +5132,19 @@ def _run_client_training_tasks(
                 # Cloud-link DP is executed at the actual packet/aggregate
                 # boundary below, so do not also apply it inside the worker.
                 aggregate_cloud_update_dp=True,
+            ),
+            "privacy_unit": selection.privacy_unit,
+            "sample_embedding_noise_multiplier": (
+                candidate.sample_embedding_noise_multiplier
+            ),
+            "sample_label_grad_noise_multiplier": (
+                candidate.sample_label_grad_noise_multiplier
+            ),
+            "sample_optimizer_noise_multiplier": (
+                candidate.sample_optimizer_noise_multiplier
+            ),
+            "sample_optimizer_clip_norm": (
+                _sample_optimizer_clip_norm(train_config)
             ),
             "dp_clip_norm": train_config.dp_clip_norm,
             "dp_feature_clip_norm": _feature_clip_norm(train_config),
@@ -5577,6 +6230,19 @@ def _coordinate_accuracy_oracle_round(
                     candidate,
                     aggregate_cloud_update_dp=True,
                 ),
+                privacy_unit=selection_config.privacy_unit,
+                sample_embedding_noise_multiplier=(
+                    candidate.sample_embedding_noise_multiplier
+                ),
+                sample_label_grad_noise_multiplier=(
+                    candidate.sample_label_grad_noise_multiplier
+                ),
+                sample_optimizer_noise_multiplier=(
+                    candidate.sample_optimizer_noise_multiplier
+                ),
+                sample_optimizer_clip_norm=(
+                    _sample_optimizer_clip_norm(train_config)
+                ),
                 dp_clip_norm=_feature_clip_norm(train_config),
                 dp_noise_multiplier=float(
                     candidate.feature_noise_multiplier
@@ -6044,7 +6710,10 @@ def _save_policy_checkpoint(
     global_end: torch.nn.Module,
     global_edge: torch.nn.Module,
     remaining_epsilon: dict[int, float],
-    privacy_ledgers: dict[int, ClientPrivacyLedger],
+    privacy_ledgers: dict[
+        int,
+        ClientPrivacyLedger | SamplePrivacyLedger,
+    ],
     previous_choices: dict[int, Candidate],
     fixed_mode_assignments: dict[int, str],
     fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]],
@@ -7243,11 +7912,19 @@ def _summarize_lenet5_policy(
         "mean_effective_edges": _list_mean(row["num_effective_edges"] for row in round_rows),
         "max_privacy_risk": max(row["max_risk"] for row in round_rows),
         "min_remaining_epsilon": final["min_remaining_epsilon"],
-        "max_feature_epsilon": float(final.get("max_feature_epsilon", 0.0)),
-        "max_update_epsilon": float(final.get("max_update_epsilon", 0.0)),
+        "max_feature_epsilon": float(
+            final.get("max_feature_epsilon", 0.0)
+        ),
+        "max_update_epsilon": float(
+            final.get("max_update_epsilon", 0.0)
+        ),
+        "max_sample_epsilon": float(
+            final.get("max_sample_epsilon", 0.0)
+        ),
         "larger_channel_epsilon": max(
             float(final.get("max_feature_epsilon", 0.0)),
             float(final.get("max_update_epsilon", 0.0)),
+            float(final.get("max_sample_epsilon", 0.0)),
         ),
         "privacy_execution_audit": privacy_execution_audit(round_rows),
         "privacy_guarantee": {

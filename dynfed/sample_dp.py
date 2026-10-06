@@ -201,3 +201,99 @@ def per_sample_grads_reference(
         name: torch.stack(sample_grads, dim=0)
         for name, sample_grads in collected.items()
     }
+
+
+def per_sample_vjp_grads_reference(
+    model: torch.nn.Module,
+    inputs: torch.Tensor,
+    output_grads: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Exact microbatch=1 per-sample parameter VJPs.
+
+    For sample i, compute
+
+        grad_theta <model(inputs_i), output_grads_i>
+
+    where ``output_grads`` is treated as a fixed upstream vector. This is the
+    reference kernel used by split End-side Sample DP-SGD before joint
+    per-sample clipping and Gaussian perturbation.
+    """
+    if inputs.ndim == 0 or output_grads.ndim == 0:
+        raise ValueError(
+            "inputs and output_grads must include a batch dimension"
+        )
+
+    batch_size = int(inputs.shape[0])
+
+    if batch_size <= 0:
+        raise ValueError("batch must contain at least one sample")
+
+    if int(output_grads.shape[0]) != batch_size:
+        raise ValueError(
+            "inputs and output_grads must have the same batch size"
+        )
+
+    named_params = [
+        (name, param)
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    ]
+
+    if not named_params:
+        raise ValueError(
+            "model must contain at least one trainable parameter"
+        )
+
+    names = [name for name, _param in named_params]
+    params = [param for _name, param in named_params]
+
+    collected: dict[str, list[torch.Tensor]] = {
+        name: []
+        for name in names
+    }
+
+    for index in range(batch_size):
+        sample_inputs = inputs[index:index + 1]
+
+        outputs = model(sample_inputs)
+        sample_output_grad = (
+            output_grads[index:index + 1]
+            .detach()
+            .to(
+                device=outputs.device,
+                dtype=outputs.dtype,
+            )
+        )
+
+        if outputs.shape != sample_output_grad.shape:
+            raise ValueError(
+                "model output shape must match output_grads shape "
+                f"for each sample: got {tuple(outputs.shape)} and "
+                f"{tuple(sample_output_grad.shape)}"
+            )
+
+        surrogate = (
+            outputs * sample_output_grad
+        ).sum()
+
+        grads = torch.autograd.grad(
+            surrogate,
+            params,
+            allow_unused=True,
+        )
+
+        for name, param, grad in zip(
+            names,
+            params,
+            grads,
+        ):
+            collected[name].append(
+                torch.zeros_like(param)
+                if grad is None
+                else grad.detach()
+            )
+
+    return {
+        name: torch.stack(grads, dim=0)
+        for name, grads in collected.items()
+    }

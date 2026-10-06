@@ -406,6 +406,45 @@ class SamplePrivacyLedger:
 
         return projection
 
+    def minimum_feasible_shared_noise(
+        self,
+        event_count: int,
+    ) -> float:
+        """Return the minimum shared Gaussian multiplier for future events.
+
+        The search starts from the ledger's current unified RDP state. It does
+        not mutate the ledger. This is used by lifetime-aware sample-level
+        selection when embedding, label-gradient, and optimizer mechanisms
+        share one Gaussian noise multiplier.
+        """
+        count = int(event_count)
+        if count != event_count or count < 0:
+            raise ValueError(
+                "event_count must be a non-negative integer"
+            )
+        if count == 0:
+            return 0.0
+
+        low = 1e-6
+        high = 1.0
+
+        while not self.total.can_add_events(high, count):
+            high *= 2.0
+            if high > 1e9:
+                raise ValueError(
+                    "sample-level privacy budget cannot accommodate "
+                    "the requested future event count"
+                )
+
+        for _ in range(100):
+            midpoint = (low + high) / 2.0
+            if self.total.can_add_events(midpoint, count):
+                high = midpoint
+            else:
+                low = midpoint
+
+        return high
+
     @property
     def remaining_budget(self) -> float:
         return self.total.remaining_budget

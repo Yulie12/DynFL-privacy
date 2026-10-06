@@ -169,6 +169,10 @@ def build_command(
         "dp_update_epsilon_budget": privacy["update_epsilon_budget"],
         "dp_delta": privacy["delta"],
         "dp_clip_norm": privacy["clip_norm"],
+        "dp_sample_optimizer_clip_norm": privacy.get(
+            "sample_optimizer_clip_norm",
+            1.0,
+        ),
         "dp_update_mode": privacy["update_mode"],
         "dp_release_calibration": privacy.get("release_calibration", "legacy_aggregate"),
         "cloud_dp_stability_threshold": privacy["cloud_dp_stability_threshold"],

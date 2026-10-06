@@ -8,6 +8,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .sample_dp import (
+    clip_and_aggregate_per_sample_grads,
+    per_sample_grads_reference,
+    per_sample_vjp_grads_reference,
+)
+
 
 def _make_torchvision_resnet(version: str, pretrained: bool = True) -> nn.Module:
     try:
@@ -769,6 +775,11 @@ def split_local_train_lenet5(
     training_seed: int | None = None,
     model_cache: dict[str, Any] | None = None,
     training_diagnostics: dict[str, int] | None = None,
+    privacy_unit: str = "client",
+    sample_embedding_noise_multiplier: float | None = None,
+    sample_label_grad_noise_multiplier: float | None = None,
+    sample_optimizer_noise_multiplier: float | None = None,
+    sample_optimizer_clip_norm: float = 1.0,
 ) -> dict[str, dict[str, torch.Tensor]]:
     """Split learning with labels retained at the client.
 
@@ -790,6 +801,11 @@ def split_local_train_lenet5(
         feature_noise_l2_sq_sum=0.0,
         feature_distortion_l2_sq_sum=0.0,
         feature_clipped_sample_count=0,
+        sample_dp_optimizer_steps=0,
+        sample_dp_sample_count=0,
+        sample_dp_clipped_sample_count=0,
+        sample_dp_max_raw_grad_norm=0.0,
+        sample_dp_max_clipped_grad_norm=0.0,
     )
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
         "resnet18pretrainedadapter",
@@ -825,8 +841,62 @@ def split_local_train_lenet5(
     if dp_rng is None:
         dp_rng = np.random.default_rng()
 
+    normalized_privacy_unit = str(privacy_unit).strip().lower()
+    if normalized_privacy_unit not in {"client", "sample"}:
+        raise ValueError(
+            "privacy_unit must be 'client' or 'sample'"
+        )
+
+    sample_dp_generator = None
+    if normalized_privacy_unit == "sample":
+        if float(sample_optimizer_clip_norm) <= 0.0:
+            raise ValueError(
+                "sample_optimizer_clip_norm must be positive"
+            )
+        if sample_optimizer_noise_multiplier is None:
+            raise ValueError(
+                "sample_optimizer_noise_multiplier is required "
+                "for sample-level training"
+            )
+        if float(sample_optimizer_noise_multiplier) < 0.0:
+            raise ValueError(
+                "sample_optimizer_noise_multiplier must be non-negative"
+            )
+
+        sample_dp_generator = torch.Generator(
+            device=device
+        )
+        sample_dp_generator.manual_seed(
+            int(
+                dp_rng.integers(
+                    0,
+                    np.iinfo(np.int64).max,
+                )
+            )
+        )
+
     # Whether training uses split (end+edge) or full (end only) mode
     is_split = mode in ("LIE", "LIC", "LIEIIC", "LIEIIIC")
+
+    if normalized_privacy_unit == "sample" and is_split:
+        if sample_embedding_noise_multiplier is None:
+            raise ValueError(
+                "sample_embedding_noise_multiplier is required "
+                "for sample-level split training"
+            )
+        if sample_label_grad_noise_multiplier is None:
+            raise ValueError(
+                "sample_label_grad_noise_multiplier is required "
+                "for sample-level split training"
+            )
+        if float(sample_embedding_noise_multiplier) < 0.0:
+            raise ValueError(
+                "sample_embedding_noise_multiplier must be non-negative"
+            )
+        if float(sample_label_grad_noise_multiplier) < 0.0:
+            raise ValueError(
+                "sample_label_grad_noise_multiplier must be non-negative"
+            )
 
     if not is_split:
         # Full model: merge end + edge states
@@ -851,11 +921,108 @@ def split_local_train_lenet5(
             diagnostics["actual_local_batches"] += 1
             if opt is None:
                 continue
+
             opt.zero_grad()
-            loss = F.cross_entropy(model(bx), by)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], max_norm=5.0)
-            opt.step()
+
+            if normalized_privacy_unit == "sample":
+                per_sample_grads = per_sample_grads_reference(
+                    model,
+                    bx,
+                    by,
+                    lambda outputs, targets: F.cross_entropy(
+                        outputs,
+                        targets,
+                        reduction="mean",
+                    ),
+                )
+
+                aggregated_grads, sample_dp_diag = (
+                    clip_and_aggregate_per_sample_grads(
+                        per_sample_grads,
+                        clip_norm=float(
+                            sample_optimizer_clip_norm
+                        ),
+                        noise_multiplier=float(
+                            sample_optimizer_noise_multiplier
+                        ),
+                        generator=sample_dp_generator,
+                    )
+                )
+
+                for name, param in model.named_parameters():
+                    if not param.requires_grad:
+                        continue
+
+                    if name not in aggregated_grads:
+                        raise RuntimeError(
+                            "Missing aggregated Sample-DP gradient "
+                            f"for trainable parameter {name!r}"
+                        )
+
+                    param.grad = (
+                        aggregated_grads[name]
+                        .detach()
+                        .to(
+                            device=param.device,
+                            dtype=param.dtype,
+                        )
+                        .clone()
+                    )
+
+                # Momentum and weight decay are applied here by the existing
+                # optimizer as post-processing of the protected gradient.
+                opt.step()
+
+                diagnostics["sample_dp_optimizer_steps"] += 1
+                diagnostics["sample_dp_sample_count"] += int(
+                    sample_dp_diag.sample_count
+                )
+                diagnostics[
+                    "sample_dp_clipped_sample_count"
+                ] += int(
+                    sample_dp_diag.clipped_sample_count
+                )
+                diagnostics[
+                    "sample_dp_max_raw_grad_norm"
+                ] = max(
+                    float(
+                        diagnostics[
+                            "sample_dp_max_raw_grad_norm"
+                        ]
+                    ),
+                    float(
+                        sample_dp_diag.max_raw_grad_norm
+                    ),
+                )
+                diagnostics[
+                    "sample_dp_max_clipped_grad_norm"
+                ] = max(
+                    float(
+                        diagnostics[
+                            "sample_dp_max_clipped_grad_norm"
+                        ]
+                    ),
+                    float(
+                        sample_dp_diag.max_clipped_grad_norm
+                    ),
+                )
+
+            else:
+                loss = F.cross_entropy(
+                    model(bx),
+                    by,
+                )
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    [
+                        p
+                        for p in model.parameters()
+                        if p.requires_grad
+                    ],
+                    max_norm=5.0,
+                )
+                opt.step()
+
             diagnostics["actual_optimizer_steps"] += 1
 
         diff = {}
@@ -903,11 +1070,66 @@ def split_local_train_lenet5(
         # The remote side returns logits. The client keeps labels local and sends
         # a protected loss gradient back to the remote model.
         emb = end(bx)
+
+        embedding_noise_multiplier = float(
+            dp_noise_multiplier
+        )
+        label_grad_noise_multiplier = float(
+            dp_noise_multiplier
+        )
+        sample_embedding_scales = None
+
+        if normalized_privacy_unit == "sample":
+            embedding_noise_multiplier = float(
+                sample_embedding_noise_multiplier
+            )
+            label_grad_noise_multiplier = float(
+                sample_label_grad_noise_multiplier
+            )
+
+            # _protect_tensor_dp() computes clipping scales from a
+            # detached embedding norm, then forms
+            #
+            #     protected = emb * scale
+            #
+            # so the backward Jacobian through this protection is
+            # exactly the detached scale. Preserve that factor when
+            # reconstructing per-sample End parameter VJPs below.
+            if emb.ndim >= 2:
+                emb_flat = emb.detach().reshape(
+                    emb.shape[0],
+                    -1,
+                )
+                emb_norms = torch.linalg.vector_norm(
+                    emb_flat,
+                    dim=1,
+                ).clamp_min(1e-12)
+                sample_embedding_scales = (
+                    float(dp_clip_norm) / emb_norms
+                ).clamp(max=1.0)
+            else:
+                emb_norm = torch.linalg.vector_norm(
+                    emb.detach()
+                )
+                scale = min(
+                    1.0,
+                    float(dp_clip_norm)
+                    / max(
+                        float(emb_norm.item()),
+                        1e-12,
+                    ),
+                )
+                sample_embedding_scales = torch.tensor(
+                    [scale],
+                    device=emb.device,
+                    dtype=emb.dtype,
+                )
+
         transmitted_emb = _protect_tensor_dp(
             emb,
             mechanisms.get("emb", "none"),
             dp_clip_norm,
-            dp_noise_multiplier,
+            embedding_noise_multiplier,
             dp_rng,
             device,
             dp_epsilon,
@@ -922,7 +1144,7 @@ def split_local_train_lenet5(
             label_grad,
             mechanisms.get("grad", "none"),
             dp_clip_norm,
-            dp_noise_multiplier,
+            label_grad_noise_multiplier,
             dp_rng,
             device,
             dp_epsilon,
@@ -936,11 +1158,139 @@ def split_local_train_lenet5(
             edge_opt.step()
             diagnostics["actual_optimizer_steps"] += 1
 
-        end_trainable = [p for p in end.parameters() if p.requires_grad]
+        end_trainable = [
+            p
+            for p in end.parameters()
+            if p.requires_grad
+        ]
+
         if end_opt is not None and end_trainable and emb.requires_grad:
-            transmitted_emb.backward(grad_to_end)
-            torch.nn.utils.clip_grad_norm_(end_trainable, max_norm=5.0)
-            end_opt.step()
+            if normalized_privacy_unit == "sample":
+                if sample_embedding_scales is None:
+                    raise RuntimeError(
+                        "missing Sample-DP embedding clipping scales"
+                    )
+
+                batch_size_actual = max(
+                    1,
+                    int(bx.shape[0]),
+                )
+
+                scale_shape = [
+                    int(sample_embedding_scales.shape[0])
+                ] + [1] * (
+                    grad_to_end.ndim - 1
+                )
+
+                # grad_to_end already corresponds to an averaged
+                # label-gradient release (1/B). Recover the
+                # per-sample upstream vector before the DP-SGD
+                # aggregator performs its own final division by B.
+                #
+                # Also include the detached embedding clipping
+                # Jacobian used by _protect_tensor_dp().
+                per_sample_upstream = (
+                    grad_to_end
+                    * float(batch_size_actual)
+                    * sample_embedding_scales.reshape(
+                        scale_shape
+                    )
+                )
+
+                per_sample_end_grads = (
+                    per_sample_vjp_grads_reference(
+                        end,
+                        bx,
+                        per_sample_upstream,
+                    )
+                )
+
+                (
+                    aggregated_end_grads,
+                    sample_dp_diag,
+                ) = clip_and_aggregate_per_sample_grads(
+                    per_sample_end_grads,
+                    clip_norm=float(
+                        sample_optimizer_clip_norm
+                    ),
+                    noise_multiplier=float(
+                        sample_optimizer_noise_multiplier
+                    ),
+                    generator=sample_dp_generator,
+                )
+
+                for name, param in end.named_parameters():
+                    if not param.requires_grad:
+                        continue
+
+                    if name not in aggregated_end_grads:
+                        raise RuntimeError(
+                            "Missing aggregated Sample-DP "
+                            f"End gradient for {name!r}"
+                        )
+
+                    param.grad = (
+                        aggregated_end_grads[name]
+                        .detach()
+                        .to(
+                            device=param.device,
+                            dtype=param.dtype,
+                        )
+                        .clone()
+                    )
+
+                # Existing optimizer momentum / weight decay are
+                # post-processing of the protected Sample-DP gradient.
+                end_opt.step()
+
+                diagnostics[
+                    "sample_dp_optimizer_steps"
+                ] += 1
+                diagnostics[
+                    "sample_dp_sample_count"
+                ] += int(
+                    sample_dp_diag.sample_count
+                )
+                diagnostics[
+                    "sample_dp_clipped_sample_count"
+                ] += int(
+                    sample_dp_diag.clipped_sample_count
+                )
+                diagnostics[
+                    "sample_dp_max_raw_grad_norm"
+                ] = max(
+                    float(
+                        diagnostics[
+                            "sample_dp_max_raw_grad_norm"
+                        ]
+                    ),
+                    float(
+                        sample_dp_diag.max_raw_grad_norm
+                    ),
+                )
+                diagnostics[
+                    "sample_dp_max_clipped_grad_norm"
+                ] = max(
+                    float(
+                        diagnostics[
+                            "sample_dp_max_clipped_grad_norm"
+                        ]
+                    ),
+                    float(
+                        sample_dp_diag.max_clipped_grad_norm
+                    ),
+                )
+
+            else:
+                transmitted_emb.backward(
+                    grad_to_end
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    end_trainable,
+                    max_norm=5.0,
+                )
+                end_opt.step()
+
             diagnostics["actual_optimizer_steps"] += 1
 
     end_diff = {
