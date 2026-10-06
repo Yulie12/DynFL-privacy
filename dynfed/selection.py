@@ -23,6 +23,7 @@ from .flow_executor import (
 )
 from .privacy import (
     ClientPrivacyLedger,
+    SamplePrivacyLedger,
     OBJECT_SIZES,
     PRIVACY_ALPHA,
     PRIVACY_BASE_TIME,
