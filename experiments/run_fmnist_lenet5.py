@@ -334,6 +334,31 @@ def main() -> None:
                 f"invalid --fast-client-deadlines entry {item!r}; expected CLIENT_ID:SECONDS"
             ) from exc
 
+    normalized_model_for_selection = (
+        str(args.model)
+        .strip()
+        .lower()
+        .replace("-", "")
+        .replace("_", "")
+    )
+
+    # Torchvision pretrained split End contains conv1/bn1/layer1/layer2.
+    # The current training policy only enables later layers / heads, so the
+    # split End has no trainable parameters for these model families.
+    frozen_split_end_models = {
+        "resnet18pretrainedadapter",
+        "resnet18pretrained",
+        "resnet18pretrainedhead",
+        "resnet18pretrainedhead256",
+        "resnet18pretrainedlayer4head",
+        "resnet50pretrained",
+    }
+
+    split_end_optimizer_enabled = (
+        normalized_model_for_selection
+        not in frozen_split_end_models
+    )
+
     selection = SelectionConfig(
         rounds=args.rounds,
         num_clients=args.clients,
@@ -366,6 +391,7 @@ def main() -> None:
         risk_limit=args.risk_limit,
         aggregation_fraction=args.aggregation_fraction,
         privacy_local_epochs=args.local_epochs,
+        split_end_optimizer_enabled=split_end_optimizer_enabled,
         trusted_edge_split_execution=False,
         pareto_archive_size=args.pareto_archive_size,
         pareto_beam_size=args.pareto_beam_size,

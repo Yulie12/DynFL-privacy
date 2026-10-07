@@ -163,6 +163,10 @@ class SelectionConfig:
     split_batch_size: int = 128
     fl_first_split_on_demand: bool = False
     privacy_local_epochs: int = 1
+    # Whether split End-side execution actually has trainable parameters.
+    # This affects Sample-DP optimizer events only; full-local updates
+    # remain independently trainable/accounted.
+    split_end_optimizer_enabled: bool = True
     trusted_edge_split_execution: bool = False
     allow_he: bool = True
     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3")
@@ -7348,14 +7352,14 @@ def _sample_dp_event_counts(
         else int(config.L_block_cycles)
     )
 
-    optimizer_events = _sample_dp_optimizer_event_count(
+    local_batch_events = _sample_dp_optimizer_event_count(
         samples=int(samples),
         batch_size=int(config.split_batch_size),
         epochs=int(config.privacy_local_epochs),
         local_steps=local_steps,
     )
 
-    if optimizer_events <= 0:
+    if local_batch_events <= 0:
         return 0, 0, 0
 
     link_events = (
@@ -7372,6 +7376,14 @@ def _sample_dp_event_counts(
         )
     )
 
+    split_objects = {
+        obj
+        for _link_id, obj, _count, _privacy_eligible in link_events
+    }
+    is_split_execution = bool(
+        {"emb", "grad"} & split_objects
+    )
+
     released_objects = {
         obj
         for _link_id, obj, _count, privacy_eligible in link_events
@@ -7379,13 +7391,22 @@ def _sample_dp_event_counts(
     }
 
     embedding_events = (
-        optimizer_events
+        local_batch_events
         if "emb" in released_objects
         else 0
     )
     label_grad_events = (
-        optimizer_events
+        local_batch_events
         if "grad" in released_objects
+        else 0
+    )
+
+    optimizer_events = (
+        local_batch_events
+        if (
+            not is_split_execution
+            or bool(config.split_end_optimizer_enabled)
+        )
         else 0
     )
 

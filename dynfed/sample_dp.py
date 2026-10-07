@@ -297,3 +297,190 @@ def per_sample_vjp_grads_reference(
         name: torch.stack(grads, dim=0)
         for name, grads in collected.items()
     }
+
+
+def _functional_sample_grad_state(
+    model: torch.nn.Module,
+) -> tuple[
+    dict[str, torch.Tensor],
+    dict[str, torch.Tensor],
+    dict[str, torch.Tensor],
+]:
+    """Split module state for torch.func per-sample gradient transforms."""
+    trainable_params: dict[str, torch.Tensor] = {}
+    frozen_params: dict[str, torch.Tensor] = {}
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            trainable_params[name] = param
+        else:
+            frozen_params[name] = param
+
+    if not trainable_params:
+        raise ValueError("model has no trainable parameters")
+
+    buffers = {
+        name: buffer
+        for name, buffer in model.named_buffers()
+    }
+
+    return trainable_params, frozen_params, buffers
+
+
+def per_sample_grads_vmap(
+    model: torch.nn.Module,
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Vectorized per-sample gradients using torch.func.grad + vmap.
+
+    This is mathematically equivalent to ``per_sample_grads_reference`` for
+    deterministic, torch.func-compatible model execution. It performs no
+    clipping, noise addition, optimizer step, or privacy accounting.
+    """
+    if inputs.ndim < 1:
+        raise ValueError("inputs must have a batch dimension")
+    if targets.ndim < 1:
+        raise ValueError("targets must have a batch dimension")
+
+    batch_size = int(inputs.shape[0])
+    if batch_size <= 0:
+        raise ValueError("batch size must be positive")
+    if int(targets.shape[0]) != batch_size:
+        raise ValueError(
+            "inputs and targets must have the same leading batch dimension"
+        )
+
+    (
+        trainable_params,
+        frozen_params,
+        buffers,
+    ) = _functional_sample_grad_state(model)
+
+    def single_sample_loss(
+        differentiable_params: dict[str, torch.Tensor],
+        sample_input: torch.Tensor,
+        sample_target: torch.Tensor,
+    ) -> torch.Tensor:
+        full_params = dict(frozen_params)
+        full_params.update(differentiable_params)
+
+        outputs = torch.func.functional_call(
+            model,
+            (full_params, buffers),
+            (sample_input.unsqueeze(0),),
+        )
+
+        loss = loss_fn(
+            outputs,
+            sample_target.unsqueeze(0),
+        )
+
+        if loss.numel() != 1:
+            raise ValueError(
+                "loss_fn must return a scalar loss for each single-sample minibatch"
+            )
+
+        return loss.reshape(())
+
+    grad_fn = torch.func.grad(single_sample_loss)
+
+    per_sample_grads = torch.func.vmap(
+        grad_fn,
+        in_dims=(None, 0, 0),
+    )(
+        trainable_params,
+        inputs,
+        targets,
+    )
+
+    return {
+        name: grad.detach()
+        for name, grad in per_sample_grads.items()
+    }
+
+
+def per_sample_vjp_grads_vmap(
+    model: torch.nn.Module,
+    inputs: torch.Tensor,
+    output_grads: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Vectorized per-sample parameter VJPs using torch.func.grad + vmap.
+
+    For sample i this computes
+
+        grad_theta <model(inputs_i), output_grads_i>
+
+    and is the vectorized counterpart of
+    ``per_sample_vjp_grads_reference``.
+    """
+    if inputs.ndim == 0 or output_grads.ndim == 0:
+        raise ValueError(
+            "inputs and output_grads must include a batch dimension"
+        )
+
+    batch_size = int(inputs.shape[0])
+
+    if batch_size <= 0:
+        raise ValueError("batch must contain at least one sample")
+
+    if int(output_grads.shape[0]) != batch_size:
+        raise ValueError(
+            "inputs and output_grads must have the same batch size"
+        )
+
+    (
+        trainable_params,
+        frozen_params,
+        buffers,
+    ) = _functional_sample_grad_state(model)
+
+    def single_sample_surrogate(
+        differentiable_params: dict[str, torch.Tensor],
+        sample_input: torch.Tensor,
+        sample_output_grad: torch.Tensor,
+    ) -> torch.Tensor:
+        full_params = dict(frozen_params)
+        full_params.update(differentiable_params)
+
+        outputs = torch.func.functional_call(
+            model,
+            (full_params, buffers),
+            (sample_input.unsqueeze(0),),
+        )
+
+        upstream = (
+            sample_output_grad
+            .detach()
+            .to(
+                device=outputs.device,
+                dtype=outputs.dtype,
+            )
+            .unsqueeze(0)
+        )
+
+        if outputs.shape != upstream.shape:
+            raise ValueError(
+                "model output shape must match output_grads shape "
+                f"for each sample: got {tuple(outputs.shape)} and "
+                f"{tuple(upstream.shape)}"
+            )
+
+        return (outputs * upstream).sum()
+
+    grad_fn = torch.func.grad(single_sample_surrogate)
+
+    per_sample_grads = torch.func.vmap(
+        grad_fn,
+        in_dims=(None, 0, 0),
+    )(
+        trainable_params,
+        inputs,
+        output_grads,
+    )
+
+    return {
+        name: grad.detach()
+        for name, grad in per_sample_grads.items()
+    }

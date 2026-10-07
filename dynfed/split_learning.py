@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from .sample_dp import (
     clip_and_aggregate_per_sample_grads,
     per_sample_grads_reference,
+    per_sample_grads_vmap,
     per_sample_vjp_grads_reference,
 )
 
@@ -733,6 +734,30 @@ def _make_optimizer(
     return torch.optim.SGD(trainable, lr=lr, momentum=0.0, weight_decay=decay)
 
 
+def _resolved_sample_optimizer_noise_multiplier(
+    value: float | None,
+    *,
+    required: bool,
+) -> float | None:
+    """Validate Sample-DP optimizer sigma at its execution boundary."""
+    if value is None:
+        if required:
+            raise ValueError(
+                "sample_optimizer_noise_multiplier is required "
+                "when sample-level optimizer DP-SGD is executed"
+            )
+        return None
+
+    sigma = float(value)
+
+    if sigma < 0.0:
+        raise ValueError(
+            "sample_optimizer_noise_multiplier must be non-negative"
+        )
+
+    return sigma
+
+
 def _training_batches(
     loader: torch.utils.data.DataLoader,
     epochs: int,
@@ -853,15 +878,12 @@ def split_local_train_lenet5(
             raise ValueError(
                 "sample_optimizer_clip_norm must be positive"
             )
-        if sample_optimizer_noise_multiplier is None:
-            raise ValueError(
-                "sample_optimizer_noise_multiplier is required "
-                "for sample-level training"
+        sample_optimizer_noise_multiplier = (
+            _resolved_sample_optimizer_noise_multiplier(
+                sample_optimizer_noise_multiplier,
+                required=False,
             )
-        if float(sample_optimizer_noise_multiplier) < 0.0:
-            raise ValueError(
-                "sample_optimizer_noise_multiplier must be non-negative"
-            )
+        )
 
         sample_dp_generator = torch.Generator(
             device=device
@@ -917,6 +939,24 @@ def split_local_train_lenet5(
         _prepare_model_for_training(model, model_name)
         opt = _make_optimizer(model, lr, model_name, weight_decay=l2)
 
+        sample_full_grad_fn = per_sample_grads_reference
+        if normalized_privacy_unit == "sample":
+            has_training_batchnorm = any(
+                isinstance(
+                    module,
+                    nn.modules.batchnorm._BatchNorm,
+                )
+                and module.training
+                for module in model.modules()
+            )
+
+            if (
+                hasattr(torch, "func")
+                and hasattr(torch.func, "vmap")
+                and not has_training_batchnorm
+            ):
+                sample_full_grad_fn = per_sample_grads_vmap
+
         for bx, by in _training_batches(loader, epochs, local_steps):
             diagnostics["actual_local_batches"] += 1
             if opt is None:
@@ -925,7 +965,14 @@ def split_local_train_lenet5(
             opt.zero_grad()
 
             if normalized_privacy_unit == "sample":
-                per_sample_grads = per_sample_grads_reference(
+                sample_optimizer_sigma = (
+                    _resolved_sample_optimizer_noise_multiplier(
+                        sample_optimizer_noise_multiplier,
+                        required=True,
+                    )
+                )
+
+                per_sample_grads = sample_full_grad_fn(
                     model,
                     bx,
                     by,
@@ -943,7 +990,7 @@ def split_local_train_lenet5(
                             sample_optimizer_clip_norm
                         ),
                         noise_multiplier=float(
-                            sample_optimizer_noise_multiplier
+                            sample_optimizer_sigma
                         ),
                         generator=sample_dp_generator,
                     )
@@ -1166,6 +1213,13 @@ def split_local_train_lenet5(
 
         if end_opt is not None and end_trainable and emb.requires_grad:
             if normalized_privacy_unit == "sample":
+                sample_optimizer_sigma = (
+                    _resolved_sample_optimizer_noise_multiplier(
+                        sample_optimizer_noise_multiplier,
+                        required=True,
+                    )
+                )
+
                 if sample_embedding_scales is None:
                     raise RuntimeError(
                         "missing Sample-DP embedding clipping scales"
@@ -1214,7 +1268,7 @@ def split_local_train_lenet5(
                         sample_optimizer_clip_norm
                     ),
                     noise_multiplier=float(
-                        sample_optimizer_noise_multiplier
+                        sample_optimizer_sigma
                     ),
                     generator=sample_dp_generator,
                 )

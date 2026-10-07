@@ -984,3 +984,56 @@ def test_sample_selector_accounting_split_composes_three_event_classes():
         candidate.sample_optimizer_noise_multiplier
         is not None
     )
+
+
+
+def test_sample_dp_frozen_split_end_has_no_optimizer_events():
+    from dynfed.selection import (
+        SelectionConfig,
+        _sample_dp_event_counts,
+    )
+
+    config = SelectionConfig(
+        mainline_fusion=False,
+        L_block_cycles=5,
+        split_batch_size=128,
+        privacy_local_epochs=3,
+        split_end_optimizer_enabled=False,
+    )
+
+    # LIC is a split path: communication mechanisms still execute for each
+    # minibatch, but a frozen End performs no parameter optimizer update.
+    assert _sample_dp_event_counts(
+        config,
+        "LIC",
+        240,
+    ) == (5, 5, 0)
+
+    # Full-local execution remains independently trainable and must continue
+    # to account its Sample-DP optimizer events.
+    assert _sample_dp_event_counts(
+        config,
+        "LIIC",
+        240,
+    ) == (0, 0, 5)
+
+
+def test_sample_dp_trainable_split_end_keeps_optimizer_events():
+    from dynfed.selection import (
+        SelectionConfig,
+        _sample_dp_event_counts,
+    )
+
+    config = SelectionConfig(
+        mainline_fusion=False,
+        L_block_cycles=5,
+        split_batch_size=128,
+        privacy_local_epochs=3,
+        split_end_optimizer_enabled=True,
+    )
+
+    assert _sample_dp_event_counts(
+        config,
+        "LIC",
+        240,
+    ) == (5, 5, 5)

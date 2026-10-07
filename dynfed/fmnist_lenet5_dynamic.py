@@ -524,6 +524,19 @@ def _client_train_worker(
     }
 
 
+def _synchronize_device_for_timing(
+    device: torch.device | str,
+) -> None:
+    """Synchronize CUDA only at profiling phase boundaries."""
+    resolved_device = torch.device(device)
+
+    if (
+        resolved_device.type == "cuda"
+        and torch.cuda.is_available()
+    ):
+        torch.cuda.synchronize(resolved_device)
+
+
 def run_fmnist_lenet5_training(
     selection: SelectionConfig,
     train_config: Lenet5Config,
@@ -1501,11 +1514,13 @@ def _run_lenet5_policy(
         stop_round = min(selection.rounds, start_round + max_new_rounds)
 
     for round_idx in range(start_round, stop_round):
+        _synchronize_device_for_timing(device)
         round_wall_started_at = time.perf_counter()
         round_he_metrics = HEOperationMetrics(backend=he_status.backend)
         secagg_wall_time_sec = 0.0
         secagg_call_count = 0
         fused_he_audit = {}
+        _synchronize_device_for_timing(device)
         selection_wall_started_at = time.perf_counter()
         emit_stage_status(
             f"Round {round_idx + 1}/{selection.rounds}: enumerating client candidates",
@@ -1821,7 +1836,11 @@ def _run_lenet5_policy(
             for client_id in planned_ids:
                 round_decision_rows_by_client[client_id]["dp_execution_plan"] = "aggregate"
 
-        selection_wall_time_sec = time.perf_counter() - selection_wall_started_at
+        _synchronize_device_for_timing(device)
+        selection_wall_time_sec = (
+            time.perf_counter()
+            - selection_wall_started_at
+        )
         if policy in _FROZEN_MODE_POLICIES and not fixed_mode_assignments:
             fixed_mode_assignments = {
                 client_id: candidate.mode
@@ -2175,6 +2194,7 @@ def _run_lenet5_policy(
             train_tasks.append((client_id, candidate, idx, dispatch_sequence))
             dispatch_sequence += 1
 
+        _synchronize_device_for_timing(device)
         training_wall_started_at = time.perf_counter()
         emit_stage_status(
             f"Round {round_idx + 1}/{selection.rounds}: training selected clients",
@@ -2219,7 +2239,11 @@ def _run_lenet5_policy(
             progress_callback=training_progress_callback,
             progress_event_callback=training_event_callback,
         )
-        training_wall_time_sec = time.perf_counter() - training_wall_started_at
+        _synchronize_device_for_timing(device)
+        training_wall_time_sec = (
+            time.perf_counter()
+            - training_wall_started_at
+        )
         for row in decision_rows:
             if row.get("round") == round_idx and row.get("client_id") in worker_results:
                 result = worker_results[row["client_id"]]
@@ -2321,6 +2345,7 @@ def _run_lenet5_policy(
                 )
             )
 
+        _synchronize_device_for_timing(device)
         flow_wall_started_at = time.perf_counter()
         emit_stage_status(
             f"Round {round_idx + 1}/{selection.rounds}: simulating link flow",
@@ -2336,7 +2361,11 @@ def _run_lenet5_policy(
             cloud_aggregation_beta=selection.cloud_aggregation_beta,
             cloud_aggregation_fixed=selection.cloud_aggregation_fixed,
         )
-        flow_wall_time_sec = time.perf_counter() - flow_wall_started_at
+        _synchronize_device_for_timing(device)
+        flow_wall_time_sec = (
+            time.perf_counter()
+            - flow_wall_started_at
+        )
         for event in flow_result.flow_events:
             flow_event_rows.append({"policy": policy, **event})
         if effective_selection.mainline_fusion:
@@ -2344,6 +2373,7 @@ def _run_lenet5_policy(
             if set(flow_result.selected_client_ids) != expected_ids:
                 raise ValueError("Mainline fusion fixed-roster release requires all clients every round")
 
+        _synchronize_device_for_timing(device)
         aggregation_wall_started_at = time.perf_counter()
         emit_stage_status(
             f"Round {round_idx + 1}/{selection.rounds}: aggregating updates",
@@ -2527,6 +2557,11 @@ def _run_lenet5_policy(
                 if MODE_SPECS[selected_by_id[cid].mode].E_edge_loops > 1)
             if effective_selection.mainline_fusion else 0
         )
+        multi_edge_retraining_wall_time_sec = 0.0
+        multi_edge_retraining_calls = 0
+        multi_edge_retraining_tasks = 0
+        multi_edge_training_model_cache: dict[str, Any] = {}
+
         initial_admitted_updates = {
             client_id: (state_diff, sample_count)
             for client_id, state_diff, sample_count in zip(
@@ -2571,6 +2606,9 @@ def _run_lenet5_policy(
                         )
                         for sequence, client_id in enumerate(client_ids)
                     ]
+                    _synchronize_device_for_timing(device)
+                    multi_edge_retraining_started_at = time.perf_counter()
+
                     cycle_results = _run_client_training_tasks(
                         tasks=cycle_tasks,
                         train_config=train_config,
@@ -2587,7 +2625,16 @@ def _run_lenet5_policy(
                         np_rng=np_rng,
                         round_idx=round_idx,
                         training_stage=edge_loop_idx,
+                        model_cache=multi_edge_training_model_cache,
                     )
+
+                    _synchronize_device_for_timing(device)
+                    multi_edge_retraining_wall_time_sec += (
+                        time.perf_counter()
+                        - multi_edge_retraining_started_at
+                    )
+                    multi_edge_retraining_calls += 1
+                    multi_edge_retraining_tasks += len(cycle_tasks)
                     cycle_updates = [
                         (
                             client_id,
@@ -2617,7 +2664,7 @@ def _run_lenet5_policy(
                         else "none"
                     ),
                     he_metrics=round_he_metrics,
-                )
+)
                 shared_returned_state = _state_dict_to_device_nested(
                     returned_state,
                     torch.device("cpu"),
@@ -2980,7 +3027,7 @@ def _run_lenet5_policy(
                         he_aggregation_size=train_config.he_aggregation_size,
                         he_backend="none",
                         he_metrics=round_he_metrics,
-                    )
+)
                     edge_update = _state_difference_from_model(
                         edge_state,
                         global_end,
@@ -3375,7 +3422,7 @@ def _run_lenet5_policy(
                 he_aggregation_size=train_config.he_aggregation_size,
                 he_backend=he_status.backend if execute_real_he else "none",
                 he_metrics=round_he_metrics,
-            )
+)
             shared_returned_state = _state_dict_to_device_nested(
                 returned_state,
                 torch.device("cpu"),
@@ -3531,7 +3578,11 @@ def _run_lenet5_policy(
         for client_id, candidate, _candidates, _remaining in selected:
             if effective_selection.mainline_fusion or _mode_reaches_cloud(candidate.mode):
                 client_model_states.pop(client_id, None)
-        aggregation_wall_time_sec = time.perf_counter() - aggregation_wall_started_at
+        _synchronize_device_for_timing(device)
+        aggregation_wall_time_sec = (
+            time.perf_counter()
+            - aggregation_wall_started_at
+        )
 
         packet_dp_indices = {index for index, _std, _seed in local_dp_pending_components}
         protection_releases = []
@@ -3669,6 +3720,7 @@ def _run_lenet5_policy(
             real_he_aggregated_clients += round_real_he_clients
 
         logical_time += flow_result.round_duration
+        _synchronize_device_for_timing(device)
         evaluation_wall_started_at = time.perf_counter()
         emit_stage_status(
             f"Round {round_idx + 1}/{selection.rounds}: evaluating global model",
@@ -3688,7 +3740,11 @@ def _run_lenet5_policy(
             device,
             input_shape=input_shape,
         )
-        evaluation_wall_time_sec = time.perf_counter() - evaluation_wall_started_at
+        _synchronize_device_for_timing(device)
+        evaluation_wall_time_sec = (
+            time.perf_counter()
+            - evaluation_wall_started_at
+        )
         round_wall_time_sec = time.perf_counter() - round_wall_started_at
         cumulative_wall_time_sec = (
             completed_wall_time_offset_sec
@@ -4186,6 +4242,9 @@ def _run_lenet5_policy(
                     default=0.0,
                 ),
                 "multi_edge_loop_client_cycles": multi_edge_loop_client_cycles,
+                "multi_edge_retraining_wall_time_sec": multi_edge_retraining_wall_time_sec,
+                "multi_edge_retraining_calls": multi_edge_retraining_calls,
+                "multi_edge_retraining_tasks": multi_edge_retraining_tasks,
                 "num_effective_edges": flow_result.num_effective_edges,
                 "waiting_time": flow_result.waiting_time,
                 "edge_aggregation_time": flow_result.edge_aggregation_time,
@@ -5088,6 +5147,7 @@ def _run_client_training_tasks(
     training_stage: int = 0,
     progress_callback: Callable[[int, int], None] | None = None,
     progress_event_callback: Callable[[str, int, int], None] | None = None,
+    model_cache: dict[str, Any] | None = None,
 ) -> dict[int, dict[str, Any]]:
     if not tasks:
         return {}
@@ -5174,7 +5234,11 @@ def _run_client_training_tasks(
 
     if executor == "serial":
         results: dict[int, dict[str, Any]] = {}
-        model_cache: dict[str, Any] = {}
+        serial_model_cache = (
+            model_cache
+            if model_cache is not None
+            else {}
+        )
         total = len(tasks)
         for completed, (client_id, candidate, idx, _sequence) in enumerate(tasks, start=1):
             client_label = (
@@ -5187,7 +5251,10 @@ def _run_client_training_tasks(
             payload = build_payload(client_id, candidate, idx)
             if progress_event_callback is not None:
                 progress_event_callback(f"training {client_label}", completed - 1, total)
-            result = _client_train_worker(payload, model_cache=model_cache)
+            result = _client_train_worker(
+                payload,
+                model_cache=serial_model_cache,
+            )
             results[int(result["client_id"])] = result
             if progress_callback is not None:
                 progress_callback(completed, total)
@@ -5387,6 +5454,7 @@ def _aggregate_returned_client_models(
     if not updates:
         raise ValueError("Cannot aggregate an empty edge update set.")
 
+
     reference = client_model_states.get(updates[0][0])
     if reference is None:
         reference = {
@@ -5401,8 +5469,12 @@ def _aggregate_returned_client_models(
         input_shape,
         num_classes,
     )
-    temp_end.load_state_dict(_state_dict_to_device(reference["end"], device))
-    temp_edge.load_state_dict(_state_dict_to_device(reference["edge"], device))
+    temp_end.load_state_dict(
+        _state_dict_to_device(reference["end"], device)
+    )
+    temp_edge.load_state_dict(
+        _state_dict_to_device(reference["edge"], device)
+    )
 
     candidates: list[Candidate | None] = []
     sample_counts: list[int] = []
@@ -5415,6 +5487,8 @@ def _aggregate_returned_client_models(
         for candidate in candidates
     ]
     use_real_he = he_backend in {"seal", "tenseal"} and any(encrypted_mask)
+
+
     if use_real_he:
         temp_end, temp_edge = _fedavg_returned_models_bounded_he(
             updates=updates,
@@ -5439,13 +5513,17 @@ def _aggregate_returned_client_models(
             sample_counts=sample_counts,
         )
 
-    return (
-        {
-            "end": _state_dict_to_device(temp_end.state_dict(), torch.device("cpu")),
-            "edge": _state_dict_to_device(temp_edge.state_dict(), torch.device("cpu")),
-        },
-        use_real_he,
-    )
+    returned_state = {
+        "end": _state_dict_to_device(
+            temp_end.state_dict(),
+            torch.device("cpu"),
+        ),
+        "edge": _state_dict_to_device(
+            temp_edge.state_dict(),
+            torch.device("cpu"),
+        ),
+    }
+    return returned_state, use_real_he
 
 
 def _fedavg_returned_models_bounded_he(

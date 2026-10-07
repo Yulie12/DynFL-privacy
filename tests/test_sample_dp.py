@@ -788,3 +788,165 @@ def test_reference_per_sample_vjp_rejects_shape_mismatch():
             torch.zeros(2, 3),
             torch.zeros(2, 4),
         )
+
+
+def test_vmap_per_sample_grads_match_reference():
+    from dynfed.sample_dp import (
+        per_sample_grads_reference,
+        per_sample_grads_vmap,
+    )
+
+    torch.manual_seed(24680)
+
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 4),
+        torch.nn.BatchNorm1d(4),
+        torch.nn.Tanh(),
+        torch.nn.Linear(4, 3),
+    )
+    model.eval()
+
+    # Exercise the runtime-relevant case where BatchNorm state is frozen
+    # while other model parameters remain trainable.
+    for param in model[1].parameters():
+        param.requires_grad_(False)
+
+    inputs = torch.randn(6, 4)
+    targets = torch.tensor(
+        [0, 1, 2, 1, 0, 2],
+        dtype=torch.long,
+    )
+
+    reference = per_sample_grads_reference(
+        model,
+        inputs,
+        targets,
+        torch.nn.functional.cross_entropy,
+    )
+
+    vectorized = per_sample_grads_vmap(
+        model,
+        inputs,
+        targets,
+        torch.nn.functional.cross_entropy,
+    )
+
+    assert set(vectorized) == set(reference)
+
+    for name in reference:
+        assert vectorized[name].shape == reference[name].shape
+        torch.testing.assert_close(
+            vectorized[name],
+            reference[name],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+
+def test_vmap_per_sample_vjp_grads_match_reference():
+    from dynfed.sample_dp import (
+        per_sample_vjp_grads_reference,
+        per_sample_vjp_grads_vmap,
+    )
+
+    torch.manual_seed(97531)
+
+    model = torch.nn.Sequential(
+        torch.nn.Linear(3, 5),
+        torch.nn.ReLU(),
+        torch.nn.Linear(5, 2),
+    )
+
+    inputs = torch.randn(7, 3)
+    upstream = torch.randn(7, 2)
+
+    reference = per_sample_vjp_grads_reference(
+        model,
+        inputs,
+        upstream,
+    )
+
+    vectorized = per_sample_vjp_grads_vmap(
+        model,
+        inputs,
+        upstream,
+    )
+
+    assert set(vectorized) == set(reference)
+
+    for name in reference:
+        assert vectorized[name].shape == reference[name].shape
+        torch.testing.assert_close(
+            vectorized[name],
+            reference[name],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+
+def test_vmap_per_sample_vjp_rejects_shape_mismatch():
+    import pytest
+
+    from dynfed.sample_dp import per_sample_vjp_grads_vmap
+
+    model = torch.nn.Linear(3, 2)
+
+    with pytest.raises(
+        ValueError,
+        match="output shape",
+    ):
+        per_sample_vjp_grads_vmap(
+            model,
+            torch.zeros(2, 3),
+            torch.zeros(2, 4),
+        )
+
+
+
+
+def test_sample_optimizer_noise_multiplier_is_optional_until_execution():
+    from dynfed.split_learning import (
+        _resolved_sample_optimizer_noise_multiplier,
+    )
+
+    assert (
+        _resolved_sample_optimizer_noise_multiplier(
+            None,
+            required=False,
+        )
+        is None
+    )
+
+    assert (
+        _resolved_sample_optimizer_noise_multiplier(
+            2.5,
+            required=False,
+        )
+        == 2.5
+    )
+
+
+def test_sample_optimizer_noise_multiplier_is_required_at_execution():
+    import pytest
+
+    from dynfed.split_learning import (
+        _resolved_sample_optimizer_noise_multiplier,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="optimizer DP-SGD is executed",
+    ):
+        _resolved_sample_optimizer_noise_multiplier(
+            None,
+            required=True,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="must be non-negative",
+    ):
+        _resolved_sample_optimizer_noise_multiplier(
+            -0.1,
+            required=False,
+        )
