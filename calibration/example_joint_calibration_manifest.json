@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "cross_client_rng": "conditionally_independent",
+    "workload": "public_or_independent_calibration_only"
+  },
+  "pairs": [
+    {
+      "state_key": "round:0",
+      "mode": "LIC",
+      "client_id": 0,
+      "clean": "pairs/lic_client0_round0_trial1_clean.pt",
+      "private": "pairs/lic_client0_round0_trial1_private.pt"
+    },
+    {
+      "state_key": "round:0",
+      "mode": "LIC",
+      "client_id": 0,
+      "clean": "pairs/lic_client0_round0_trial2_clean.pt",
+      "private": "pairs/lic_client0_round0_trial2_private.pt"
+    }
+  ],
+  "ideal_updates": [
+    {
+      "state_key": "round:0",
+      "path": "pairs/round0_ideal_update.pt"
+    }
+  ]
+}

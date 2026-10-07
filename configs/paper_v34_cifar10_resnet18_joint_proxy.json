@@ -1,7 +1,7 @@
 {
-  "name": "paper_v31_cifar10_resnet18_fast_response",
+  "name": "paper_v34_cifar10_resnet18_joint_proxy",
   "execution_revision": "paper_flow_v31_mode_specific_privacy",
-  "output_root": "out/paper_v31_final/fig4_fast_response",
+  "output_root": "out/paper_v34_joint_proxy/cifar10_resnet18",
   "seeds": [
     40,
     42,
@@ -62,10 +62,7 @@
       "17": 20.0,
       "18": 20.0,
       "19": 20.0
-    },
-    "fl_first_split_on_demand": true,
-    "split_interaction_mode": "workload",
-    "split_batch_size": 128
+    }
   },
   "network": {
     "end_edge_rate_mb_s": 5,
@@ -119,5 +116,12 @@
     "pareto_neighbor_top_k": 16,
     "cloud_fusion_xi": 0.2,
     "cloud_fusion_eps": 0.05
+  },
+  "learning": {
+    "objective": "joint_calibration",
+    "calibration_path": "calibration/paper_v34_cifar10_resnet18_joint.pt",
+    "state_key": "auto_round",
+    "e_alg_policy": "table",
+    "missing_policy": "error"
   }
 }

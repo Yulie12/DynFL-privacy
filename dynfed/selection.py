@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .nodes import build_profiles
+from .joint_calibration import JointUpdateCalibrationTable
 from .flow_executor import (
     CLOUD_DIRECT_MODES,
     EDGE_CLOUD_MODES,
@@ -220,6 +221,23 @@ class SelectionConfig:
     update_payload_mb: float = 4.0
     mainline_fusion: bool = False
 
+    # Learning objective used by the complete-profile Pareto selector.
+    # ``legacy_fusion_dp`` preserves the historical analytical proxy.
+    # ``joint_calibration`` implements the latest Sample-DP theory path:
+    # paired clean/private executions are performed offline, while online
+    # selection only reads empirical update-space conditional moments.
+    learning_objective: str = "legacy_fusion_dp"
+    joint_calibration_path: str | None = None
+    joint_calibration_state_key: str = "default"
+    # ``table`` uses a calibrated ideal/reference update and therefore keeps
+    # e_alg in the same joint vector expression. ``zero`` is an explicitly
+    # labelled empirical approximation for experiments that validate e_alg as
+    # approximately common/negligible across candidate profiles.
+    joint_calibration_e_alg_policy: str = "table"
+    # ``error`` prevents silent fallback to the retired learning objective.
+    # ``legacy`` exists only for backward-compatible diagnostics/tests.
+    joint_calibration_missing_policy: str = "error"
+
     def __post_init__(self) -> None:
         seen_fast_clients: set[int] = set()
         for client_id, deadline in self.fast_client_deadlines:
@@ -232,6 +250,30 @@ class SelectionConfig:
             seen_fast_clients.add(int(client_id))
         if self.mainline_fusion:
             raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
+        if self.learning_objective not in {"legacy_fusion_dp", "joint_calibration"}:
+            raise ValueError(
+                "learning_objective must be 'legacy_fusion_dp' or 'joint_calibration'"
+            )
+        if self.joint_calibration_e_alg_policy not in {"table", "zero"}:
+            raise ValueError(
+                "joint_calibration_e_alg_policy must be 'table' or 'zero'"
+            )
+        if self.joint_calibration_missing_policy not in {"error", "legacy"}:
+            raise ValueError(
+                "joint_calibration_missing_policy must be 'error' or 'legacy'"
+            )
+        if self.learning_objective == "joint_calibration" and self.privacy_unit != "sample":
+            raise ValueError(
+                "joint_calibration is defined for the Sample-DP selector; set privacy_unit='sample'"
+            )
+        if (
+            self.learning_objective == "joint_calibration"
+            and not self.joint_calibration_path
+            and self.joint_calibration_missing_policy == "error"
+        ):
+            raise ValueError(
+                "joint_calibration_path is required when learning_objective='joint_calibration'"
+            )
 
 
 @dataclass(frozen=True)
@@ -591,8 +633,10 @@ def build_privacy_ledger(
 class ProfileEvaluation:
     profile: dict[int, Candidate]
     system_latency: float
-    # Kept as a compatibility field name for existing result readers/tests;
-    # its value is now the paper's DP perturbation objective J_DP.
+    # Kept as a compatibility field name for existing result readers/tests.
+    # It stores the active second Pareto objective: the calibrated joint
+    # update-space proxy in the Sample-DP paper path, or the legacy score when
+    # explicitly requested.
     system_omega: float
     cloud_fusion_ratio: float
     admitted_client_ids: tuple[int, ...] = ()
@@ -600,13 +644,21 @@ class ProfileEvaluation:
     fusion_distortion: float = 0.0
     fusion_cosine_distortion: float = 0.0
     fusion_objective_enabled: bool = False
-    # Raw DP second moment J_DP.  ``system_omega`` is the selector's formal
-    # learning objective J_learn = J_fusion^ub + J_DP.  Keep this separate so
-    # diagnostics can still report the DP term on its own.
+    # Legacy primitive/update-DP diagnostic.  It is kept for audit/backward
+    # comparison but is not the formal learning objective when
+    # learning_objective='joint_calibration'.
     dp_perturbation: float | None = None
     feature_perturbation: float = 0.0
     update_clip_perturbation: float = 0.0
     fusion_bound: float = 0.0
+    # Joint update-space proxy diagnostics. These are zero for the legacy
+    # objective and populated when learning_objective='joint_calibration'.
+    joint_mean_error_sq: float = 0.0
+    joint_variance_trace: float = 0.0
+    joint_e_alg_norm_sq: float = 0.0
+    joint_e_agg_norm_sq: float = 0.0
+    joint_bias_norm_sq: float = 0.0
+    learning_proxy_source: str = "legacy_fusion_dp"
 
     @property
     def system_dp(self) -> float:
@@ -811,6 +863,12 @@ def run_selection_experiment(
                             "feature_perturbation_objective": evaluation.feature_perturbation,
                             "fusion_bound_objective": evaluation.fusion_bound,
                             "learning_error_objective": evaluation.system_learning_error,
+                            "learning_proxy_source": evaluation.learning_proxy_source,
+                            "joint_mean_error_sq": evaluation.joint_mean_error_sq,
+                            "joint_variance_trace": evaluation.joint_variance_trace,
+                            "joint_e_alg_norm_sq": evaluation.joint_e_alg_norm_sq,
+                            "joint_e_agg_norm_sq": evaluation.joint_e_agg_norm_sq,
+                            "joint_bias_norm_sq": evaluation.joint_bias_norm_sq,
                             "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
                             "he_clients": sum(
                                 candidate_has_he(candidate)
@@ -937,6 +995,12 @@ def run_selection_experiment(
                     "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                     "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                     "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
+                    "learning_proxy_source": profile_evaluation.learning_proxy_source if profile_evaluation else "",
+                    "joint_mean_error_sq": profile_evaluation.joint_mean_error_sq if profile_evaluation else "",
+                    "joint_variance_trace": profile_evaluation.joint_variance_trace if profile_evaluation else "",
+                    "joint_e_alg_norm_sq": profile_evaluation.joint_e_alg_norm_sq if profile_evaluation else "",
+                    "joint_e_agg_norm_sq": profile_evaluation.joint_e_agg_norm_sq if profile_evaluation else "",
+                    "joint_bias_norm_sq": profile_evaluation.joint_bias_norm_sq if profile_evaluation else "",
                     "cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
                     "admitted_client_ids_objective": ";".join(str(cid) for cid in profile_evaluation.admitted_client_ids) if profile_evaluation else "",
                 }
@@ -2113,6 +2177,7 @@ def choose_global_pareto_profile(
                         replacement_stats is not None
                         and objective != "latency"
                         and config.pareto_neighbor_top_k > 0
+                        and config.learning_objective != "joint_calibration"
                     )
                     else None
                 )
@@ -3407,6 +3472,15 @@ def _selection_learning_cost(
     Fixed-admission lookahead is used for cheap seed/neighbor comparisons;
     selected neighbors are subsequently evaluated using their actual flow.
     """
+    joint_components = _joint_calibration_learning_components(
+        config,
+        profile,
+        client_samples,
+        admitted_client_ids,
+    )
+    if joint_components is not None:
+        return joint_components.total
+
     r_cloud = _cloud_update_coverage_ratio(profile, client_samples, admitted_client_ids)
     clip = max(float(config.omega_update_clip_norm), 0.0)
     return (
@@ -3628,6 +3702,262 @@ def _pareto_search_client_ids(
 
 
 
+class _JointCalibrationReplacementStats:
+    """Exact O(d) single-client lookahead for the calibrated joint objective.
+
+    The online selector must remain cheap: it only reads state-conditioned
+    empirical moments that were produced by offline/periodic paired
+    clean/private calibration.  No training replay is performed here.
+
+    For the table-e_alg policy, the exact calibrated mean error simplifies to
+
+        Delta_P,0 - Delta_* + b_s
+        = sum_{i in C} a_i (u_{i,0} + b_i) - Delta_*.
+
+    Therefore a replacement only changes three Cloud accumulators:
+    sample mass, the vector numerator for (u_0+b), and the scalar variance
+    numerator.  For the zero-e_alg approximation we additionally maintain the
+    full-population clean numerator because the mean is
+
+        Delta_P,0 - Delta_F,0 + b_s.
+
+    This retains all update-space vector cross terms.  It is *not* a return to
+    J_emb + J_grad + J_opt.
+    """
+
+    def __init__(
+        self,
+        config: SelectionConfig,
+        profile: dict[int, Candidate],
+        client_samples: dict[int, float],
+        admitted_client_ids: tuple[int, ...] | list[int],
+    ) -> None:
+        self.config = config
+        self.profile = profile
+        self.samples = client_samples
+        self.admitted_ids = tuple(admitted_client_ids)
+        self.admitted = frozenset(self.admitted_ids)
+        self.state_key = config.joint_calibration_state_key
+        self.available = True
+        self._entry_cache: dict[tuple[int, str], Any] = {}
+
+        try:
+            self.table = _load_joint_calibration_table(config)
+        except (FileNotFoundError, ValueError, RuntimeError, OSError):
+            if config.joint_calibration_missing_policy == "legacy":
+                self.available = False
+                self.table = None
+                return
+            raise
+
+        assert self.table is not None
+        independence = self.table.metadata.get("cross_client_rng", "independent")
+        if str(independence).strip().lower() not in {
+            "independent",
+            "conditionally_independent",
+        }:
+            raise ValueError(
+                "joint calibration selector currently requires conditionally independent "
+                "client privacy RNG because only per-client variance traces are stored"
+            )
+
+        self.total_mass = sum(
+            max(float(client_samples.get(cid, 0.0)), 0.0)
+            for cid in profile
+        )
+        if self.total_mass <= 0.0:
+            raise ValueError(
+                "joint calibration objective requires positive total client sample mass"
+            )
+
+        dimension: int | None = None
+        self.cloud_mass = 0.0
+        self.cloud_q_num: torch.Tensor | None = None
+        self.cloud_var_num = 0.0
+        self.full_clean_num: torch.Tensor | None = None
+
+        for cid, candidate in profile.items():
+            entry = self._lookup(cid, candidate)
+            if entry is None:
+                self.available = False
+                return
+            entry_dim = int(entry.clean_update_mean.numel())
+            if dimension is None:
+                dimension = entry_dim
+                self.cloud_q_num = torch.zeros(dimension, dtype=torch.float64)
+                self.full_clean_num = torch.zeros(dimension, dtype=torch.float64)
+            elif entry_dim != dimension:
+                raise ValueError(
+                    "joint calibration entries must share one update-space dimension"
+                )
+            mass = self._mass(cid)
+            assert self.full_clean_num is not None
+            self.full_clean_num += mass * entry.clean_update_mean
+            if cid in self.admitted and _candidate_reaches_cloud(candidate):
+                self.cloud_mass += mass
+                assert self.cloud_q_num is not None
+                self.cloud_q_num += mass * (entry.clean_update_mean + entry.bias_mean)
+                self.cloud_var_num += mass * mass * float(entry.variance_trace)
+
+        if dimension is None:
+            dimension = 0
+            self.cloud_q_num = torch.zeros(0, dtype=torch.float64)
+            self.full_clean_num = torch.zeros(0, dtype=torch.float64)
+
+        self.dimension = dimension
+        assert self.cloud_q_num is not None
+        assert self.full_clean_num is not None
+
+        self.ideal_update: torch.Tensor | None = None
+        if config.joint_calibration_e_alg_policy == "table":
+            try:
+                ideal = self.table.ideal_update(state_key=self.state_key)
+            except KeyError:
+                if config.joint_calibration_missing_policy == "legacy":
+                    self.available = False
+                    return
+                raise
+            if int(ideal.numel()) != self.dimension:
+                raise ValueError(
+                    "joint calibration ideal/reference update dimension does not match "
+                    "mode entries"
+                )
+            self.ideal_update = ideal
+
+    def _mass(self, cid: int) -> float:
+        return max(float(self.samples.get(cid, 0.0)), 0.0)
+
+    def _lookup(self, cid: int, candidate: Candidate) -> Any | None:
+        key = (int(cid), str(candidate.mode))
+        if key in self._entry_cache:
+            return self._entry_cache[key]
+        assert self.table is not None
+        try:
+            entry = self.table.lookup(
+                mode=candidate.mode,
+                state_key=self.state_key,
+                client_id=cid,
+            )
+        except KeyError:
+            if self.config.joint_calibration_missing_policy == "legacy":
+                return None
+            raise
+        if self._entry_cache:
+            any_entry = next(iter(self._entry_cache.values()))
+            if int(entry.clean_update_mean.numel()) != int(any_entry.clean_update_mean.numel()):
+                raise ValueError(
+                    "joint calibration entries must share one update-space dimension"
+                )
+        self._entry_cache[key] = entry
+        return entry
+
+    @staticmethod
+    def _mean_from_num(
+        numerator: torch.Tensor,
+        mass: float,
+    ) -> torch.Tensor:
+        if mass > 0.0:
+            return numerator / mass
+        return torch.zeros_like(numerator)
+
+    def current_cost(self) -> float | None:
+        if not self.available:
+            return None
+        return self._cost_from_accumulators(
+            cloud_mass=self.cloud_mass,
+            cloud_q_num=self.cloud_q_num,
+            cloud_var_num=self.cloud_var_num,
+            full_clean_num=self.full_clean_num,
+        )
+
+    def _cost_from_accumulators(
+        self,
+        *,
+        cloud_mass: float,
+        cloud_q_num: torch.Tensor,
+        cloud_var_num: float,
+        full_clean_num: torch.Tensor,
+    ) -> float:
+        cloud_joint_mean = self._mean_from_num(cloud_q_num, cloud_mass)
+        if self.config.joint_calibration_e_alg_policy == "table":
+            assert self.ideal_update is not None
+            mean_error = cloud_joint_mean - self.ideal_update
+        else:
+            delta_f0 = full_clean_num / self.total_mass
+            mean_error = cloud_joint_mean - delta_f0
+
+        mean_error_sq = float(torch.dot(mean_error, mean_error).item())
+        variance = (
+            max(float(cloud_var_num), 0.0) / (cloud_mass * cloud_mass)
+            if cloud_mass > 0.0
+            else 0.0
+        )
+        return float(mean_error_sq + variance)
+
+    def replacement_cost(
+        self,
+        cid: int,
+        candidate: Candidate,
+        admitted_client_ids: tuple[int, ...] | list[int],
+    ) -> float | None:
+        if not self.available:
+            return None
+        if frozenset(admitted_client_ids) != self.admitted:
+            # Admission changes are intentionally handled by the full-profile
+            # reference path.  This class is exact only for fixed admission.
+            return None
+
+        old_candidate = self.profile[cid]
+        old_entry = self._lookup(cid, old_candidate)
+        new_entry = self._lookup(cid, candidate)
+        if old_entry is None or new_entry is None:
+            return None
+        if int(new_entry.clean_update_mean.numel()) != self.dimension:
+            raise ValueError(
+                "joint calibration replacement entry has an incompatible dimension"
+            )
+
+        mass = self._mass(cid)
+        old_cloud = cid in self.admitted and _candidate_reaches_cloud(old_candidate)
+        new_cloud = cid in self.admitted and _candidate_reaches_cloud(candidate)
+
+        next_cloud_mass = self.cloud_mass
+        next_cloud_q_num = self.cloud_q_num.clone()
+        next_cloud_var_num = self.cloud_var_num
+        next_full_clean_num = self.full_clean_num.clone()
+
+        # Delta_F,0 always changes when the candidate's clean trajectory changes.
+        next_full_clean_num += mass * (
+            new_entry.clean_update_mean - old_entry.clean_update_mean
+        )
+
+        if old_cloud:
+            next_cloud_mass -= mass
+            next_cloud_q_num -= mass * (
+                old_entry.clean_update_mean + old_entry.bias_mean
+            )
+            next_cloud_var_num -= mass * mass * float(old_entry.variance_trace)
+        if new_cloud:
+            next_cloud_mass += mass
+            next_cloud_q_num += mass * (
+                new_entry.clean_update_mean + new_entry.bias_mean
+            )
+            next_cloud_var_num += mass * mass * float(new_entry.variance_trace)
+
+        # Floating-point subtraction can leave a tiny negative residue.
+        if next_cloud_mass < 0.0 and abs(next_cloud_mass) < 1e-12:
+            next_cloud_mass = 0.0
+        if next_cloud_var_num < 0.0 and abs(next_cloud_var_num) < 1e-12:
+            next_cloud_var_num = 0.0
+
+        return self._cost_from_accumulators(
+            cloud_mass=next_cloud_mass,
+            cloud_q_num=next_cloud_q_num,
+            cloud_var_num=next_cloud_var_num,
+            full_clean_num=next_full_clean_num,
+        )
+
+
 class _LearningReplacementStats:
     """Fixed-admission O(affected-group) single-client J_learn lookahead.
 
@@ -3652,6 +3982,18 @@ class _LearningReplacementStats:
         self.edges = client_edges
         self.admitted_ids = tuple(admitted_client_ids)
         self.admitted = frozenset(self.admitted_ids)
+        self._joint_stats: _JointCalibrationReplacementStats | None = None
+        if config.learning_objective == "joint_calibration":
+            self._joint_stats = _JointCalibrationReplacementStats(
+                config,
+                profile,
+                client_samples,
+                admitted_client_ids,
+            )
+            # The legacy fusion/update-DP bookkeeping below is irrelevant for
+            # the joint proxy and can be expensive to build for large profiles.
+            return
+
         self.total_samples = sum(max(float(value), 0.0) for value in client_samples.values())
         self.admitted_mass = sum(
             max(float(client_samples.get(cid, 0.0)), 0.0)
@@ -3906,7 +4248,21 @@ class _LearningReplacementStats:
         admitted_client_ids: tuple[int, ...] | list[int],
         old_cloud_entry: tuple[Any, Any, Any] | None = None,
     ) -> float | None:
-        """Return exact fixed-admission lookahead, or None for a changed cohort."""
+        """Return exact fixed-admission lookahead, or None for a changed cohort.
+
+        Legacy fusion/update-DP and the calibrated joint objective use separate
+        incremental algebra.  The joint path retains the full update-space
+        vector mean and variance trace, so its directional cross terms are not
+        replaced by independent scalar penalties.
+        """
+        if self.config.learning_objective == "joint_calibration":
+            if self._joint_stats is None:
+                return None
+            return self._joint_stats.replacement_cost(
+                cid,
+                candidate,
+                admitted_client_ids,
+            )
         if admitted_client_ids != self.admitted_ids:
             if frozenset(admitted_client_ids) != self.admitted:
                 return None
@@ -4325,6 +4681,175 @@ def _weighted_update(
     return out
 
 
+@dataclass(frozen=True)
+class _JointLearningProxyComponents:
+    total: float
+    mean_error_sq: float
+    variance_trace: float
+    e_alg_norm_sq: float
+    e_agg_norm_sq: float
+    bias_norm_sq: float
+    source: str
+
+
+@lru_cache(maxsize=16)
+def _load_joint_calibration_table_cached(
+    path_text: str,
+    mtime_ns: int,
+) -> JointUpdateCalibrationTable:
+    # mtime_ns is intentionally part of the cache key so an offline refresh can
+    # replace the file without restarting a long-running experiment process.
+    del mtime_ns
+    return JointUpdateCalibrationTable.load(path_text)
+
+
+def _load_joint_calibration_table(config: SelectionConfig) -> JointUpdateCalibrationTable:
+    if not config.joint_calibration_path:
+        raise FileNotFoundError("joint_calibration_path is not configured")
+    path = Path(config.joint_calibration_path).expanduser().resolve()
+    stat = path.stat()
+    return _load_joint_calibration_table_cached(str(path), int(stat.st_mtime_ns))
+
+
+def _joint_calibration_learning_components(
+    config: SelectionConfig,
+    profile: dict[int, Candidate],
+    client_samples: dict[int, float],
+    admitted_client_ids: tuple[int, ...] | list[int] | set[int],
+) -> _JointLearningProxyComponents | None:
+    """Compute the state-conditioned joint update-space selection proxy.
+
+    This is the executable counterpart of
+
+        J_hat = ||e_alg_hat + e_agg_hat + b_s_hat||^2 + v_s_hat.
+
+    The table contains empirical moments from offline paired clean/private
+    executions.  No paired run, Jacobian, or linearization is performed here.
+    Per-client privacy RNG is assumed conditionally independent, giving
+    v_s_hat = sum_i a_i^2 v_i_hat.
+    """
+    if config.learning_objective != "joint_calibration":
+        return None
+
+    try:
+        table = _load_joint_calibration_table(config)
+    except (FileNotFoundError, ValueError, RuntimeError, OSError):
+        if config.joint_calibration_missing_policy == "legacy":
+            return None
+        raise
+
+    independence = table.metadata.get("cross_client_rng", "independent")
+    if str(independence).strip().lower() not in {"independent", "conditionally_independent"}:
+        raise ValueError(
+            "joint calibration selector currently requires conditionally independent "
+            "client privacy RNG because only per-client variance traces are stored"
+        )
+
+    total_mass = sum(
+        max(float(client_samples.get(client_id, 0.0)), 0.0)
+        for client_id in profile
+    )
+    if total_mass <= 0.0:
+        raise ValueError("joint calibration objective requires positive total client sample mass")
+
+    admitted = set(admitted_client_ids)
+    cloud_ids = [
+        client_id
+        for client_id, candidate in profile.items()
+        if client_id in admitted and _candidate_reaches_cloud(candidate)
+    ]
+    cloud_mass = sum(
+        max(float(client_samples.get(client_id, 0.0)), 0.0)
+        for client_id in cloud_ids
+    )
+
+    state_key = config.joint_calibration_state_key
+    entries: dict[int, Any] = {}
+    dimension: int | None = None
+    for client_id, candidate in profile.items():
+        try:
+            entry = table.lookup(
+                mode=candidate.mode,
+                state_key=state_key,
+                client_id=client_id,
+            )
+        except KeyError:
+            if config.joint_calibration_missing_policy == "legacy":
+                return None
+            raise
+        if dimension is None:
+            dimension = int(entry.clean_update_mean.numel())
+        if int(entry.clean_update_mean.numel()) != dimension:
+            raise ValueError("joint calibration entries must share one update-space dimension")
+        entries[client_id] = entry
+
+    if dimension is None:
+        return _JointLearningProxyComponents(
+            total=0.0,
+            mean_error_sq=0.0,
+            variance_trace=0.0,
+            e_alg_norm_sq=0.0,
+            e_agg_norm_sq=0.0,
+            bias_norm_sq=0.0,
+            source="joint_calibration_empty",
+        )
+
+    delta_f0 = torch.zeros(dimension, dtype=torch.float64)
+    delta_p0 = torch.zeros(dimension, dtype=torch.float64)
+    bias_s = torch.zeros(dimension, dtype=torch.float64)
+    variance_s = 0.0
+
+    for client_id, entry in entries.items():
+        mass = max(float(client_samples.get(client_id, 0.0)), 0.0)
+        p_i = mass / total_mass
+        delta_f0 += p_i * entry.clean_update_mean
+
+        if client_id in cloud_ids and cloud_mass > 0.0:
+            a_i = mass / cloud_mass
+            delta_p0 += a_i * entry.clean_update_mean
+            bias_s += a_i * entry.bias_mean
+            variance_s += (a_i * a_i) * float(entry.variance_trace)
+
+    e_agg = delta_p0 - delta_f0
+
+    if config.joint_calibration_e_alg_policy == "table":
+        try:
+            ideal_update = table.ideal_update(state_key=state_key)
+        except KeyError:
+            if config.joint_calibration_missing_policy == "legacy":
+                return None
+            raise
+        if int(ideal_update.numel()) != dimension:
+            raise ValueError(
+                "joint calibration ideal/reference update dimension does not match mode entries"
+            )
+        e_alg = delta_f0 - ideal_update
+        source = "joint_calibration_table_e_alg"
+    else:
+        # Explicit empirical approximation: e_alg is treated as zero.  This is
+        # not claimed to be an identity and must be validated against paired-MC
+        # ground truth before formal use.
+        e_alg = torch.zeros_like(delta_f0)
+        source = "joint_calibration_zero_e_alg_approx"
+
+    mean_error = e_alg + e_agg + bias_s
+    mean_error_sq = float(torch.dot(mean_error, mean_error).item())
+    e_alg_norm_sq = float(torch.dot(e_alg, e_alg).item())
+    e_agg_norm_sq = float(torch.dot(e_agg, e_agg).item())
+    bias_norm_sq = float(torch.dot(bias_s, bias_s).item())
+    total = mean_error_sq + max(float(variance_s), 0.0)
+
+    return _JointLearningProxyComponents(
+        total=float(total),
+        mean_error_sq=mean_error_sq,
+        variance_trace=max(float(variance_s), 0.0),
+        e_alg_norm_sq=e_alg_norm_sq,
+        e_agg_norm_sq=e_agg_norm_sq,
+        bias_norm_sq=bias_norm_sq,
+        source=source,
+    )
+
+
 def _profile_fusion_distortion(
     profile: dict[int, Candidate],
     client_samples: dict[int, float],
@@ -4417,10 +4942,11 @@ def _global_feature_perturbation_cost(
     client_samples: dict[int, float],
     admitted_client_ids: tuple[int, ...] | list[int] | set[int],
 ) -> float:
-    """Update-space second-moment bound induced by split-feature DP.
+    """Legacy split-feature perturbation diagnostic.
 
-    Only split representations that ultimately contribute to the current Cloud
-    aggregate enter the global-learning objective. Feature-DP events on an
+    The latest joint-calibration selector does not add this scalar as an
+    independent learning penalty.  It is retained only for diagnostics and the
+    legacy objective.  Feature-DP events on an
     Edge-only path still consume the feature privacy ledger, but their noisy
     representations do not perturb this round's Cloud update.
 
@@ -4541,15 +5067,33 @@ def _evaluate_profile(
     # zero because there is no Cloud release, hence J_learn=4 C_u^2.
     clip_norm = max(float(config.omega_update_clip_norm), 0.0)
     fusion_bound = 4.0 * clip_norm * clip_norm * (1.0 - cloud_fusion_ratio) ** 2
-    # Formal selection-time learning objective:
-    #   J_learn = J_fusion^ub + J_DP.
-    # Feature perturbation and update-clipping distortion are retained as
-    # diagnostics, but they do not participate in Pareto selection. Split-feature
-    # exposure is controlled by the resource-aware split activation rule together
-    # with the mode-specific privacy/protection feasibility constraints.
-    # J_DP is evaluated at the actual release boundary, including exact aggregate
-    # releases for the corresponding full-local/hierarchical paths.
-    system_learning_error = fusion_bound + system_dp
+    # Latest Sample-DP selector path: the Pareto learning objective is the
+    # *single* joint update-space second moment estimated from offline paired
+    # clean/private calibration.  The legacy fusion+DP expression remains only
+    # as an opt-in backward-compatible path and as a diagnostic fallback.
+    joint_components = _joint_calibration_learning_components(
+        config,
+        profile,
+        client_samples,
+        admitted_client_ids,
+    )
+    if joint_components is None:
+        system_learning_error = fusion_bound + system_dp
+        learning_proxy_source = "legacy_fusion_dp"
+        joint_mean_error_sq = 0.0
+        joint_variance_trace = 0.0
+        joint_e_alg_norm_sq = 0.0
+        joint_e_agg_norm_sq = 0.0
+        joint_bias_norm_sq = 0.0
+    else:
+        system_learning_error = joint_components.total
+        learning_proxy_source = joint_components.source
+        joint_mean_error_sq = joint_components.mean_error_sq
+        joint_variance_trace = joint_components.variance_trace
+        joint_e_alg_norm_sq = joint_components.e_alg_norm_sq
+        joint_e_agg_norm_sq = joint_components.e_agg_norm_sq
+        joint_bias_norm_sq = joint_components.bias_norm_sq
+
     fusion_distortion, fusion_cosine_distortion = _profile_fusion_distortion(
         profile,
         client_samples,
@@ -4573,6 +5117,12 @@ def _evaluate_profile(
         feature_perturbation=system_feature,
         update_clip_perturbation=system_update_clip,
         fusion_bound=fusion_bound,
+        joint_mean_error_sq=joint_mean_error_sq,
+        joint_variance_trace=joint_variance_trace,
+        joint_e_alg_norm_sq=joint_e_alg_norm_sq,
+        joint_e_agg_norm_sq=joint_e_agg_norm_sq,
+        joint_bias_norm_sq=joint_bias_norm_sq,
+        learning_proxy_source=learning_proxy_source,
     )
 
 
@@ -7337,12 +7887,14 @@ def _sample_dp_event_counts(
 ) -> tuple[int, int, int]:
     """Return (embedding, label-gradient, optimizer) sample-DP events.
 
-    Sample-level accounting follows the actual local optimizer minibatch
-    schedule rather than the legacy static link execution count.
+    Sample-level accounting follows the actual runtime minibatch schedule,
+    multiplied by the number of training-block re-executions induced by the
+    Flow. It never uses communication multiplicity as a privacy-event proxy.
 
     For split training, every executed minibatch releases one protected
-    embedding and one protected label gradient. All modes execute one
-    sample-DP optimizer event per actual local optimizer minibatch.
+    embedding and one protected label gradient. Full-local training executes
+    one optimizer DP-SGD event per minibatch; split training does so only when
+    the split End optimizer is enabled.
     """
     spec = MODE_SPECS[mode]
 
@@ -7352,12 +7904,18 @@ def _sample_dp_event_counts(
         else int(config.L_block_cycles)
     )
 
-    local_batch_events = _sample_dp_optimizer_event_count(
+    # K_i is the number of *actually executable* minibatches in one training
+    # block under the runtime epoch/batch/step-limit semantics. Hierarchical
+    # modes with E_edge_loops > 1 re-run that training block in the current
+    # runtime, so privacy accounting must charge the same number of blocks.
+    per_block_batch_events = _sample_dp_optimizer_event_count(
         samples=int(samples),
         batch_size=int(config.split_batch_size),
         epochs=int(config.privacy_local_epochs),
         local_steps=local_steps,
     )
+    training_blocks = max(int(spec.E_edge_loops), 1)
+    local_batch_events = per_block_batch_events * training_blocks
 
     if local_batch_events <= 0:
         return 0, 0, 0

@@ -140,14 +140,58 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--privacy-unit",
-        default="client",
+        default="sample",
         choices=["client", "sample"],
-        help="Privacy adjacency unit. 'client' preserves the existing client-level DP path; 'sample' enables the sample-level path.",
+        help=(
+            "Privacy adjacency unit. Formal paper runs use 'sample'. "
+            "The legacy client-level path remains available only for backward-compatible ablations."
+        ),
     )
     parser.add_argument("--dp-feature-epsilon-budget", type=float, default=None)
     parser.add_argument("--dp-update-epsilon-budget", type=float, default=None)
     parser.add_argument("--dp-feature-noise-multiplier", type=float, default=None)
     parser.add_argument("--dp-update-noise-multiplier", type=float, default=None)
+    parser.add_argument("--dp-sample-epsilon-budget", type=float, default=None)
+    parser.add_argument("--dp-sample-embedding-noise-multiplier", type=float, default=None)
+    parser.add_argument("--dp-sample-label-grad-noise-multiplier", type=float, default=None)
+    parser.add_argument("--dp-sample-optimizer-noise-multiplier", type=float, default=None)
+    parser.add_argument(
+        "--learning-objective",
+        default="legacy_fusion_dp",
+        choices=["legacy_fusion_dp", "joint_calibration"],
+        help=(
+            "Pareto learning objective. joint_calibration uses the latest joint update-space "
+            "proxy from an offline paired clean/private calibration table."
+        ),
+    )
+    parser.add_argument(
+        "--joint-calibration-path",
+        default=None,
+        help="Torch calibration table built from offline paired clean/private trajectories.",
+    )
+    parser.add_argument(
+        "--joint-calibration-state-key",
+        default="default",
+        help=(
+            "Calibration state key. Use 'auto_round' to query round:<t>; the table may "
+            "fall back to the nearest calibrated round or default."
+        ),
+    )
+    parser.add_argument(
+        "--joint-calibration-e-alg-policy",
+        default="table",
+        choices=["table", "zero"],
+        help=(
+            "table requires a calibrated ideal/reference update and keeps e_alg explicitly; "
+            "zero is an empirical approximation that must be validated against paired-MC."
+        ),
+    )
+    parser.add_argument(
+        "--joint-calibration-missing-policy",
+        default="error",
+        choices=["error", "legacy"],
+        help="Whether missing calibration data is fatal or falls back to the retired legacy objective.",
+    )
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
     parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate", "global_release"])
@@ -376,6 +420,10 @@ def main() -> None:
         dp_update_epsilon_budget=args.dp_update_epsilon_budget,
         dp_feature_noise_multiplier=args.dp_feature_noise_multiplier,
         dp_update_noise_multiplier=args.dp_update_noise_multiplier,
+        dp_sample_epsilon_budget=args.dp_sample_epsilon_budget,
+        dp_sample_embedding_noise_multiplier=args.dp_sample_embedding_noise_multiplier,
+        dp_sample_label_grad_noise_multiplier=args.dp_sample_label_grad_noise_multiplier,
+        dp_sample_optimizer_noise_multiplier=args.dp_sample_optimizer_noise_multiplier,
         dp_delta=args.dp_delta,
         omega_learning_rate=args.lr,
         omega_feature_clip_norm=feature_clip_norm,
@@ -435,6 +483,11 @@ def main() -> None:
             "released_model_dp" if args.mainline_fusion else args.update_protection_goal
         ),
         mainline_fusion=args.mainline_fusion,
+        learning_objective=args.learning_objective,
+        joint_calibration_path=args.joint_calibration_path,
+        joint_calibration_state_key=args.joint_calibration_state_key,
+        joint_calibration_e_alg_policy=args.joint_calibration_e_alg_policy,
+        joint_calibration_missing_policy=args.joint_calibration_missing_policy,
     )
     train_config = Lenet5Config(
         execution_revision=args.execution_revision,

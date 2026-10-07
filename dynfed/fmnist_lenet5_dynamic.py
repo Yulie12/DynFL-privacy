@@ -1742,6 +1742,17 @@ def _run_lenet5_policy(
                 if frozen_mode_runtime_active
                 else effective_selection
             )
+            if (
+                profile_selection_config.learning_objective == "joint_calibration"
+                and profile_selection_config.joint_calibration_state_key == "auto_round"
+            ):
+                # Online selection performs no paired measurement. It only
+                # queries the offline table for the current round-conditioned
+                # cell; the table can fall back to the nearest calibrated round.
+                profile_selection_config = replace(
+                    profile_selection_config,
+                    joint_calibration_state_key=f"round:{round_idx}",
+                )
             selected, profile_evaluation = (
                 choose_cloud_dp_pareto_profile
                 if policy == "full_dynfl" and effective_selection.cloud_dp_plan != "legacy"
@@ -4269,6 +4280,12 @@ def _run_lenet5_policy(
                 "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                 "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                 "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
+                "learning_proxy_source": profile_evaluation.learning_proxy_source if profile_evaluation else "",
+                "joint_mean_error_sq": profile_evaluation.joint_mean_error_sq if profile_evaluation else "",
+                "joint_variance_trace": profile_evaluation.joint_variance_trace if profile_evaluation else "",
+                "joint_e_alg_norm_sq": profile_evaluation.joint_e_alg_norm_sq if profile_evaluation else "",
+                "joint_e_agg_norm_sq": profile_evaluation.joint_e_agg_norm_sq if profile_evaluation else "",
+                "joint_bias_norm_sq": profile_evaluation.joint_bias_norm_sq if profile_evaluation else "",
                 "fusion_distortion_objective": profile_evaluation.fusion_distortion if profile_evaluation else "",
                 "fusion_cosine_distortion": profile_evaluation.fusion_cosine_distortion if profile_evaluation else "",
                 "fusion_objective_enabled": bool(profile_evaluation.fusion_objective_enabled) if profile_evaluation else False,
@@ -6769,6 +6786,12 @@ def _pareto_profile_audit_rows(
                 "feature_perturbation_objective": evaluation.feature_perturbation,
                 "fusion_bound_objective": evaluation.fusion_bound,
                 "learning_error_objective": evaluation.system_learning_error,
+                "learning_proxy_source": evaluation.learning_proxy_source,
+                "joint_mean_error_sq": evaluation.joint_mean_error_sq,
+                "joint_variance_trace": evaluation.joint_variance_trace,
+                "joint_e_alg_norm_sq": evaluation.joint_e_alg_norm_sq,
+                "joint_e_agg_norm_sq": evaluation.joint_e_agg_norm_sq,
+                "joint_bias_norm_sq": evaluation.joint_bias_norm_sq,
                 "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
                 "fusion_distortion_objective": evaluation.fusion_distortion,
                 "normalized_latency_within_stage": normalized_latency,

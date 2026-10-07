@@ -113,6 +113,7 @@ def build_command(
     privacy = config["privacy"]
     he = config["he"]
     optimization = config["optimization"]
+    learning = config.get("learning", {})
     network = config["network"]
 
     command = [sys.executable, str(ROOT / "experiments" / "run_fmnist_lenet5.py")]
@@ -160,13 +161,17 @@ def build_command(
         "edge_cloud_base_latency_sec": network["edge_cloud_base_latency_sec"],
         "min_edge_cloud_fusion_ratio": system["min_edge_cloud_fusion_ratio"],
         "dp_accounting_mode": privacy["accounting_mode"],
-        "privacy_unit": privacy.get("unit", "client"),
+        "privacy_unit": privacy.get("unit", "sample"),
         "update_protection_goal": privacy.get("update_protection_goal", "packet_protection"),
         "liie_edge_dp_plan": liie_edge_dp_plan or privacy.get("liie_edge_dp_plan", "independent"),
         "cloud_dp_plan": cloud_dp_plan or privacy.get("cloud_dp_plan", "legacy"),
         "initial_epsilon": privacy["initial_epsilon"],
         "dp_upd_epsilon": privacy["update_epsilon_budget"],
         "dp_update_epsilon_budget": privacy["update_epsilon_budget"],
+        "dp_sample_epsilon_budget": privacy.get("sample_epsilon_budget"),
+        "dp_sample_embedding_noise_multiplier": privacy.get("sample_embedding_noise_multiplier"),
+        "dp_sample_label_grad_noise_multiplier": privacy.get("sample_label_grad_noise_multiplier"),
+        "dp_sample_optimizer_noise_multiplier": privacy.get("sample_optimizer_noise_multiplier"),
         "dp_delta": privacy["delta"],
         "dp_clip_norm": privacy["clip_norm"],
         "dp_sample_optimizer_clip_norm": privacy.get(
@@ -186,11 +191,17 @@ def build_command(
         "pareto_neighbor_top_k": optimization["pareto_neighbor_top_k"],
         "cloud_fusion_xi": optimization["cloud_fusion_xi"],
         "cloud_fusion_eps": optimization["cloud_fusion_eps"],
+        "learning_objective": learning.get("objective", "legacy_fusion_dp"),
+        "joint_calibration_path": learning.get("calibration_path"),
+        "joint_calibration_state_key": learning.get("state_key", "default"),
+        "joint_calibration_e_alg_policy": learning.get("e_alg_policy", "table"),
+        "joint_calibration_missing_policy": learning.get("missing_policy", "error"),
         "seed": seed,
         "output_root": config["output_root"],
     }
     for name, value in values.items():
-        _append_value(command, name, value)
+        if value is not None:
+            _append_value(command, name, value)
     if disable_update_dp:
         command.extend(["--dp-update-mode", "off"])
     if exclude_modes:
@@ -313,6 +324,11 @@ def validate_config(config: dict) -> None:
             + ", ".join(FORMAL_BASELINE_POLICIES)
         )
     privacy = config["privacy"]
+    if str(privacy.get("unit", "sample")).strip().lower() != "sample":
+        raise ValueError(
+            "Formal paper experiments are Sample-DP only. Legacy client-level DP "
+            "may remain in the repository but cannot be selected by run_paper_config.py."
+        )
     if config["system"].get("mainline_fusion"):
         if he.get("backend") != "seal":
             raise ValueError("Mainline fusion requires the Method 2 SEAL custodian backend")

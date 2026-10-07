@@ -91,7 +91,10 @@
     "enforce_cloud_dp_stability": false,
     "cloud_dp_stability_threshold": 1,
     "release_calibration": "tex_packet",
-    "update_protection_goal": "packet_protection"
+    "update_protection_goal": "packet_protection",
+    "unit": "sample",
+    "sample_epsilon_budget": 8,
+    "sample_optimizer_clip_norm": 1.0
   },
   "he": {
     "backend": "seal",
@@ -115,4 +118,3 @@
     "cloud_fusion_eps": 0.05
   }
 }
-
