@@ -661,8 +661,10 @@ def test_sample_split_runtime_matches_reference_without_sample_noise():
         dp_noise_multiplier=123.0,
 
         privacy_unit="sample",
-        sample_embedding_noise_multiplier=0.0,
-        sample_label_grad_noise_multiplier=0.0,
+        # Numerically negligible positive noise for the reference-equivalence test.
+        # This is not a privacy-valid production configuration.
+        sample_embedding_noise_multiplier=1e-12,
+        sample_label_grad_noise_multiplier=1e-12,
         sample_optimizer_noise_multiplier=0.0,
         sample_optimizer_clip_norm=1e9,
         training_diagnostics=sample_diagnostics,

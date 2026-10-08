@@ -137,6 +137,164 @@ class PairedUpdateMomentAccumulator:
         )
 
 
+class JointCalibrationCaptureSession:
+    """Accumulate matched trajectory pairs and materialize a selector table.
+
+    The session is intended for an *offline or periodic calibration pass*.  It
+    never participates in online mode selection.  Each observation is one
+    paired nonlinear trajectory sample with shared initial state / minibatch
+    schedule and independent DP randomness.
+
+    When ``include_mode_fallback`` is true, client-specific moment estimates
+    are combined into a mode-level fallback cell.  The fallback bias/clean mean
+    are weighted client means, while its variance trace is the weighted mean of
+    *within-client* DP-RNG variance traces (not a pooled variance that would
+    incorrectly absorb between-client bias heterogeneity).
+    """
+
+    def __init__(
+        self,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        include_mode_fallback: bool = True,
+    ) -> None:
+        self.metadata: dict[str, Any] = dict(metadata or {})
+        self.include_mode_fallback = bool(include_mode_fallback)
+        self._accumulators: dict[
+            tuple[str, str, int | None], PairedUpdateMomentAccumulator
+        ] = {}
+        self._ideal_updates: dict[str, torch.Tensor] = {}
+
+    def add_pair(
+        self,
+        *,
+        state_key: str,
+        mode: str,
+        clean_update: Any,
+        private_update: Any,
+        client_id: int | None,
+    ) -> None:
+        state = JointUpdateCalibrationTable._normalize_state_key(state_key)
+        normalized_client = None if client_id is None else int(client_id)
+        key = (state, str(mode), normalized_client)
+        self._accumulators.setdefault(
+            key, PairedUpdateMomentAccumulator()
+        ).update(clean_update, private_update)
+
+    def set_ideal_update(self, update: Any, *, state_key: str) -> None:
+        state = JointUpdateCalibrationTable._normalize_state_key(state_key)
+        self._ideal_updates[state] = as_update_vector(update).clone()
+
+    @property
+    def pair_count(self) -> int:
+        return sum(
+            accumulator.count
+            for (state, mode, client_id), accumulator in self._accumulators.items()
+            if client_id is not None
+        )
+
+    @property
+    def cell_count(self) -> int:
+        return len(self._accumulators)
+
+    def build_table(self, *, min_trials: int = 1) -> "JointUpdateCalibrationTable":
+        if int(min_trials) < 1:
+            raise ValueError("min_trials must be positive")
+        table = JointUpdateCalibrationTable(
+            metadata={
+                **self.metadata,
+                "capture_pair_count": int(self.pair_count),
+                "mode_fallback_is_population_proxy": bool(
+                    self.include_mode_fallback
+                ),
+                "mode_fallback_variance_semantics": (
+                    "weighted_mean_of_within_client_variance_traces"
+                    if self.include_mode_fallback
+                    else "disabled"
+                ),
+            }
+        )
+
+        finalized: dict[
+            tuple[str, str, int | None], JointCalibrationEntry
+        ] = {}
+        for key, accumulator in self._accumulators.items():
+            if accumulator.count >= int(min_trials):
+                finalized[key] = accumulator.finalize()
+
+        for (state, mode, client_id), entry in sorted(
+            finalized.items(),
+            key=lambda item: (
+                item[0][0],
+                item[0][1],
+                -1 if item[0][2] is None else item[0][2],
+            ),
+        ):
+            table.add_entry(
+                state_key=state,
+                mode=mode,
+                client_id=client_id,
+                entry=entry,
+            )
+
+        # Build mode-level fallback cells from already-estimated *within-client*
+        # moments.  Do not pool raw D samples across clients: that would add
+        # between-client bias heterogeneity to Tr(V_i), which is not the
+        # conditional DP-RNG variance used by the selector formula.
+        if self.include_mode_fallback:
+            grouped: dict[tuple[str, str], list[JointCalibrationEntry]] = {}
+            for (state, mode, client_id), entry in finalized.items():
+                if client_id is None:
+                    continue
+                grouped.setdefault((state, mode), []).append(entry)
+            for (state, mode), entries in grouped.items():
+                if (state, mode, None) in finalized:
+                    continue
+                total_weight = float(sum(entry.sample_count for entry in entries))
+                if total_weight <= 0.0:
+                    continue
+                dimension = entries[0].clean_update_mean.numel()
+                if any(entry.clean_update_mean.numel() != dimension for entry in entries):
+                    raise ValueError(
+                        "cannot build a mode fallback from calibration entries with different dimensions"
+                    )
+                clean = sum(
+                    entry.clean_update_mean * (float(entry.sample_count) / total_weight)
+                    for entry in entries
+                )
+                bias = sum(
+                    entry.bias_mean * (float(entry.sample_count) / total_weight)
+                    for entry in entries
+                )
+                variance_trace = sum(
+                    float(entry.variance_trace) * (float(entry.sample_count) / total_weight)
+                    for entry in entries
+                )
+                table.add_entry(
+                    state_key=state,
+                    mode=mode,
+                    client_id=None,
+                    entry=JointCalibrationEntry(
+                        clean_update_mean=clean,
+                        bias_mean=bias,
+                        variance_trace=variance_trace,
+                        sample_count=int(total_weight),
+                    ),
+                )
+
+        for state, update in self._ideal_updates.items():
+            table.set_ideal_update(update, state_key=state)
+        return table
+
+    def save(
+        self,
+        path: str | Path,
+        *,
+        min_trials: int = 1,
+    ) -> Path:
+        return self.build_table(min_trials=min_trials).save(path)
+
+
 class JointUpdateCalibrationTable:
     """State-conditioned empirical proxy table used by the online selector.
 

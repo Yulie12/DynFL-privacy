@@ -1,0 +1,38 @@
+"""Calibration provenance contracts: not a proof of release privacy."""
+import ast
+from pathlib import Path
+
+
+def _runtime_source():
+    return (Path(__file__).resolve().parents[1] / "dynfed" / "fmnist_lenet5_dynamic.py").read_text(encoding="utf-8-sig")
+
+
+def _function(name):
+    tree = ast.parse(_runtime_source())
+    nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+    assert len(nodes) == 1
+    return ast.get_source_segment(_runtime_source(), nodes[0])
+
+
+def test_clean_calibration_disables_dp_and_uses_same_payload():
+    source = _function("_clean_calibration_payload")
+    assert 'clean = dict(private_payload)' in source
+    assert 'clean["privacy_unit"] = "client"' in source
+    assert 'clean["dp_update_mode"] = "off"' in source
+    assert '"emb", "logits", "grad", "emb_grad", "upd"' in source
+
+
+def test_capture_workload_comes_from_client_heldout_data():
+    source = _function("_capture_joint_calibration_round")
+    assert 'client_test_indices[client_id]' in source
+    assert 'x_train[np.asarray(sampled_indices, dtype=np.int64)]' in source
+    assert 'y_train[np.asarray(sampled_indices, dtype=np.int64)]' in source
+    assert '_run_paired_calibration_payload(' in source
+    assert 'session.set_ideal_update(' in source
+
+
+def test_calibration_export_explicitly_marks_unverified_provenance():
+    source = _runtime_source()
+    assert source.count('"calibration_data_privacy_status": "unverified_client_heldout_not_dp_accounted"') >= 2
+    assert source.count('"calibration_table_release_status": "not_validated_for_untrusted_export"') >= 2
+    assert 'calibration_table.save(calibration_capture_path)' in source

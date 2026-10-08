@@ -32,6 +32,7 @@ from .fmnist_dynamic_training import FmnistDynamicConfig as _FmnistDynamicConfig
 from .fmnist_dynamic_training import load_fmnist_arrays
 from .flow_executor import EDGE_CLOUD_MODES, EDGE_ONLY_MODES, ClientFlowInput, execute_mixed_round_flow
 from .independent_release import IndependentReleaseAccount
+from .joint_calibration import JointCalibrationCaptureSession, as_update_vector
 from .he_backend import (
     CKKS_COEFF_MOD_BIT_SIZES,
     CKKS_POLY_MODULUS_DEGREE,
@@ -143,6 +144,15 @@ class Lenet5Config:
     he_workers: int = 1
     executor: str = "serial"
     executor_workers: int | None = None
+    # Offline/periodic matched clean/private calibration capture. Disabled by
+    # default and never required by online selection. A dedicated calibration
+    # run should normally use one policy only.
+    joint_calibration_capture_path: str | None = None
+    joint_calibration_capture_trials: int = 0
+    joint_calibration_capture_period: int = 10
+    joint_calibration_capture_max_clients: int | None = 8
+    joint_calibration_capture_sample_limit: int | None = 64
+    joint_calibration_capture_scope: str = "candidate_modes"
 
 
 def _snapshot_trainable_parameters(
@@ -220,6 +230,118 @@ def _validate_mainline_fusion(selection: SelectionConfig, train_config: Lenet5Co
     if int(train_config.he_aggregation_size) != 0:
         raise ValueError("Mainline fusion requires he_aggregation_size=0 for full-update encryption")
 
+
+
+def _assert_sample_worker_accounting_matches(
+    *,
+    admitted_client_ids: set[int],
+    selected_by_id: dict[int, Any],
+    worker_results: dict[int, dict[str, Any]],
+) -> int:
+    """Fail closed before ANY Sample ledger commit for admitted clients.
+
+    Check the per-client charged events against worker-observed operations;
+    never treat a missing diagnostic as an observed zero.
+    """
+    expected_to_observed = (
+        ("sample_embedding_events", "feature_dp_release_batches"),
+        ("sample_label_grad_events", "sample_label_grad_dp_release_batches"),
+        ("sample_optimizer_events", "sample_dp_optimizer_steps"),
+    )
+    for client_id in sorted(admitted_client_ids):
+        if client_id not in selected_by_id:
+            raise RuntimeError(f"Sample-DP audit: admitted client {client_id} has no selected candidate")
+        result = worker_results.get(client_id)
+        if result is None:
+            raise RuntimeError(f"Sample-DP audit: admitted client {client_id} has no worker result")
+        candidate = selected_by_id[client_id]
+        for charged_field, observed_field in expected_to_observed:
+            if observed_field not in result or result[observed_field] is None:
+                raise RuntimeError(
+                    f"Sample-DP audit: client {client_id} missing worker field {observed_field}"
+                )
+            charged_raw = getattr(candidate, charged_field)
+            observed_raw = result[observed_field]
+            try:
+                charged = int(charged_raw)
+                observed = int(observed_raw)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError(
+                    f"Sample-DP audit: client {client_id} invalid counter {charged_field}/{observed_field}"
+                ) from exc
+            if charged < 0 or observed < 0 or charged != charged_raw or observed != observed_raw:
+                raise RuntimeError(
+                    f"Sample-DP audit: client {client_id} invalid event count "
+                    f"{charged_field}={charged_raw!r}, {observed_field}={observed_raw!r}"
+                )
+            if charged != observed:
+                raise RuntimeError(
+                    f"Sample-DP audit: client {client_id} {charged_field} "
+                    f"ledger={charged}, worker {observed_field}={observed}; aborting before ledger commit"
+                )
+    return len(admitted_client_ids)
+
+
+def _observed_privacy_path_audit(
+    *,
+    privacy_unit: str,
+    decision_rows: list[dict[str, Any]],
+    worker_results: dict[int, dict[str, Any]],
+    protection_releases: list[dict[str, Any]],
+    he_execution: str,
+    selected_he_clients: int,
+) -> dict[str, Any]:
+    """Report distinct evidence streams; never infer a formal DP/security proof.
+
+    Sample event counts are *accountant records*, not observed Gaussian draws.
+    Worker feature batches are execution diagnostics, not an RDP event count.
+    Model-update packets are only the explicit records in protection_releases;
+    an LIC Cloud-internal split contribution does not invent a wire packet.
+    """
+    def accounted(field: str) -> int:
+        return sum(max(0, int(row.get(field, 0) or 0)) for row in decision_rows)
+
+    packets = [
+        item for item in protection_releases
+        if item.get("object") == "model_update"
+        and item.get("destination") in {"cloud", "edge"}
+    ]
+    cloud_packets = [item for item in packets if item.get("destination") == "cloud"]
+    observed_dp_packets = sum(bool(item.get("dp_event_observed")) for item in packets)
+    real_he_packets = sum(bool(item.get("he_crypto_observed")) for item in packets)
+    profiled_he_packets = sum(item.get("he_execution") == "profiled" for item in packets)
+    unprotected_cloud_packets = sum(
+        not bool(item.get("dp_event_observed"))
+        and not bool(item.get("he_crypto_observed"))
+        for item in cloud_packets
+    )
+    # Empty packet set is 'not_applicable', not a successful security check.
+    packet_status = (
+        "not_applicable_no_cloud_packet" if not cloud_packets else
+        "unprotected_observed" if unprotected_cloud_packets else
+        "protected_operation_observed_not_proof"
+    )
+    return {
+        "privacy_path_audit_scope": "observed_operations_not_end_to_end_proof",
+        "sample_accounted_embedding_events": accounted("sample_embedding_events") if privacy_unit == "sample" else 0,
+        "sample_accounted_label_grad_events": accounted("sample_label_grad_events") if privacy_unit == "sample" else 0,
+        "sample_accounted_optimizer_events": accounted("sample_optimizer_events") if privacy_unit == "sample" else 0,
+        "sample_worker_feature_dp_batches": sum(
+            max(0, int(result.get("feature_dp_release_batches", 0) or 0))
+            for result in worker_results.values()
+        ) if privacy_unit == "sample" else 0,
+        "model_update_packet_count": len(packets),
+        "cloud_model_update_packet_count": len(cloud_packets),
+        "model_update_packet_dp_observed_count": observed_dp_packets,
+        "model_update_packet_real_he_observed_count": real_he_packets,
+        "model_update_packet_profiled_he_count": profiled_he_packets,
+        "cloud_model_update_packet_unprotected_count": unprotected_cloud_packets,
+        "cloud_model_update_packet_audit_status": packet_status,
+        "selected_he_profiled_client_count": (
+            int(selected_he_clients) if he_execution == "profiled" else 0
+        ),
+        "sample_dp_postprocessing_dependency_status": "not_verified",
+    }
 
 
 def _privacy_reporting_scope(
@@ -524,6 +646,373 @@ def _client_train_worker(
     }
 
 
+
+
+def _clean_calibration_payload(private_payload: dict[str, Any]) -> dict[str, Any]:
+    """Create the matched non-private execution for one Sample-DP payload.
+
+    The clean path shares model state, data, minibatch order, optimizer setup,
+    and training seed with the private path, but it removes *all* Sample-DP
+    mechanisms.  In particular, using ``privacy_unit='client'`` here selects
+    the ordinary clean optimizer path instead of per-sample clipping with
+    sigma=0, so clipping distortion remains part of D = u_private - u_clean.
+    """
+    clean = dict(private_payload)
+    clean["privacy_unit"] = "client"
+    clean["mechanisms"] = {
+        key: "none"
+        for key in ("emb", "logits", "grad", "emb_grad", "upd")
+    }
+    clean["sample_embedding_noise_multiplier"] = None
+    clean["sample_label_grad_noise_multiplier"] = None
+    clean["sample_optimizer_noise_multiplier"] = None
+    clean["dp_update_mode"] = "off"
+    # No DP RNG is consumed on the clean path, but retain a deterministic seed
+    # for reproducibility and to make serialized payloads self describing.
+    clean["dp_seed"] = int(private_payload.get("dp_seed", 1))
+    return clean
+
+
+def _run_paired_calibration_payload(
+    private_payload: dict[str, Any],
+    *,
+    trials: int,
+    base_seed: int,
+    round_idx: int,
+    client_id: int,
+    mode: str,
+    model_cache: dict[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, torch.Tensor]], list[dict[str, dict[str, torch.Tensor]]]]:
+    """Execute one clean trajectory and M matched private trajectories."""
+    if int(trials) < 1:
+        raise ValueError("paired calibration trials must be positive")
+
+    # Re-seeding happens inside _client_train_worker from training_seed.  The
+    # clean run and every private trial therefore receive the same minibatch
+    # order/common training randomness; only dp_seed changes across trials.
+    clean_result = _client_train_worker(
+        _clean_calibration_payload(private_payload),
+        model_cache=model_cache,
+    )
+    if not clean_result["finite"]:
+        raise RuntimeError(
+            f"non-finite clean calibration trajectory for client={client_id} mode={mode}"
+        )
+    clean_update = clean_result["state_diff"]
+
+    private_updates: list[dict[str, dict[str, torch.Tensor]]] = []
+    for trial in range(int(trials)):
+        payload = dict(private_payload)
+        payload["dp_seed"] = _dp_noise_seed(
+            base_seed,
+            round_idx,
+            ["joint_calibration", int(client_id), str(mode), int(trial)],
+        )
+        result = _client_train_worker(payload, model_cache=model_cache)
+        if not result["finite"]:
+            raise RuntimeError(
+                "non-finite private calibration trajectory for "
+                f"client={client_id} mode={mode} trial={trial}"
+            )
+        private_updates.append(result["state_diff"])
+    return clean_update, private_updates
+
+
+def _calibration_reference_update(
+    *,
+    global_end: torch.nn.Module,
+    global_edge: torch.nn.Module,
+    x: np.ndarray,
+    y: np.ndarray,
+    device: torch.device,
+    input_shape: tuple[int, int, int],
+    learning_rate: float,
+    batch_size: int = 128,
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Compute Delta_* = -eta grad F on the held-out calibration workload.
+
+    Temporary model copies are used so BatchNorm buffers or gradients cannot
+    mutate the actual training state.  The objective is the mean cross-entropy
+    over exactly the supplied calibration samples.
+    """
+    if len(x) == 0:
+        raise ValueError("cannot compute calibration reference update on an empty workload")
+
+    end = copy.deepcopy(global_end).to(device)
+    edge = copy.deepcopy(global_edge).to(device)
+    end.train()
+    edge.train()
+    for model in (end, edge):
+        for parameter in model.parameters():
+            if parameter.grad is not None:
+                parameter.grad = None
+
+    total = int(len(x))
+    step = max(1, int(batch_size))
+    for start in range(0, total, step):
+        stop = min(start + step, total)
+        bx = torch.from_numpy(x[start:stop]).float().to(device).view(-1, *input_shape)
+        by = torch.from_numpy(y[start:stop]).long().to(device)
+        logits = edge(end(bx))
+        # Sum / total makes accumulated batch gradients equal the gradient of
+        # the mean loss over the whole calibration workload.
+        loss = torch.nn.functional.cross_entropy(logits, by, reduction="sum") / float(total)
+        loss.backward()
+
+    ideal: dict[str, dict[str, torch.Tensor]] = {"end": {}, "edge": {}}
+    for part_name, model in (("end", end), ("edge", edge)):
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            grad = parameter.grad
+            if grad is None:
+                update = torch.zeros_like(parameter, device="cpu")
+            else:
+                update = (-float(learning_rate) * grad.detach()).to(device="cpu")
+            ideal[part_name][name] = update.clone()
+    return ideal
+
+
+def _joint_calibration_capture_candidates(
+    selected: list[tuple[int, Candidate, list[Candidate], float]],
+    *,
+    scope: str,
+) -> list[tuple[int, Candidate]]:
+    """Return deterministic client/mode cells for an offline capture round."""
+    cells: list[tuple[int, Candidate]] = []
+    for client_id, chosen, candidates, _remaining in selected:
+        if scope == "selected":
+            if chosen.mode != "SKIP":
+                cells.append((int(client_id), chosen))
+            continue
+
+        by_mode: dict[str, Candidate] = {}
+        for candidate in candidates:
+            if candidate.mode == "SKIP" or not candidate.feasible:
+                continue
+            current = by_mode.get(candidate.mode)
+            if current is None or (
+                float(candidate.epsilon_used),
+                float(candidate.time),
+                float(candidate.risk),
+            ) < (
+                float(current.epsilon_used),
+                float(current.time),
+                float(current.risk),
+            ):
+                by_mode[candidate.mode] = candidate
+        cells.extend(
+            (int(client_id), by_mode[mode])
+            for mode in sorted(by_mode)
+        )
+    return cells
+
+
+def _capture_joint_calibration_round(
+    *,
+    session: JointCalibrationCaptureSession,
+    selected: list[tuple[int, Candidate, list[Candidate], float]],
+    train_config: Lenet5Config,
+    selection: SelectionConfig,
+    global_end: torch.nn.Module,
+    global_edge: torch.nn.Module,
+    client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]],
+    train_client_indices: list[np.ndarray],
+    client_test_indices: list[np.ndarray],
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    device: torch.device,
+    model_name: str,
+    input_shape: tuple[int, int, int],
+    num_classes: int,
+    round_idx: int,
+) -> dict[str, Any]:
+    """Capture matched pairs at the *start* of a round on held-out data.
+
+    This path is deliberately opt-in and expensive.  It is for a dedicated
+    calibration pass, not for every online decision in a formal training run.
+    """
+    scope = str(train_config.joint_calibration_capture_scope)
+    cells = _joint_calibration_capture_candidates(selected, scope=scope)
+    if not cells:
+        return {"captured_pairs": 0, "captured_cells": 0, "captured_clients": 0}
+
+    unique_clients = sorted({client_id for client_id, _candidate in cells})
+    max_clients = train_config.joint_calibration_capture_max_clients
+    if max_clients is not None and len(unique_clients) > int(max_clients):
+        chooser = np.random.default_rng(
+            _dp_noise_seed(selection.seed, round_idx, "joint_calibration_clients")
+        )
+        chosen_clients = set(
+            int(value)
+            for value in chooser.choice(
+                np.asarray(unique_clients, dtype=np.int64),
+                size=int(max_clients),
+                replace=False,
+            ).tolist()
+        )
+        cells = [item for item in cells if item[0] in chosen_clients]
+        unique_clients = sorted(chosen_clients)
+
+    # Fix one held-out *pool* per client for all modes/trials in this round,
+    # then resample that pool with replacement to the client's real training
+    # sample count.  This preserves the runtime minibatch/optimizer-step count
+    # K_i while keeping calibration samples disjoint from the client's training
+    # subset.  ``sample_limit`` limits unique held-out examples, not trajectory
+    # length.
+    sample_limit = train_config.joint_calibration_capture_sample_limit
+    calibration_workloads: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for client_id in unique_clients:
+        pool_indices = np.asarray(client_test_indices[client_id], dtype=np.int64)
+        if len(pool_indices) == 0:
+            continue
+        chooser = np.random.default_rng(
+            _dp_noise_seed(
+                selection.seed,
+                round_idx,
+                ["joint_calibration_data", int(client_id)],
+            )
+        )
+        if sample_limit is not None and len(pool_indices) > int(sample_limit):
+            pool_indices = np.sort(
+                chooser.choice(pool_indices, size=int(sample_limit), replace=False)
+            )
+        target_count = max(1, int(len(train_client_indices[client_id])))
+        sampled_indices = chooser.choice(
+            pool_indices,
+            size=target_count,
+            replace=(target_count > len(pool_indices)),
+        )
+        calibration_workloads[client_id] = (
+            x_train[np.asarray(sampled_indices, dtype=np.int64)],
+            y_train[np.asarray(sampled_indices, dtype=np.int64)],
+        )
+
+    cells = [item for item in cells if item[0] in calibration_workloads]
+    if not cells:
+        return {"captured_pairs": 0, "captured_cells": 0, "captured_clients": 0}
+
+    privacy_parameters = resolved_privacy_parameters(selection)
+    state_key = f"round:{int(round_idx)}"
+    model_cache: dict[str, Any] = {}
+    captured_pairs = 0
+    captured_cells = 0
+
+    for client_id, candidate in cells:
+        calibration_x, calibration_y = calibration_workloads[client_id]
+        returned_state = _training_base_state(
+            client_id=client_id,
+            candidate=candidate,
+            client_model_states=client_model_states,
+            global_end=global_end,
+            global_edge=global_edge,
+            device=torch.device("cpu"),
+            training_stage=0,
+            mainline_fusion=selection.mainline_fusion,
+        )
+        payload = {
+            "client_id": client_id,
+            "mode": candidate.mode,
+            "global_end_state": _state_dict_to_device(returned_state["end"], device),
+            "global_edge_state": _state_dict_to_device(returned_state["edge"], device),
+            "x": calibration_x,
+            "y": calibration_y,
+            "epochs": _client_epoch_count(train_config, selection, candidate),
+            "lr": train_config.learning_rate,
+            "l2": train_config.l2,
+            "local_steps": _client_step_limit(selection),
+            "model_name": model_name,
+            "input_shape": input_shape,
+            "num_classes": num_classes,
+            "mechanisms": _candidate_training_mechanisms(
+                candidate,
+                aggregate_cloud_update_dp=True,
+            ),
+            "privacy_unit": selection.privacy_unit,
+            "sample_embedding_noise_multiplier": candidate.sample_embedding_noise_multiplier,
+            "sample_label_grad_noise_multiplier": candidate.sample_label_grad_noise_multiplier,
+            "sample_optimizer_noise_multiplier": candidate.sample_optimizer_noise_multiplier,
+            "sample_optimizer_clip_norm": _sample_optimizer_clip_norm(train_config),
+            "dp_clip_norm": train_config.dp_clip_norm,
+            "dp_feature_clip_norm": _feature_clip_norm(train_config),
+            "dp_update_clip_norm": _update_clip_norm(train_config),
+            "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
+            "dp_update_noise_multiplier": float(
+                candidate.update_noise_multiplier
+                if candidate.update_noise_multiplier is not None
+                else privacy_parameters["update_noise_multiplier"]
+            ),
+            "dp_update_mode": train_config.dp_update_mode,
+            "dp_epsilon": max(selection.dp_emb_epsilon, 1e-6),
+            "dp_seed": _dp_noise_seed(
+                selection.seed,
+                round_idx,
+                ["joint_calibration_base", int(client_id), str(candidate.mode)],
+            ),
+            "training_seed": _client_training_seed(
+                selection.seed,
+                round_idx,
+                client_id,
+                0,
+            ),
+            "device": str(device),
+        }
+
+        clean_update, private_updates = _run_paired_calibration_payload(
+            payload,
+            trials=int(train_config.joint_calibration_capture_trials),
+            base_seed=selection.seed,
+            round_idx=round_idx,
+            client_id=client_id,
+            mode=candidate.mode,
+            model_cache=model_cache,
+        )
+        for private_update in private_updates:
+            session.add_pair(
+                state_key=state_key,
+                mode=candidate.mode,
+                client_id=client_id,
+                clean_update=clean_update,
+                private_update=private_update,
+            )
+            captured_pairs += 1
+        captured_cells += 1
+
+    # Use the same resampled calibration workloads as the paired trajectories
+    # for Delta_*.  This preserves both client sample-mass weighting and the
+    # effective step-count distribution used by the clean/private paths.
+    reference_x = np.concatenate(
+        [calibration_workloads[client_id][0] for client_id in unique_clients
+         if client_id in calibration_workloads],
+        axis=0,
+    ) if calibration_workloads else np.asarray([], dtype=x_train.dtype)
+    reference_y = np.concatenate(
+        [calibration_workloads[client_id][1] for client_id in unique_clients
+         if client_id in calibration_workloads],
+        axis=0,
+    ) if calibration_workloads else np.asarray([], dtype=y_train.dtype)
+    if len(reference_x) > 0:
+        ideal_update = _calibration_reference_update(
+            global_end=global_end,
+            global_edge=global_edge,
+            x=reference_x,
+            y=reference_y,
+            device=device,
+            input_shape=input_shape,
+            learning_rate=train_config.learning_rate,
+        )
+        # Materialize through the same deterministic flattening convention used
+        # by selector table entries; this also fails early on dimension drift.
+        session.set_ideal_update(as_update_vector(ideal_update), state_key=state_key)
+
+    return {
+        "captured_pairs": int(captured_pairs),
+        "captured_cells": int(captured_cells),
+        "captured_clients": int(len({client_id for client_id, _ in cells})),
+        "state_key": state_key,
+    }
+
+
 def _synchronize_device_for_timing(
     device: torch.device | str,
 ) -> None:
@@ -556,6 +1045,34 @@ def run_fmnist_lenet5_training(
 ) -> dict[str, Any]:
     if max_new_rounds is not None and max_new_rounds < 1:
         raise ValueError("max_new_rounds must be positive")
+    capture_enabled = bool(train_config.joint_calibration_capture_path)
+    if capture_enabled:
+        if selection.privacy_unit != "sample":
+            raise ValueError("joint calibration capture requires privacy_unit='sample'")
+        if int(train_config.joint_calibration_capture_trials) < 2:
+            raise ValueError("joint calibration capture requires at least 2 private trials per cell")
+        if int(train_config.joint_calibration_capture_period) < 1:
+            raise ValueError("joint calibration capture period must be positive")
+        if (
+            train_config.joint_calibration_capture_max_clients is not None
+            and int(train_config.joint_calibration_capture_max_clients) < 1
+        ):
+            raise ValueError("joint calibration capture max clients must be positive or None")
+        if (
+            train_config.joint_calibration_capture_sample_limit is not None
+            and int(train_config.joint_calibration_capture_sample_limit) < 1
+        ):
+            raise ValueError("joint calibration capture sample limit must be positive or None")
+        if train_config.joint_calibration_capture_scope not in {"selected", "candidate_modes"}:
+            raise ValueError("joint calibration capture scope must be 'selected' or 'candidate_modes'")
+        if len(policies) != 1:
+            raise ValueError(
+                "joint calibration capture is a dedicated offline pass and requires exactly one policy"
+            )
+        if resume_from_run is not None:
+            raise ValueError(
+                "joint calibration capture does not currently support resume; start a dedicated fresh pass"
+            )
     if not (0.0 < train_config.server_step <= 1.0):
         raise ValueError("server_step must be in (0, 1]")
     for policy in policies:
@@ -1088,6 +1605,7 @@ def _run_lenet5_policy(
             "pareto_selection": 0.35,
             "accuracy_oracle_selection": 0.35,
             "global_objective_selection": 0.35,
+            "calibration_capture": 0.43,
             "client_training": 0.50,
             "flow_execution": 0.68,
             "aggregation": 0.78,
@@ -1133,14 +1651,23 @@ def _run_lenet5_policy(
             "Real HE execution was required, but it is not enabled or unavailable: "
             f"{he_status.detail}"
         )
-    if policy == "fixed_he" and not real_he_available:
+    calibration_profiled_he = bool(
+        train_config.joint_calibration_capture_path
+        and train_config.he_execution == "profiled"
+    )
+    if policy == "fixed_he" and not real_he_available and not calibration_profiled_he:
         raise RuntimeError(
             "Policy fixed_he requires a supported CKKS backend for real encrypted aggregation, "
             f"but it is unavailable: {he_status.detail}"
         )
+    # A dedicated calibration pass estimates local clean/private learning
+    # trajectories; CKKS execution does not change those trajectories.  When
+    # HE is explicitly profiled for that auxiliary pass, keep HE-protected
+    # collaboration modes enumerable even on a machine without a CKKS backend.
+    # Formal training keeps the historical real-backend availability rule.
     effective_selection = replace(
         selection,
-        allow_he=real_he_available,
+        allow_he=(real_he_available or calibration_profiled_he),
         omega_feature_clip_norm=_feature_clip_norm(train_config),
         omega_update_clip_norm=_update_clip_norm(train_config),
     )
@@ -1263,6 +1790,35 @@ def _run_lenet5_policy(
     global_pareto_selection_rounds = 0
     client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
     previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
+
+    calibration_capture_path: Path | None = None
+    calibration_capture_session: JointCalibrationCaptureSession | None = None
+    calibration_capture_rows: list[dict[str, Any]] = []
+    if train_config.joint_calibration_capture_path:
+        calibration_capture_path = Path(train_config.joint_calibration_capture_path).expanduser()
+        if not calibration_capture_path.is_absolute():
+            calibration_capture_path = (ROOT / calibration_capture_path).resolve()
+        calibration_capture_session = JointCalibrationCaptureSession(
+            metadata={
+                "source": "runtime_heldout_validation_capture",
+                "calibration_data_privacy_status": "unverified_client_heldout_not_dp_accounted",
+                "calibration_table_release_status": "not_validated_for_untrusted_export",
+                "policy": policy,
+                "seed": int(selection.seed),
+                "dataset": str(dataset_label),
+                "model": str(model_name),
+                "privacy_unit": str(effective_selection.privacy_unit),
+                "scope": str(train_config.joint_calibration_capture_scope),
+                "trials_per_cell": int(train_config.joint_calibration_capture_trials),
+                "capture_period": int(train_config.joint_calibration_capture_period),
+                "calibration_workload": (
+                    "per-client held-out validation pool, resampled to match each client's "
+                    "training sample/step count; use an externally public workload for formal "
+                    "no-extra-leakage claims"
+                ),
+            },
+            include_mode_fallback=True,
+        )
 
     checkpoint_path = output_dir / "checkpoint.pt"
     if resume_from_policy_dir is not None:
@@ -2205,6 +2761,63 @@ def _run_lenet5_policy(
             train_tasks.append((client_id, candidate, idx, dispatch_sequence))
             dispatch_sequence += 1
 
+        calibration_capture_stats: dict[str, Any] = {
+            "captured_pairs": 0,
+            "captured_cells": 0,
+            "captured_clients": 0,
+        }
+        if (
+            calibration_capture_session is not None
+            and calibration_capture_path is not None
+            and round_idx % int(train_config.joint_calibration_capture_period) == 0
+        ):
+            emit_stage_status(
+                f"Round {round_idx + 1}/{selection.rounds}: capturing matched clean/private calibration trajectories",
+                stage="calibration_capture",
+                round_value=round_idx,
+            )
+            calibration_started_at = time.perf_counter()
+            calibration_capture_stats = _capture_joint_calibration_round(
+                session=calibration_capture_session,
+                selected=selected,
+                train_config=train_config,
+                selection=effective_selection,
+                global_end=global_end,
+                global_edge=global_edge,
+                client_model_states=client_model_states,
+                train_client_indices=train_client_indices,
+                client_test_indices=client_test_indices,
+                x_train=x_train,
+                y_train=y_train,
+                device=device,
+                model_name=model_name,
+                input_shape=input_shape,
+                num_classes=num_classes,
+                round_idx=round_idx,
+            )
+            calibration_capture_stats["wall_time_sec"] = (
+                time.perf_counter() - calibration_started_at
+            )
+            calibration_capture_rows.append(
+                {"round": int(round_idx), **calibration_capture_stats}
+            )
+            calibration_table = calibration_capture_session.build_table(min_trials=2)
+            calibration_table.save(calibration_capture_path)
+            _write_json(
+                calibration_capture_path.with_suffix(".capture.json"),
+                {
+                    "table": str(calibration_capture_path),
+                    "entry_count": int(calibration_table.entry_count),
+                    "pair_count": int(calibration_capture_session.pair_count),
+                    "calibration_data_privacy_status": "unverified_client_heldout_not_dp_accounted",
+                    "calibration_table_release_status": "not_validated_for_untrusted_export",
+                    "capture_rows": calibration_capture_rows,
+                    "note": (
+                        "Capture is offline/periodic calibration work. Online selector runs only load the saved table."
+                    ),
+                },
+            )
+
         _synchronize_device_for_timing(device)
         training_wall_started_at = time.perf_counter()
         emit_stage_status(
@@ -2262,6 +2875,8 @@ def _run_lenet5_policy(
                     "actual_local_batches",
                     "actual_optimizer_steps",
                     "feature_dp_release_batches",
+                    "sample_label_grad_dp_release_batches",
+                    "sample_dp_optimizer_steps",
                     "feature_dp_sample_count",
                     "feature_dimension_sum",
                     "feature_noise_std_sum",
@@ -2403,6 +3018,13 @@ def _run_lenet5_policy(
                     f"LIIE SecAgg cohort on edge {edge_id} changed after dispatch; "
                     "aborting unprotected aggregate publication"
                 )
+        sample_worker_client_audit_count = 0
+        if effective_selection.privacy_unit == "sample":
+            sample_worker_client_audit_count = _assert_sample_worker_accounting_matches(
+                admitted_client_ids=admitted_client_ids,
+                selected_by_id=selected_by_id,
+                worker_results=worker_results,
+            )
         for client_id, candidate in selected_by_id.items():
             ledger = privacy_ledgers[client_id]
             row = round_decision_rows_by_client[client_id]
@@ -3766,8 +4388,12 @@ def _run_lenet5_policy(
             float(row.get("selection_wall_time_sec", 0.0)) for row in round_rows
         ) + selection_wall_time_sec
         accounted_system_time_sec = logical_time + cumulative_selection_wall_time_sec
+        calibration_capture_wall_time_sec = float(
+            calibration_capture_stats.get("wall_time_sec", 0.0)
+        )
         accounted_phase_wall_time_sec = (
             selection_wall_time_sec
+            + calibration_capture_wall_time_sec
             + training_wall_time_sec
             + flow_wall_time_sec
             + aggregation_wall_time_sec
@@ -3810,11 +4436,25 @@ def _run_lenet5_policy(
         mode_selection_summary = _summarize_mode_selection_audit(
             mode_enumeration_audits, selection_diagnostics, selected,
         )
+        privacy_path_observations = _observed_privacy_path_audit(
+            privacy_unit=effective_selection.privacy_unit,
+            decision_rows=list(round_decision_rows_by_client.values()),
+            worker_results=worker_results,
+            protection_releases=protection_releases,
+            he_execution=train_config.he_execution,
+            selected_he_clients=num_he_clients,
+        )
         round_rows.append(
             {
                 "policy": policy,
                 "round": round_idx,
                 "mode_selection_audit": json.dumps(mode_selection_summary, sort_keys=True),
+                **privacy_path_observations,
+                "sample_worker_client_audit_status": (
+                    "passed_admitted_clients" if effective_selection.privacy_unit == "sample"
+                    else "not_applicable"
+                ),
+                "sample_worker_client_audited_count": sample_worker_client_audit_count,
                 "logical_time": logical_time,
                 "accounted_system_time_sec": accounted_system_time_sec,
                 "round_duration": flow_result.round_duration,
@@ -3900,9 +4540,15 @@ def _run_lenet5_policy(
                     "cloud_dp_branch_performance", {}
                 ).get("aggregate", {}).get("branch_wall_sec", 0.0),
                 "training_wall_time_sec": training_wall_time_sec,
+                "joint_calibration_capture_wall_time_sec": calibration_capture_wall_time_sec,
+                "joint_calibration_captured_pairs": int(calibration_capture_stats.get("captured_pairs", 0)),
+                "joint_calibration_captured_cells": int(calibration_capture_stats.get("captured_cells", 0)),
+                "joint_calibration_captured_clients": int(calibration_capture_stats.get("captured_clients", 0)),
                 "actual_local_batches": sum(r.get("actual_local_batches", 0) for r in worker_results.values()),
                 "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
                 "feature_dp_release_batches": sum(r.get("feature_dp_release_batches", 0) for r in worker_results.values()),
+                "sample_label_grad_dp_release_batches": sum(int(r.get("sample_label_grad_dp_release_batches", 0)) for r in worker_results.values()),
+                "sample_dp_optimizer_steps": sum(int(r.get("sample_dp_optimizer_steps", 0)) for r in worker_results.values()),
                 "feature_dp_sample_count": feature_dp_sample_count,
                 "feature_dimension_mean": feature_dimension_sum / max(feature_dp_sample_count, 1.0),
                 "feature_noise_std_mean": feature_noise_std_sum / max(feature_dp_sample_count, 1.0),
@@ -4480,6 +5126,7 @@ def _run_lenet5_policy(
             "all_cross_domain_updates_protected": current_round[
                 "all_cross_domain_updates_protected"
             ],
+            **privacy_path_observations,
             "num_budget_exhausted_clients": current_round["num_budget_exhausted_clients"],
             "omega_feature_clip_excess_sq_mean": current_round["omega_feature_clip_excess_sq_mean"],
             "omega_feature_clip_excess_sq_max": current_round["omega_feature_clip_excess_sq_max"],
@@ -7996,6 +8643,12 @@ def _summarize_lenet5_policy(
         "total_round_wall_time_sec": sum(row.get("round_wall_time_sec", 0.0) for row in round_rows),
         "total_selection_wall_time_sec": sum(row.get("selection_wall_time_sec", 0.0) for row in round_rows),
         "total_training_wall_time_sec": sum(row.get("training_wall_time_sec", 0.0) for row in round_rows),
+        "total_joint_calibration_capture_wall_time_sec": sum(
+            row.get("joint_calibration_capture_wall_time_sec", 0.0) for row in round_rows
+        ),
+        "total_joint_calibration_captured_pairs": sum(
+            row.get("joint_calibration_captured_pairs", 0) for row in round_rows
+        ),
         "total_flow_wall_time_sec": sum(row.get("flow_wall_time_sec", 0.0) for row in round_rows),
         "total_aggregation_wall_time_sec": sum(row.get("aggregation_wall_time_sec", 0.0) for row in round_rows),
         "total_evaluation_wall_time_sec": sum(row.get("evaluation_wall_time_sec", 0.0) for row in round_rows),

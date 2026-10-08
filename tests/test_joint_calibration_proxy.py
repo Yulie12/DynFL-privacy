@@ -15,6 +15,7 @@ from dynfed.selection import (
     _LearningReplacementStats,
     _joint_calibration_learning_components,
     _sample_dp_event_counts,
+    skipped_candidate,
 )
 
 
@@ -227,4 +228,82 @@ def test_joint_replacement_stats_matches_full_profile_zero_ealg(tmp_path):
     exact = _joint_calibration_learning_components(config, trial, masses, admitted)
     assert exact is not None
     assert fast is not None
+    assert math.isclose(fast, exact.total, rel_tol=0.0, abs_tol=1e-12)
+
+
+def test_joint_selector_strict_table_policy_handles_all_skip_without_skip_row(tmp_path):
+    table = JointUpdateCalibrationTable(
+        metadata={"cross_client_rng": "conditionally_independent"}
+    )
+    # The table intentionally has no SKIP entry.  SKIP is a structural
+    # zero-update action, not an empirically calibrated training mode.
+    table.add_entry(
+        mode="LIC",
+        entry=JointCalibrationEntry(
+            clean_update_mean=torch.tensor([0.4, 0.1], dtype=torch.float64),
+            bias_mean=torch.tensor([0.02, -0.01], dtype=torch.float64),
+            variance_trace=0.003,
+            sample_count=4,
+        ),
+    )
+    table.set_ideal_update(torch.tensor([0.2, -0.1], dtype=torch.float64))
+    path = table.save(tmp_path / "skip_table.pt")
+
+    config = SelectionConfig(
+        privacy_unit="sample",
+        learning_objective="joint_calibration",
+        joint_calibration_path=str(path),
+        joint_calibration_e_alg_policy="table",
+        joint_calibration_missing_policy="error",
+    )
+    profile = {1: skipped_candidate(), 2: skipped_candidate()}
+    result = _joint_calibration_learning_components(
+        config,
+        profile,
+        {1: 60.0, 2: 40.0},
+        admitted_client_ids=(),
+    )
+    assert result is not None
+    # Actual expected aggregate is zero, so J = ||0 - Delta_*||^2.
+    assert math.isclose(result.total, 0.05, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(result.mean_error_sq, 0.05, rel_tol=0.0, abs_tol=1e-12)
+    assert result.variance_trace == 0.0
+    assert result.source == "joint_calibration_table_e_alg"
+
+
+def test_joint_replacement_stats_accepts_skip_as_zero_update(tmp_path):
+    table = JointUpdateCalibrationTable(
+        metadata={"cross_client_rng": "conditionally_independent"}
+    )
+    table.add_entry(
+        mode="LIC",
+        client_id=1,
+        entry=JointCalibrationEntry(
+            clean_update_mean=torch.tensor([0.4, 0.1], dtype=torch.float64),
+            bias_mean=torch.tensor([0.02, -0.01], dtype=torch.float64),
+            variance_trace=0.003,
+            sample_count=4,
+        ),
+    )
+    table.set_ideal_update(torch.tensor([0.2, -0.1], dtype=torch.float64))
+    path = table.save(tmp_path / "skip_replacement_table.pt")
+
+    config = SelectionConfig(
+        privacy_unit="sample",
+        learning_objective="joint_calibration",
+        joint_calibration_path=str(path),
+        joint_calibration_e_alg_policy="table",
+        joint_calibration_missing_policy="error",
+    )
+    profile = {1: skipped_candidate()}
+    masses = {1: 100.0}
+    admitted = (1,)
+    stats = _LearningReplacementStats(config, profile, masses, {1: 0}, admitted)
+
+    replacement = _candidate("LIC")
+    fast = stats.replacement_cost(1, replacement, admitted)
+    trial = {1: replacement}
+    exact = _joint_calibration_learning_components(config, trial, masses, admitted)
+    assert fast is not None
+    assert exact is not None
     assert math.isclose(fast, exact.total, rel_tol=0.0, abs_tol=1e-12)

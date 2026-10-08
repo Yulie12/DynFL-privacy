@@ -114,6 +114,7 @@ def build_command(
     he = config["he"]
     optimization = config["optimization"]
     learning = config.get("learning", {})
+    calibration_capture = config.get("calibration_capture", {})
     network = config["network"]
 
     command = [sys.executable, str(ROOT / "experiments" / "run_fmnist_lenet5.py")]
@@ -196,6 +197,12 @@ def build_command(
         "joint_calibration_state_key": learning.get("state_key", "default"),
         "joint_calibration_e_alg_policy": learning.get("e_alg_policy", "table"),
         "joint_calibration_missing_policy": learning.get("missing_policy", "error"),
+        "joint_calibration_capture_path": calibration_capture.get("output_path"),
+        "joint_calibration_capture_trials": calibration_capture.get("trials", 0),
+        "joint_calibration_capture_period": calibration_capture.get("period", 10),
+        "joint_calibration_capture_max_clients": calibration_capture.get("max_clients", 8),
+        "joint_calibration_capture_sample_limit": calibration_capture.get("sample_limit", 64),
+        "joint_calibration_capture_scope": calibration_capture.get("scope", "candidate_modes"),
         "seed": seed,
         "output_root": config["output_root"],
     }

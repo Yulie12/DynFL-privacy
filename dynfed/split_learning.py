@@ -818,6 +818,7 @@ def split_local_train_lenet5(
         actual_local_batches=0,
         actual_optimizer_steps=0,
         feature_dp_release_batches=0,
+        sample_label_grad_dp_release_batches=0,
         feature_dp_sample_count=0,
         feature_raw_norm_sum=0.0,
         feature_clipped_norm_sum=0.0,
@@ -919,6 +920,25 @@ def split_local_train_lenet5(
             raise ValueError(
                 "sample_label_grad_noise_multiplier must be non-negative"
             )
+
+    if normalized_privacy_unit == "sample" and is_split:
+        # The SamplePrivacyLedger charges both releases on every split batch.
+        # A missing link mechanism would silently release private labels through
+        # the unnoised loss gradient while still charging DP in the ledger.
+        for obj in ("emb", "grad"):
+            if mechanisms.get(obj, "none") != "dp":
+                raise ValueError(
+                    f"Sample-DP split training requires {obj}=dp; "
+                    f"received {mechanisms.get(obj, 'none')!r}"
+                )
+        for label, sigma in (
+            ("embedding", sample_embedding_noise_multiplier),
+            ("label-gradient", sample_label_grad_noise_multiplier),
+        ):
+            if not math.isfinite(float(sigma)) or float(sigma) <= 0.0:
+                raise ValueError(f"Sample-DP {label} noise multiplier must be finite and positive")
+        if not math.isfinite(float(dp_clip_norm)) or float(dp_clip_norm) <= 0.0:
+            raise ValueError("Sample-DP split clipping norm must be finite and positive")
 
     if not is_split:
         # Full model: merge end + edge states
@@ -1196,6 +1216,8 @@ def split_local_train_lenet5(
             device,
             dp_epsilon,
         )
+        if normalized_privacy_unit == "sample":
+            diagnostics["sample_label_grad_dp_release_batches"] += 1
         logits.backward(protected_label_grad)
         grad_to_end = edge_input.grad.detach()
 

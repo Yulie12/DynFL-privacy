@@ -1,4 +1,4 @@
-# DynFL Sample-DP：Joint Update-Space Calibration Proxy（v3.4）
+# DynFL Sample-DP：Joint Update-Space Calibration Proxy（v3.5）
 
 ## 1. 目标
 
@@ -126,9 +126,57 @@ D_i^{(m)}=u_{i,s}^{(m)}-u_{i,0}^{(m)}.
 
 > 注意：校准 cell 必须来自与该 state/mode 下实际 Sample-DP 参数相匹配的 workload。若自动 RDP calibration 使噪声 multiplier 随状态明显变化，应在相应 state 上刷新 calibration，而不是把一张 mode-only 表无限期复用。
 
-## 6. 从 paired update 文件构建 calibration table
+## 6. 自动采集 paired clean/private trajectories（v3.5）
 
-脚本：
+v3.5 在现有训练执行器中加入了一个**显式开启、单独运行**的 calibration capture 路径。它不是在线 selector 的一部分。推荐流程是：
+
+1. 先运行一个单-policy calibration pass；
+2. 在指定 round 周期抽取少量 client / candidate mode；
+3. 对每个 cell 跑一次 clean trajectory 和 `M` 次 private trajectory；
+4. 直接把 `\widehat u_0, \widehat b, \widehat v` 与 `Delta_*` 写入 `.pt` table；
+5. 正式训练只加载该 table，不再重跑 paired trajectories。
+
+专用入口：
+
+```bash
+python experiments/run_joint_calibration_capture.py \
+  --config configs/paper_v34_cifar10_resnet18_joint_proxy.json \
+  --output calibration/paper_v34_cifar10_resnet18_joint.pt \
+  --rounds 1 --trials 2 --period 1 --max-clients 1 \
+  --sample-limit 16 --scope candidate_modes --dry-run
+```
+
+去掉 `--dry-run` 才会真正执行。`--trials` 至少为 2；正式校准应在估计稳定性实验后选择更大的 `M`。
+
+### 6.1 clean/private 配对语义
+
+clean path **不是**把 Sample-DP 的 Gaussian `sigma` 设为 0。代码会切换到同一训练程序的 non-private execution path，从而使 Sample-DP clipping distortion 也保留在
+
+\[
+D_i=u_{i,s}-u_{i,0}
+\]
+
+中。clean 与 private 共享相同初始模型、数据、local epoch、minibatch shuffle / training seed 和 optimizer schedule；private trials 只改变 `dp_seed`。因此这里直接估计 nonlinear training trajectory 的输出矩，不要求 Jacobian 或线性传播。
+
+### 6.2 workload 与实际 step count
+
+当前自动 capture 从每个 client 的 held-out validation pool 取 calibration 样本，并可用 `--sample-limit` 限制**唯一 held-out 样本数**。随后代码从该 pool 有放回重采样到该 client 的实际 training sample count，使 clean/private trajectory 的 minibatch / optimizer-step 长度与正常训练尽量一致。`Delta_*` 也在这些同一批重采样 calibration workloads 上计算，避免 reference objective 与 paired trajectory 使用不同样本质量。
+
+### 6.3 重要隐私边界
+
+仓库自动 split 出来的 held-out validation subset 只是工程上的 calibration workload，**不能自动等同于公开数据**。如果论文要声称 calibration 本身不产生额外隐私泄露，应把该路径替换/接入真正独立的 public calibration dataset。自动 capture 的统计方法不变，但数据来源必须在论文与实验配置中明确。
+
+### 6.4 mode fallback 的含义
+
+代码优先保存 `(state, client, mode)` 精确 cell。mode-level fallback 从已经估计好的 client conditional moments 构造：均值取 client moment 加权平均，variance 只平均各 client 的 **within-client DP-RNG variance trace**，不会把 client 间 bias heterogeneity 错算进 `Tr(V_i)`。fallback 仍然只是 population proxy；有 exact client cell 时优先使用 exact cell。
+
+### 6.5 HE profiled calibration
+
+专用 capture runner 默认 `he_execution=profiled`。在这个**辅助 calibration pass** 中，HE 只影响通信/密码执行，不改变本地 clean/private learning trajectory，因此即便本机没有 CKKS backend，也允许枚举 HE-protected collaboration modes 并用 modeled HE cost 完成 calibration。这个例外只对启用了 calibration capture 且显式使用 profiled HE 的运行生效；正式训练仍遵守原有 real-backend 规则。
+
+## 7. 从 paired update 文件构建 calibration table
+
+如果使用外部 public workload 或已有 paired update 文件，原 builder 仍然保留。脚本：
 
 ```bash
 PYTHONPATH=. python experiments/build_joint_calibration.py \
@@ -145,7 +193,7 @@ Manifest 中每个 `pairs[]` 是一次 matched trial。`clean`/`private` 文件�
 
 `ideal_updates[]` 为 `table` e_alg policy 提供 \(\Delta_*\) reference。
 
-## 7. 正式配置
+## 8. 正式配置
 
 示例：`configs/paper_v34_cifar10_resnet18_joint_proxy.json`
 
@@ -166,7 +214,7 @@ Manifest 中每个 `pairs[]` 是一次 matched trial。`clean`/`private` 文件�
 
 `missing_policy=error` 是正式实验推荐值：缺 calibration 数据时直接失败，不允许悄悄退回旧的 fusion+DP objective。
 
-## 8. Sample-RDP event count 对齐
+## 9. Sample-RDP event count 对齐
 
 Sample-RDP accountant 现在按 runtime 的实际 minibatch count，并乘 Flow 中真正重复执行 training block 的 `E_edge_loops`。通信 forwarding/HE 本身不额外生成 Sample-RDP event。
 
@@ -177,7 +225,7 @@ Sample-RDP accountant 现在按 runtime 的实际 minibatch count，并乘 Flow 
 
 RDP epsilon 不能代数推出 `b_i,V_i`。
 
-## 9. 验证要求
+## 10. 验证要求
 
 正式实验至少应抽样部分 rounds/candidates 做昂贵 paired-MC ground truth，并报告：
 
@@ -187,8 +235,10 @@ RDP epsilon 不能代数推出 `b_i,V_i`。
 
 这证明 online calibration proxy 的排序确实代理理论 `J_learn`，而不是仅仅数值尺度相似。
 
-## 10. 当前边界
+## 11. 当前边界
 
-本版本已经实现：calibration 统计器、table 格式、builder、在线 lookup、joint objective、增量候选 lookahead、round-conditioned lookup、Sample-only 正式 runner 约束和审计字段。
+本版本已经实现：calibration 统计器、table 格式、外部-file builder、自动 paired trajectory capture、在线 lookup、joint objective、增量候选 lookahead、round-conditioned lookup、Sample-only 正式 runner 约束和审计字段。
 
-本版本**不会伪造 calibration 数据**。真正的 `paper_v34...joint.pt` 仍需通过独立 public/calibration workload 产生 paired clean/private trajectories 后构建。正式配置缺该文件会按设计报错。
+本版本**不会伪造 calibration 数据**，也不会在每次在线决策前重新测量。自动 capture 必须单独运行；正式配置只读取已生成的 `.pt` table，缺文件时 `missing_policy=error` 会按设计失败。
+
+当前 `state_key=round:t` 仍是低维 state proxy：如果 calibration pass 与正式训练的模型轨迹差异很大，round number 并不能保证两者处于相同参数状态。因此论文实验仍应抽样计算 paired-MC ground truth 并报告 ranking correlation；后续可把 table key 扩展到模型/梯度/损失等可观测 state features。

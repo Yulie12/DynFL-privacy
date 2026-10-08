@@ -192,6 +192,47 @@ def parse_args() -> argparse.Namespace:
         choices=["error", "legacy"],
         help="Whether missing calibration data is fatal or falls back to the retired legacy objective.",
     )
+    parser.add_argument(
+        "--joint-calibration-capture-path",
+        default=None,
+        help=(
+            "Opt-in offline/periodic matched clean/private capture output (.pt). "
+            "This is calibration work, not an online selector input measurement."
+        ),
+    )
+    parser.add_argument(
+        "--joint-calibration-capture-trials",
+        type=int,
+        default=0,
+        help="Private DP-RNG trials per captured (round, client, mode) cell; use >=2 when capture is enabled.",
+    )
+    parser.add_argument(
+        "--joint-calibration-capture-period",
+        type=int,
+        default=10,
+        help="Capture every N rounds in a dedicated calibration pass.",
+    )
+    parser.add_argument(
+        "--joint-calibration-capture-max-clients",
+        type=int,
+        default=8,
+        help="Maximum held-out clients sampled per capture round; 0 means all clients.",
+    )
+    parser.add_argument(
+        "--joint-calibration-capture-sample-limit",
+        type=int,
+        default=64,
+        help="Maximum held-out calibration samples per sampled client; 0 means all held-out samples.",
+    )
+    parser.add_argument(
+        "--joint-calibration-capture-scope",
+        default="candidate_modes",
+        choices=["selected", "candidate_modes"],
+        help=(
+            "selected captures only the chosen mode; candidate_modes captures one feasible Sample-DP "
+            "candidate for every available mode of each sampled client."
+        ),
+    )
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
     parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate", "global_release"])
@@ -517,6 +558,18 @@ def main() -> None:
         he_workers=max(1, args.he_workers),
         executor=args.executor,
         executor_workers=args.executor_workers,
+        joint_calibration_capture_path=args.joint_calibration_capture_path,
+        joint_calibration_capture_trials=args.joint_calibration_capture_trials,
+        joint_calibration_capture_period=args.joint_calibration_capture_period,
+        joint_calibration_capture_max_clients=(
+            None if args.joint_calibration_capture_max_clients == 0
+            else args.joint_calibration_capture_max_clients
+        ),
+        joint_calibration_capture_sample_limit=(
+            None if args.joint_calibration_capture_sample_limit == 0
+            else args.joint_calibration_capture_sample_limit
+        ),
+        joint_calibration_capture_scope=args.joint_calibration_capture_scope,
     )
 
     result = run_fmnist_lenet5_training(
