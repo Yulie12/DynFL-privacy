@@ -1,0 +1,1486 @@
+diff --git a/JOINT_UPDATE_CALIBRATION_PROXY_ZH.md b/JOINT_UPDATE_CALIBRATION_PROXY_ZH.md
+index 0277300..530857d 100644
+--- a/JOINT_UPDATE_CALIBRATION_PROXY_ZH.md
++++ b/JOINT_UPDATE_CALIBRATION_PROXY_ZH.md
+@@ -1,4 +1,4 @@
+-# DynFL Sample-DP：Joint Update-Space Calibration Proxy（v3.4）
++# DynFL Sample-DP：Joint Update-Space Calibration Proxy（v3.5）
+ 
+ ## 1. 目标
+ 
+@@ -126,9 +126,57 @@ D_i^{(m)}=u_{i,s}^{(m)}-u_{i,0}^{(m)}.
+ 
+ > 注意：校准 cell 必须来自与该 state/mode 下实际 Sample-DP 参数相匹配的 workload。若自动 RDP calibration 使噪声 multiplier 随状态明显变化，应在相应 state 上刷新 calibration，而不是把一张 mode-only 表无限期复用。
+ 
+-## 6. 从 paired update 文件构建 calibration table
++## 6. 自动采集 paired clean/private trajectories（v3.5）
+ 
+-脚本：
++v3.5 在现有训练执行器中加入了一个**显式开启、单独运行**的 calibration capture 路径。它不是在线 selector 的一部分。推荐流程是：
++
++1. 先运行一个单-policy calibration pass；
++2. 在指定 round 周期抽取少量 client / candidate mode；
++3. 对每个 cell 跑一次 clean trajectory 和 `M` 次 private trajectory；
++4. 直接把 `\widehat u_0, \widehat b, \widehat v` 与 `Delta_*` 写入 `.pt` table；
++5. 正式训练只加载该 table，不再重跑 paired trajectories。
++
++专用入口：
++
++```bash
++python experiments/run_joint_calibration_capture.py \
++  --config configs/paper_v34_cifar10_resnet18_joint_proxy.json \
++  --output calibration/paper_v34_cifar10_resnet18_joint.pt \
++  --rounds 1 --trials 2 --period 1 --max-clients 1 \
++  --sample-limit 16 --scope candidate_modes --dry-run
++```
++
++去掉 `--dry-run` 才会真正执行。`--trials` 至少为 2；正式校准应在估计稳定性实验后选择更大的 `M`。
++
++### 6.1 clean/private 配对语义
++
++clean path **不是**把 Sample-DP 的 Gaussian `sigma` 设为 0。代码会切换到同一训练程序的 non-private execution path，从而使 Sample-DP clipping distortion 也保留在
++
++\[
++D_i=u_{i,s}-u_{i,0}
++\]
++
++中。clean 与 private 共享相同初始模型、数据、local epoch、minibatch shuffle / training seed 和 optimizer schedule；private trials 只改变 `dp_seed`。因此这里直接估计 nonlinear training trajectory 的输出矩，不要求 Jacobian 或线性传播。
++
++### 6.2 workload 与实际 step count
++
++当前自动 capture 从每个 client 的 held-out validation pool 取 calibration 样本，并可用 `--sample-limit` 限制**唯一 held-out 样本数**。随后代码从该 pool 有放回重采样到该 client 的实际 training sample count，使 clean/private trajectory 的 minibatch / optimizer-step 长度与正常训练尽量一致。`Delta_*` 也在这些同一批重采样 calibration workloads 上计算，避免 reference objective 与 paired trajectory 使用不同样本质量。
++
++### 6.3 重要隐私边界
++
++仓库自动 split 出来的 held-out validation subset 只是工程上的 calibration workload，**不能自动等同于公开数据**。如果论文要声称 calibration 本身不产生额外隐私泄露，应把该路径替换/接入真正独立的 public calibration dataset。自动 capture 的统计方法不变，但数据来源必须在论文与实验配置中明确。
++
++### 6.4 mode fallback 的含义
++
++代码优先保存 `(state, client, mode)` 精确 cell。mode-level fallback 从已经估计好的 client conditional moments 构造：均值取 client moment 加权平均，variance 只平均各 client 的 **within-client DP-RNG variance trace**，不会把 client 间 bias heterogeneity 错算进 `Tr(V_i)`。fallback 仍然只是 population proxy；有 exact client cell 时优先使用 exact cell。
++
++### 6.5 HE profiled calibration
++
++专用 capture runner 默认 `he_execution=profiled`。在这个**辅助 calibration pass** 中，HE 只影响通信/密码执行，不改变本地 clean/private learning trajectory，因此即便本机没有 CKKS backend，也允许枚举 HE-protected collaboration modes 并用 modeled HE cost 完成 calibration。这个例外只对启用了 calibration capture 且显式使用 profiled HE 的运行生效；正式训练仍遵守原有 real-backend 规则。
++
++## 7. 从 paired update 文件构建 calibration table
++
++如果使用外部 public workload 或已有 paired update 文件，原 builder 仍然保留。脚本：
+ 
+ ```bash
+ PYTHONPATH=. python experiments/build_joint_calibration.py \
+@@ -145,7 +193,7 @@ Manifest 中每个 `pairs[]` 是一次 matched trial。`clean`/`private` 文件
+ 
+ `ideal_updates[]` 为 `table` e_alg policy 提供 \(\Delta_*\) reference。
+ 
+-## 7. 正式配置
++## 8. 正式配置
+ 
+ 示例：`configs/paper_v34_cifar10_resnet18_joint_proxy.json`
+ 
+@@ -166,7 +214,7 @@ Manifest 中每个 `pairs[]` 是一次 matched trial。`clean`/`private` 文件
+ 
+ `missing_policy=error` 是正式实验推荐值：缺 calibration 数据时直接失败，不允许悄悄退回旧的 fusion+DP objective。
+ 
+-## 8. Sample-RDP event count 对齐
++## 9. Sample-RDP event count 对齐
+ 
+ Sample-RDP accountant 现在按 runtime 的实际 minibatch count，并乘 Flow 中真正重复执行 training block 的 `E_edge_loops`。通信 forwarding/HE 本身不额外生成 Sample-RDP event。
+ 
+@@ -177,7 +225,7 @@ Sample-RDP accountant 现在按 runtime 的实际 minibatch count，并乘 Flow
+ 
+ RDP epsilon 不能代数推出 `b_i,V_i`。
+ 
+-## 9. 验证要求
++## 10. 验证要求
+ 
+ 正式实验至少应抽样部分 rounds/candidates 做昂贵 paired-MC ground truth，并报告：
+ 
+@@ -187,8 +235,10 @@ RDP epsilon 不能代数推出 `b_i,V_i`。
+ 
+ 这证明 online calibration proxy 的排序确实代理理论 `J_learn`，而不是仅仅数值尺度相似。
+ 
+-## 10. 当前边界
++## 11. 当前边界
++
++本版本已经实现：calibration 统计器、table 格式、外部-file builder、自动 paired trajectory capture、在线 lookup、joint objective、增量候选 lookahead、round-conditioned lookup、Sample-only 正式 runner 约束和审计字段。
+ 
+-本版本已经实现：calibration 统计器、table 格式、builder、在线 lookup、joint objective、增量候选 lookahead、round-conditioned lookup、Sample-only 正式 runner 约束和审计字段。
++本版本**不会伪造 calibration 数据**，也不会在每次在线决策前重新测量。自动 capture 必须单独运行；正式配置只读取已生成的 `.pt` table，缺文件时 `missing_policy=error` 会按设计失败。
+ 
+-本版本**不会伪造 calibration 数据**。真正的 `paper_v34...joint.pt` 仍需通过独立 public/calibration workload 产生 paired clean/private trajectories 后构建。正式配置缺该文件会按设计报错。
++当前 `state_key=round:t` 仍是低维 state proxy：如果 calibration pass 与正式训练的模型轨迹差异很大，round number 并不能保证两者处于相同参数状态。因此论文实验仍应抽样计算 paired-MC ground truth 并报告 ranking correlation；后续可把 table key 扩展到模型/梯度/损失等可观测 state features。
+diff --git a/MODIFICATION_SUMMARY_V35_ZH.md b/MODIFICATION_SUMMARY_V35_ZH.md
+new file mode 100644
+index 0000000..76d4a3e
+--- /dev/null
++++ b/MODIFICATION_SUMMARY_V35_ZH.md
+@@ -0,0 +1,80 @@
++# DynFL v3.5：自动 Joint Calibration Capture 修改说明
++
++## 目标
++
++v3.4 已经让在线 selector 使用 joint update-space calibration table，但 table 仍需手工准备 paired update 文件。v3.5 把 paired clean/private trajectory 的**采集**接进现有训练执行器，同时保持以下边界：
++
++- paired measurement 是离线/周期 calibration 工作，不是每轮在线决策前测量；
++- clean/private 都执行真实 nonlinear training，不拟合线性 `Phi`；
++- clean 与 private 共享 common randomness，private trials 只改变 DP RNG；
++- 正式 selector 仍只读 `.pt` table。
++
++## 主要新增
++
++### `dynfed/joint_calibration.py`
++
++新增 `JointCalibrationCaptureSession`：按 `(state_key, mode, client_id)` 流式积累 paired trajectories，最终生成 `JointUpdateCalibrationTable`。mode fallback 从 client conditional moments 构造，不把 client 间 bias heterogeneity 混入 DP-RNG variance。
++
++### `dynfed/fmnist_lenet5_dynamic.py`
++
++新增自动 capture 路径：
++
++1. `_clean_calibration_payload`：生成真正 non-private baseline，而不是 `sigma=0` 的 clipped path；
++2. `_run_paired_calibration_payload`：clean 跑 1 次，private 跑 M 次，固定 training seed、改变 DP seed；
++3. `_capture_joint_calibration_round`：周期性抽取 client/mode cell，生成 paired moments；
++4. `_calibration_reference_update`：在相同 calibration workload 上计算 `Delta_*=-eta grad F`；
++5. round metrics / summary 记录 capture pair 数与 wall time。
++
++held-out pool 会先限制唯一 calibration 样本数，再重采样到该 client 的实际 training sample count，从而尽量保持 runtime minibatch/optimizer-step 长度。
++
++### `experiments/run_joint_calibration_capture.py`
++
++新增独立 calibration runner。它从正式 paper config 读取模型、系统和 Sample-DP 设置，但使用单一 bootstrap policy 与 legacy selector 来产生候选，不要求正在构建的 calibration table 已存在。
++
++默认使用 profiled HE，因为 HE 加密执行不改变本地 paired learning trajectory；该例外只用于 calibration capture。
++
++## 新增 CLI
++
++`experiments/run_fmnist_lenet5.py` 支持：
++
++- `--joint-calibration-capture-path`
++- `--joint-calibration-capture-trials`
++- `--joint-calibration-capture-period`
++- `--joint-calibration-capture-max-clients`
++- `--joint-calibration-capture-sample-limit`
++- `--joint-calibration-capture-scope {selected,candidate_modes}`
++
++## 推荐第一次运行
++
++先只检查命令：
++
++```powershell
++D:\soft\Python310\python.exe experiments\run_joint_calibration_capture.py `
++  --config configs\paper_v34_cifar10_resnet18_joint_proxy.json `
++  --output calibration\paper_v34_cifar10_resnet18_joint.pt `
++  --rounds 1 `
++  --trials 2 `
++  --period 1 `
++  --max-clients 1 `
++  --sample-limit 16 `
++  --scope candidate_modes `
++  --dry-run
++```
++
++确认后去掉 `--dry-run` 做一个最小真实 capture。ResNet + per-sample DP 本身较重，因此先用 1 round / 1 client / 2 trials 验证链路，再扩大 M 和 client 数。
++
++## 隐私边界
++
++当前自动 capture 使用每个 client 的 held-out validation pool，它与该 client 的 training subset 不重叠，但**不应被自动称作 public data**。如果论文需要声称 calibration 不增加隐私泄露，正式 calibration 应改用独立 public dataset；外部 public paired files 仍可通过 `experiments/build_joint_calibration.py` 构表。
++
++## 验证
++
++v3.5 新增测试覆盖：
++
++- exact client cell 与 mode fallback；
++- within-client variance 语义；
++- clean path 移除 Sample-DP；
++- paired trials 固定 training seed、改变 DP seed；
++- reference update 不修改真实模型；
++- held-out pool 重采样到 runtime client sample mass；
++- dedicated capture runner command 构造。
+diff --git a/calibration/README.md b/calibration/README.md
+index 8d35db3..888f3f0 100644
+--- a/calibration/README.md
++++ b/calibration/README.md
+@@ -5,3 +5,22 @@
+ 在线 selector 只读取 `.pt` calibration table，不在每次决策前执行 clean/private paired training。
+ 
+ 构建方式见仓库根目录 `JOINT_UPDATE_CALIBRATION_PROXY_ZH.md` 和 `experiments/build_joint_calibration.py`。
++
++
++## v3.5 自动 capture
++
++推荐先做一次很小的 dry-run：
++
++```powershell
++D:\soft\Python310\python.exe experiments\run_joint_calibration_capture.py `
++  --config configs\paper_v34_cifar10_resnet18_joint_proxy.json `
++  --output calibration\paper_v34_cifar10_resnet18_joint.pt `
++  --rounds 1 --trials 2 --period 1 --max-clients 1 `
++  --sample-limit 16 --scope candidate_modes --dry-run
++```
++
++确认命令无误后去掉 `--dry-run`。自动 capture 是独立 calibration pass；正式 selector 只加载输出 table。
++
++`--sample-limit` 限制每个 client calibration pool 中唯一 held-out 样本数；执行 trajectory 时会从该 pool 重采样到 client 的实际 training sample count，以保持实际训练 step 数。
++
++**隐私注意**：仓库的 held-out validation split 不自动等价于 public data。论文若需要“校准不产生额外隐私泄露”的正式表述，应使用独立 public calibration dataset。
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index e299e58..a6c46a9 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -32,6 +32,7 @@ from .fmnist_dynamic_training import FmnistDynamicConfig as _FmnistDynamicConfig
+ from .fmnist_dynamic_training import load_fmnist_arrays
+ from .flow_executor import EDGE_CLOUD_MODES, EDGE_ONLY_MODES, ClientFlowInput, execute_mixed_round_flow
+ from .independent_release import IndependentReleaseAccount
++from .joint_calibration import JointCalibrationCaptureSession, as_update_vector
+ from .he_backend import (
+     CKKS_COEFF_MOD_BIT_SIZES,
+     CKKS_POLY_MODULUS_DEGREE,
+@@ -143,6 +144,15 @@ class Lenet5Config:
+     he_workers: int = 1
+     executor: str = "serial"
+     executor_workers: int | None = None
++    # Offline/periodic matched clean/private calibration capture. Disabled by
++    # default and never required by online selection. A dedicated calibration
++    # run should normally use one policy only.
++    joint_calibration_capture_path: str | None = None
++    joint_calibration_capture_trials: int = 0
++    joint_calibration_capture_period: int = 10
++    joint_calibration_capture_max_clients: int | None = 8
++    joint_calibration_capture_sample_limit: int | None = 64
++    joint_calibration_capture_scope: str = "candidate_modes"
+ 
+ 
+ def _snapshot_trainable_parameters(
+@@ -524,6 +534,373 @@ def _client_train_worker(
+     }
+ 
+ 
++
++
++def _clean_calibration_payload(private_payload: dict[str, Any]) -> dict[str, Any]:
++    """Create the matched non-private execution for one Sample-DP payload.
++
++    The clean path shares model state, data, minibatch order, optimizer setup,
++    and training seed with the private path, but it removes *all* Sample-DP
++    mechanisms.  In particular, using ``privacy_unit='client'`` here selects
++    the ordinary clean optimizer path instead of per-sample clipping with
++    sigma=0, so clipping distortion remains part of D = u_private - u_clean.
++    """
++    clean = dict(private_payload)
++    clean["privacy_unit"] = "client"
++    clean["mechanisms"] = {
++        key: "none"
++        for key in ("emb", "logits", "grad", "emb_grad", "upd")
++    }
++    clean["sample_embedding_noise_multiplier"] = None
++    clean["sample_label_grad_noise_multiplier"] = None
++    clean["sample_optimizer_noise_multiplier"] = None
++    clean["dp_update_mode"] = "off"
++    # No DP RNG is consumed on the clean path, but retain a deterministic seed
++    # for reproducibility and to make serialized payloads self describing.
++    clean["dp_seed"] = int(private_payload.get("dp_seed", 1))
++    return clean
++
++
++def _run_paired_calibration_payload(
++    private_payload: dict[str, Any],
++    *,
++    trials: int,
++    base_seed: int,
++    round_idx: int,
++    client_id: int,
++    mode: str,
++    model_cache: dict[str, Any] | None = None,
++) -> tuple[dict[str, dict[str, torch.Tensor]], list[dict[str, dict[str, torch.Tensor]]]]:
++    """Execute one clean trajectory and M matched private trajectories."""
++    if int(trials) < 1:
++        raise ValueError("paired calibration trials must be positive")
++
++    # Re-seeding happens inside _client_train_worker from training_seed.  The
++    # clean run and every private trial therefore receive the same minibatch
++    # order/common training randomness; only dp_seed changes across trials.
++    clean_result = _client_train_worker(
++        _clean_calibration_payload(private_payload),
++        model_cache=model_cache,
++    )
++    if not clean_result["finite"]:
++        raise RuntimeError(
++            f"non-finite clean calibration trajectory for client={client_id} mode={mode}"
++        )
++    clean_update = clean_result["state_diff"]
++
++    private_updates: list[dict[str, dict[str, torch.Tensor]]] = []
++    for trial in range(int(trials)):
++        payload = dict(private_payload)
++        payload["dp_seed"] = _dp_noise_seed(
++            base_seed,
++            round_idx,
++            ["joint_calibration", int(client_id), str(mode), int(trial)],
++        )
++        result = _client_train_worker(payload, model_cache=model_cache)
++        if not result["finite"]:
++            raise RuntimeError(
++                "non-finite private calibration trajectory for "
++                f"client={client_id} mode={mode} trial={trial}"
++            )
++        private_updates.append(result["state_diff"])
++    return clean_update, private_updates
++
++
++def _calibration_reference_update(
++    *,
++    global_end: torch.nn.Module,
++    global_edge: torch.nn.Module,
++    x: np.ndarray,
++    y: np.ndarray,
++    device: torch.device,
++    input_shape: tuple[int, int, int],
++    learning_rate: float,
++    batch_size: int = 128,
++) -> dict[str, dict[str, torch.Tensor]]:
++    """Compute Delta_* = -eta grad F on the held-out calibration workload.
++
++    Temporary model copies are used so BatchNorm buffers or gradients cannot
++    mutate the actual training state.  The objective is the mean cross-entropy
++    over exactly the supplied calibration samples.
++    """
++    if len(x) == 0:
++        raise ValueError("cannot compute calibration reference update on an empty workload")
++
++    end = copy.deepcopy(global_end).to(device)
++    edge = copy.deepcopy(global_edge).to(device)
++    end.train()
++    edge.train()
++    for model in (end, edge):
++        for parameter in model.parameters():
++            if parameter.grad is not None:
++                parameter.grad = None
++
++    total = int(len(x))
++    step = max(1, int(batch_size))
++    for start in range(0, total, step):
++        stop = min(start + step, total)
++        bx = torch.from_numpy(x[start:stop]).float().to(device).view(-1, *input_shape)
++        by = torch.from_numpy(y[start:stop]).long().to(device)
++        logits = edge(end(bx))
++        # Sum / total makes accumulated batch gradients equal the gradient of
++        # the mean loss over the whole calibration workload.
++        loss = torch.nn.functional.cross_entropy(logits, by, reduction="sum") / float(total)
++        loss.backward()
++
++    ideal: dict[str, dict[str, torch.Tensor]] = {"end": {}, "edge": {}}
++    for part_name, model in (("end", end), ("edge", edge)):
++        for name, parameter in model.named_parameters():
++            if not parameter.requires_grad:
++                continue
++            grad = parameter.grad
++            if grad is None:
++                update = torch.zeros_like(parameter, device="cpu")
++            else:
++                update = (-float(learning_rate) * grad.detach()).to(device="cpu")
++            ideal[part_name][name] = update.clone()
++    return ideal
++
++
++def _joint_calibration_capture_candidates(
++    selected: list[tuple[int, Candidate, list[Candidate], float]],
++    *,
++    scope: str,
++) -> list[tuple[int, Candidate]]:
++    """Return deterministic client/mode cells for an offline capture round."""
++    cells: list[tuple[int, Candidate]] = []
++    for client_id, chosen, candidates, _remaining in selected:
++        if scope == "selected":
++            if chosen.mode != "SKIP":
++                cells.append((int(client_id), chosen))
++            continue
++
++        by_mode: dict[str, Candidate] = {}
++        for candidate in candidates:
++            if candidate.mode == "SKIP" or not candidate.feasible:
++                continue
++            current = by_mode.get(candidate.mode)
++            if current is None or (
++                float(candidate.epsilon_used),
++                float(candidate.time),
++                float(candidate.risk),
++            ) < (
++                float(current.epsilon_used),
++                float(current.time),
++                float(current.risk),
++            ):
++                by_mode[candidate.mode] = candidate
++        cells.extend(
++            (int(client_id), by_mode[mode])
++            for mode in sorted(by_mode)
++        )
++    return cells
++
++
++def _capture_joint_calibration_round(
++    *,
++    session: JointCalibrationCaptureSession,
++    selected: list[tuple[int, Candidate, list[Candidate], float]],
++    train_config: Lenet5Config,
++    selection: SelectionConfig,
++    global_end: torch.nn.Module,
++    global_edge: torch.nn.Module,
++    client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]],
++    train_client_indices: list[np.ndarray],
++    client_test_indices: list[np.ndarray],
++    x_train: np.ndarray,
++    y_train: np.ndarray,
++    device: torch.device,
++    model_name: str,
++    input_shape: tuple[int, int, int],
++    num_classes: int,
++    round_idx: int,
++) -> dict[str, Any]:
++    """Capture matched pairs at the *start* of a round on held-out data.
++
++    This path is deliberately opt-in and expensive.  It is for a dedicated
++    calibration pass, not for every online decision in a formal training run.
++    """
++    scope = str(train_config.joint_calibration_capture_scope)
++    cells = _joint_calibration_capture_candidates(selected, scope=scope)
++    if not cells:
++        return {"captured_pairs": 0, "captured_cells": 0, "captured_clients": 0}
++
++    unique_clients = sorted({client_id for client_id, _candidate in cells})
++    max_clients = train_config.joint_calibration_capture_max_clients
++    if max_clients is not None and len(unique_clients) > int(max_clients):
++        chooser = np.random.default_rng(
++            _dp_noise_seed(selection.seed, round_idx, "joint_calibration_clients")
++        )
++        chosen_clients = set(
++            int(value)
++            for value in chooser.choice(
++                np.asarray(unique_clients, dtype=np.int64),
++                size=int(max_clients),
++                replace=False,
++            ).tolist()
++        )
++        cells = [item for item in cells if item[0] in chosen_clients]
++        unique_clients = sorted(chosen_clients)
++
++    # Fix one held-out *pool* per client for all modes/trials in this round,
++    # then resample that pool with replacement to the client's real training
++    # sample count.  This preserves the runtime minibatch/optimizer-step count
++    # K_i while keeping calibration samples disjoint from the client's training
++    # subset.  ``sample_limit`` limits unique held-out examples, not trajectory
++    # length.
++    sample_limit = train_config.joint_calibration_capture_sample_limit
++    calibration_workloads: dict[int, tuple[np.ndarray, np.ndarray]] = {}
++    for client_id in unique_clients:
++        pool_indices = np.asarray(client_test_indices[client_id], dtype=np.int64)
++        if len(pool_indices) == 0:
++            continue
++        chooser = np.random.default_rng(
++            _dp_noise_seed(
++                selection.seed,
++                round_idx,
++                ["joint_calibration_data", int(client_id)],
++            )
++        )
++        if sample_limit is not None and len(pool_indices) > int(sample_limit):
++            pool_indices = np.sort(
++                chooser.choice(pool_indices, size=int(sample_limit), replace=False)
++            )
++        target_count = max(1, int(len(train_client_indices[client_id])))
++        sampled_indices = chooser.choice(
++            pool_indices,
++            size=target_count,
++            replace=(target_count > len(pool_indices)),
++        )
++        calibration_workloads[client_id] = (
++            x_train[np.asarray(sampled_indices, dtype=np.int64)],
++            y_train[np.asarray(sampled_indices, dtype=np.int64)],
++        )
++
++    cells = [item for item in cells if item[0] in calibration_workloads]
++    if not cells:
++        return {"captured_pairs": 0, "captured_cells": 0, "captured_clients": 0}
++
++    privacy_parameters = resolved_privacy_parameters(selection)
++    state_key = f"round:{int(round_idx)}"
++    model_cache: dict[str, Any] = {}
++    captured_pairs = 0
++    captured_cells = 0
++
++    for client_id, candidate in cells:
++        calibration_x, calibration_y = calibration_workloads[client_id]
++        returned_state = _training_base_state(
++            client_id=client_id,
++            candidate=candidate,
++            client_model_states=client_model_states,
++            global_end=global_end,
++            global_edge=global_edge,
++            device=torch.device("cpu"),
++            training_stage=0,
++            mainline_fusion=selection.mainline_fusion,
++        )
++        payload = {
++            "client_id": client_id,
++            "mode": candidate.mode,
++            "global_end_state": _state_dict_to_device(returned_state["end"], device),
++            "global_edge_state": _state_dict_to_device(returned_state["edge"], device),
++            "x": calibration_x,
++            "y": calibration_y,
++            "epochs": _client_epoch_count(train_config, selection, candidate),
++            "lr": train_config.learning_rate,
++            "l2": train_config.l2,
++            "local_steps": _client_step_limit(selection),
++            "model_name": model_name,
++            "input_shape": input_shape,
++            "num_classes": num_classes,
++            "mechanisms": _candidate_training_mechanisms(
++                candidate,
++                aggregate_cloud_update_dp=True,
++            ),
++            "privacy_unit": selection.privacy_unit,
++            "sample_embedding_noise_multiplier": candidate.sample_embedding_noise_multiplier,
++            "sample_label_grad_noise_multiplier": candidate.sample_label_grad_noise_multiplier,
++            "sample_optimizer_noise_multiplier": candidate.sample_optimizer_noise_multiplier,
++            "sample_optimizer_clip_norm": _sample_optimizer_clip_norm(train_config),
++            "dp_clip_norm": train_config.dp_clip_norm,
++            "dp_feature_clip_norm": _feature_clip_norm(train_config),
++            "dp_update_clip_norm": _update_clip_norm(train_config),
++            "dp_feature_noise_multiplier": privacy_parameters["feature_noise_multiplier"],
++            "dp_update_noise_multiplier": float(
++                candidate.update_noise_multiplier
++                if candidate.update_noise_multiplier is not None
++                else privacy_parameters["update_noise_multiplier"]
++            ),
++            "dp_update_mode": train_config.dp_update_mode,
++            "dp_epsilon": max(selection.dp_emb_epsilon, 1e-6),
++            "dp_seed": _dp_noise_seed(
++                selection.seed,
++                round_idx,
++                ["joint_calibration_base", int(client_id), str(candidate.mode)],
++            ),
++            "training_seed": _client_training_seed(
++                selection.seed,
++                round_idx,
++                client_id,
++                0,
++            ),
++            "device": str(device),
++        }
++
++        clean_update, private_updates = _run_paired_calibration_payload(
++            payload,
++            trials=int(train_config.joint_calibration_capture_trials),
++            base_seed=selection.seed,
++            round_idx=round_idx,
++            client_id=client_id,
++            mode=candidate.mode,
++            model_cache=model_cache,
++        )
++        for private_update in private_updates:
++            session.add_pair(
++                state_key=state_key,
++                mode=candidate.mode,
++                client_id=client_id,
++                clean_update=clean_update,
++                private_update=private_update,
++            )
++            captured_pairs += 1
++        captured_cells += 1
++
++    # Use the same resampled calibration workloads as the paired trajectories
++    # for Delta_*.  This preserves both client sample-mass weighting and the
++    # effective step-count distribution used by the clean/private paths.
++    reference_x = np.concatenate(
++        [calibration_workloads[client_id][0] for client_id in unique_clients
++         if client_id in calibration_workloads],
++        axis=0,
++    ) if calibration_workloads else np.asarray([], dtype=x_train.dtype)
++    reference_y = np.concatenate(
++        [calibration_workloads[client_id][1] for client_id in unique_clients
++         if client_id in calibration_workloads],
++        axis=0,
++    ) if calibration_workloads else np.asarray([], dtype=y_train.dtype)
++    if len(reference_x) > 0:
++        ideal_update = _calibration_reference_update(
++            global_end=global_end,
++            global_edge=global_edge,
++            x=reference_x,
++            y=reference_y,
++            device=device,
++            input_shape=input_shape,
++            learning_rate=train_config.learning_rate,
++        )
++        # Materialize through the same deterministic flattening convention used
++        # by selector table entries; this also fails early on dimension drift.
++        session.set_ideal_update(as_update_vector(ideal_update), state_key=state_key)
++
++    return {
++        "captured_pairs": int(captured_pairs),
++        "captured_cells": int(captured_cells),
++        "captured_clients": int(len({client_id for client_id, _ in cells})),
++        "state_key": state_key,
++    }
++
++
+ def _synchronize_device_for_timing(
+     device: torch.device | str,
+ ) -> None:
+@@ -556,6 +933,34 @@ def run_fmnist_lenet5_training(
+ ) -> dict[str, Any]:
+     if max_new_rounds is not None and max_new_rounds < 1:
+         raise ValueError("max_new_rounds must be positive")
++    capture_enabled = bool(train_config.joint_calibration_capture_path)
++    if capture_enabled:
++        if selection.privacy_unit != "sample":
++            raise ValueError("joint calibration capture requires privacy_unit='sample'")
++        if int(train_config.joint_calibration_capture_trials) < 2:
++            raise ValueError("joint calibration capture requires at least 2 private trials per cell")
++        if int(train_config.joint_calibration_capture_period) < 1:
++            raise ValueError("joint calibration capture period must be positive")
++        if (
++            train_config.joint_calibration_capture_max_clients is not None
++            and int(train_config.joint_calibration_capture_max_clients) < 1
++        ):
++            raise ValueError("joint calibration capture max clients must be positive or None")
++        if (
++            train_config.joint_calibration_capture_sample_limit is not None
++            and int(train_config.joint_calibration_capture_sample_limit) < 1
++        ):
++            raise ValueError("joint calibration capture sample limit must be positive or None")
++        if train_config.joint_calibration_capture_scope not in {"selected", "candidate_modes"}:
++            raise ValueError("joint calibration capture scope must be 'selected' or 'candidate_modes'")
++        if len(policies) != 1:
++            raise ValueError(
++                "joint calibration capture is a dedicated offline pass and requires exactly one policy"
++            )
++        if resume_from_run is not None:
++            raise ValueError(
++                "joint calibration capture does not currently support resume; start a dedicated fresh pass"
++            )
+     if not (0.0 < train_config.server_step <= 1.0):
+         raise ValueError("server_step must be in (0, 1]")
+     for policy in policies:
+@@ -1088,6 +1493,7 @@ def _run_lenet5_policy(
+             "pareto_selection": 0.35,
+             "accuracy_oracle_selection": 0.35,
+             "global_objective_selection": 0.35,
++            "calibration_capture": 0.43,
+             "client_training": 0.50,
+             "flow_execution": 0.68,
+             "aggregation": 0.78,
+@@ -1133,14 +1539,23 @@ def _run_lenet5_policy(
+             "Real HE execution was required, but it is not enabled or unavailable: "
+             f"{he_status.detail}"
+         )
+-    if policy == "fixed_he" and not real_he_available:
++    calibration_profiled_he = bool(
++        train_config.joint_calibration_capture_path
++        and train_config.he_execution == "profiled"
++    )
++    if policy == "fixed_he" and not real_he_available and not calibration_profiled_he:
+         raise RuntimeError(
+             "Policy fixed_he requires a supported CKKS backend for real encrypted aggregation, "
+             f"but it is unavailable: {he_status.detail}"
+         )
++    # A dedicated calibration pass estimates local clean/private learning
++    # trajectories; CKKS execution does not change those trajectories.  When
++    # HE is explicitly profiled for that auxiliary pass, keep HE-protected
++    # collaboration modes enumerable even on a machine without a CKKS backend.
++    # Formal training keeps the historical real-backend availability rule.
+     effective_selection = replace(
+         selection,
+-        allow_he=real_he_available,
++        allow_he=(real_he_available or calibration_profiled_he),
+         omega_feature_clip_norm=_feature_clip_norm(train_config),
+         omega_update_clip_norm=_update_clip_norm(train_config),
+     )
+@@ -1264,6 +1679,33 @@ def _run_lenet5_policy(
+     client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
+     previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
+ 
++    calibration_capture_path: Path | None = None
++    calibration_capture_session: JointCalibrationCaptureSession | None = None
++    calibration_capture_rows: list[dict[str, Any]] = []
++    if train_config.joint_calibration_capture_path:
++        calibration_capture_path = Path(train_config.joint_calibration_capture_path).expanduser()
++        if not calibration_capture_path.is_absolute():
++            calibration_capture_path = (ROOT / calibration_capture_path).resolve()
++        calibration_capture_session = JointCalibrationCaptureSession(
++            metadata={
++                "source": "runtime_heldout_validation_capture",
++                "policy": policy,
++                "seed": int(selection.seed),
++                "dataset": str(dataset_label),
++                "model": str(model_name),
++                "privacy_unit": str(effective_selection.privacy_unit),
++                "scope": str(train_config.joint_calibration_capture_scope),
++                "trials_per_cell": int(train_config.joint_calibration_capture_trials),
++                "capture_period": int(train_config.joint_calibration_capture_period),
++                "calibration_workload": (
++                    "per-client held-out validation pool, resampled to match each client's "
++                    "training sample/step count; use an externally public workload for formal "
++                    "no-extra-leakage claims"
++                ),
++            },
++            include_mode_fallback=True,
++        )
++
+     checkpoint_path = output_dir / "checkpoint.pt"
+     if resume_from_policy_dir is not None:
+         checkpoint = _load_policy_checkpoint(resume_from_policy_dir, device)
+@@ -2205,6 +2647,61 @@ def _run_lenet5_policy(
+             train_tasks.append((client_id, candidate, idx, dispatch_sequence))
+             dispatch_sequence += 1
+ 
++        calibration_capture_stats: dict[str, Any] = {
++            "captured_pairs": 0,
++            "captured_cells": 0,
++            "captured_clients": 0,
++        }
++        if (
++            calibration_capture_session is not None
++            and calibration_capture_path is not None
++            and round_idx % int(train_config.joint_calibration_capture_period) == 0
++        ):
++            emit_stage_status(
++                f"Round {round_idx + 1}/{selection.rounds}: capturing matched clean/private calibration trajectories",
++                stage="calibration_capture",
++                round_value=round_idx,
++            )
++            calibration_started_at = time.perf_counter()
++            calibration_capture_stats = _capture_joint_calibration_round(
++                session=calibration_capture_session,
++                selected=selected,
++                train_config=train_config,
++                selection=effective_selection,
++                global_end=global_end,
++                global_edge=global_edge,
++                client_model_states=client_model_states,
++                train_client_indices=train_client_indices,
++                client_test_indices=client_test_indices,
++                x_train=x_train,
++                y_train=y_train,
++                device=device,
++                model_name=model_name,
++                input_shape=input_shape,
++                num_classes=num_classes,
++                round_idx=round_idx,
++            )
++            calibration_capture_stats["wall_time_sec"] = (
++                time.perf_counter() - calibration_started_at
++            )
++            calibration_capture_rows.append(
++                {"round": int(round_idx), **calibration_capture_stats}
++            )
++            calibration_table = calibration_capture_session.build_table(min_trials=2)
++            calibration_table.save(calibration_capture_path)
++            _write_json(
++                calibration_capture_path.with_suffix(".capture.json"),
++                {
++                    "table": str(calibration_capture_path),
++                    "entry_count": int(calibration_table.entry_count),
++                    "pair_count": int(calibration_capture_session.pair_count),
++                    "capture_rows": calibration_capture_rows,
++                    "note": (
++                        "Capture is offline/periodic calibration work. Online selector runs only load the saved table."
++                    ),
++                },
++            )
++
+         _synchronize_device_for_timing(device)
+         training_wall_started_at = time.perf_counter()
+         emit_stage_status(
+@@ -3766,8 +4263,12 @@ def _run_lenet5_policy(
+             float(row.get("selection_wall_time_sec", 0.0)) for row in round_rows
+         ) + selection_wall_time_sec
+         accounted_system_time_sec = logical_time + cumulative_selection_wall_time_sec
++        calibration_capture_wall_time_sec = float(
++            calibration_capture_stats.get("wall_time_sec", 0.0)
++        )
+         accounted_phase_wall_time_sec = (
+             selection_wall_time_sec
++            + calibration_capture_wall_time_sec
+             + training_wall_time_sec
+             + flow_wall_time_sec
+             + aggregation_wall_time_sec
+@@ -3900,6 +4401,10 @@ def _run_lenet5_policy(
+                     "cloud_dp_branch_performance", {}
+                 ).get("aggregate", {}).get("branch_wall_sec", 0.0),
+                 "training_wall_time_sec": training_wall_time_sec,
++                "joint_calibration_capture_wall_time_sec": calibration_capture_wall_time_sec,
++                "joint_calibration_captured_pairs": int(calibration_capture_stats.get("captured_pairs", 0)),
++                "joint_calibration_captured_cells": int(calibration_capture_stats.get("captured_cells", 0)),
++                "joint_calibration_captured_clients": int(calibration_capture_stats.get("captured_clients", 0)),
+                 "actual_local_batches": sum(r.get("actual_local_batches", 0) for r in worker_results.values()),
+                 "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
+                 "feature_dp_release_batches": sum(r.get("feature_dp_release_batches", 0) for r in worker_results.values()),
+@@ -7996,6 +8501,12 @@ def _summarize_lenet5_policy(
+         "total_round_wall_time_sec": sum(row.get("round_wall_time_sec", 0.0) for row in round_rows),
+         "total_selection_wall_time_sec": sum(row.get("selection_wall_time_sec", 0.0) for row in round_rows),
+         "total_training_wall_time_sec": sum(row.get("training_wall_time_sec", 0.0) for row in round_rows),
++        "total_joint_calibration_capture_wall_time_sec": sum(
++            row.get("joint_calibration_capture_wall_time_sec", 0.0) for row in round_rows
++        ),
++        "total_joint_calibration_captured_pairs": sum(
++            row.get("joint_calibration_captured_pairs", 0) for row in round_rows
++        ),
+         "total_flow_wall_time_sec": sum(row.get("flow_wall_time_sec", 0.0) for row in round_rows),
+         "total_aggregation_wall_time_sec": sum(row.get("aggregation_wall_time_sec", 0.0) for row in round_rows),
+         "total_evaluation_wall_time_sec": sum(row.get("evaluation_wall_time_sec", 0.0) for row in round_rows),
+diff --git a/dynfed/joint_calibration.py b/dynfed/joint_calibration.py
+index b95d52f..2e229a4 100644
+--- a/dynfed/joint_calibration.py
++++ b/dynfed/joint_calibration.py
+@@ -137,6 +137,164 @@ class PairedUpdateMomentAccumulator:
+         )
+ 
+ 
++class JointCalibrationCaptureSession:
++    """Accumulate matched trajectory pairs and materialize a selector table.
++
++    The session is intended for an *offline or periodic calibration pass*.  It
++    never participates in online mode selection.  Each observation is one
++    paired nonlinear trajectory sample with shared initial state / minibatch
++    schedule and independent DP randomness.
++
++    When ``include_mode_fallback`` is true, client-specific moment estimates
++    are combined into a mode-level fallback cell.  The fallback bias/clean mean
++    are weighted client means, while its variance trace is the weighted mean of
++    *within-client* DP-RNG variance traces (not a pooled variance that would
++    incorrectly absorb between-client bias heterogeneity).
++    """
++
++    def __init__(
++        self,
++        *,
++        metadata: Mapping[str, Any] | None = None,
++        include_mode_fallback: bool = True,
++    ) -> None:
++        self.metadata: dict[str, Any] = dict(metadata or {})
++        self.include_mode_fallback = bool(include_mode_fallback)
++        self._accumulators: dict[
++            tuple[str, str, int | None], PairedUpdateMomentAccumulator
++        ] = {}
++        self._ideal_updates: dict[str, torch.Tensor] = {}
++
++    def add_pair(
++        self,
++        *,
++        state_key: str,
++        mode: str,
++        clean_update: Any,
++        private_update: Any,
++        client_id: int | None,
++    ) -> None:
++        state = JointUpdateCalibrationTable._normalize_state_key(state_key)
++        normalized_client = None if client_id is None else int(client_id)
++        key = (state, str(mode), normalized_client)
++        self._accumulators.setdefault(
++            key, PairedUpdateMomentAccumulator()
++        ).update(clean_update, private_update)
++
++    def set_ideal_update(self, update: Any, *, state_key: str) -> None:
++        state = JointUpdateCalibrationTable._normalize_state_key(state_key)
++        self._ideal_updates[state] = as_update_vector(update).clone()
++
++    @property
++    def pair_count(self) -> int:
++        return sum(
++            accumulator.count
++            for (state, mode, client_id), accumulator in self._accumulators.items()
++            if client_id is not None
++        )
++
++    @property
++    def cell_count(self) -> int:
++        return len(self._accumulators)
++
++    def build_table(self, *, min_trials: int = 1) -> "JointUpdateCalibrationTable":
++        if int(min_trials) < 1:
++            raise ValueError("min_trials must be positive")
++        table = JointUpdateCalibrationTable(
++            metadata={
++                **self.metadata,
++                "capture_pair_count": int(self.pair_count),
++                "mode_fallback_is_population_proxy": bool(
++                    self.include_mode_fallback
++                ),
++                "mode_fallback_variance_semantics": (
++                    "weighted_mean_of_within_client_variance_traces"
++                    if self.include_mode_fallback
++                    else "disabled"
++                ),
++            }
++        )
++
++        finalized: dict[
++            tuple[str, str, int | None], JointCalibrationEntry
++        ] = {}
++        for key, accumulator in self._accumulators.items():
++            if accumulator.count >= int(min_trials):
++                finalized[key] = accumulator.finalize()
++
++        for (state, mode, client_id), entry in sorted(
++            finalized.items(),
++            key=lambda item: (
++                item[0][0],
++                item[0][1],
++                -1 if item[0][2] is None else item[0][2],
++            ),
++        ):
++            table.add_entry(
++                state_key=state,
++                mode=mode,
++                client_id=client_id,
++                entry=entry,
++            )
++
++        # Build mode-level fallback cells from already-estimated *within-client*
++        # moments.  Do not pool raw D samples across clients: that would add
++        # between-client bias heterogeneity to Tr(V_i), which is not the
++        # conditional DP-RNG variance used by the selector formula.
++        if self.include_mode_fallback:
++            grouped: dict[tuple[str, str], list[JointCalibrationEntry]] = {}
++            for (state, mode, client_id), entry in finalized.items():
++                if client_id is None:
++                    continue
++                grouped.setdefault((state, mode), []).append(entry)
++            for (state, mode), entries in grouped.items():
++                if (state, mode, None) in finalized:
++                    continue
++                total_weight = float(sum(entry.sample_count for entry in entries))
++                if total_weight <= 0.0:
++                    continue
++                dimension = entries[0].clean_update_mean.numel()
++                if any(entry.clean_update_mean.numel() != dimension for entry in entries):
++                    raise ValueError(
++                        "cannot build a mode fallback from calibration entries with different dimensions"
++                    )
++                clean = sum(
++                    entry.clean_update_mean * (float(entry.sample_count) / total_weight)
++                    for entry in entries
++                )
++                bias = sum(
++                    entry.bias_mean * (float(entry.sample_count) / total_weight)
++                    for entry in entries
++                )
++                variance_trace = sum(
++                    float(entry.variance_trace) * (float(entry.sample_count) / total_weight)
++                    for entry in entries
++                )
++                table.add_entry(
++                    state_key=state,
++                    mode=mode,
++                    client_id=None,
++                    entry=JointCalibrationEntry(
++                        clean_update_mean=clean,
++                        bias_mean=bias,
++                        variance_trace=variance_trace,
++                        sample_count=int(total_weight),
++                    ),
++                )
++
++        for state, update in self._ideal_updates.items():
++            table.set_ideal_update(update, state_key=state)
++        return table
++
++    def save(
++        self,
++        path: str | Path,
++        *,
++        min_trials: int = 1,
++    ) -> Path:
++        return self.build_table(min_trials=min_trials).save(path)
++
++
+ class JointUpdateCalibrationTable:
+     """State-conditioned empirical proxy table used by the online selector.
+ 
+diff --git a/experiments/run_fmnist_lenet5.py b/experiments/run_fmnist_lenet5.py
+index fa014b5..f589b70 100644
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -192,6 +192,47 @@ def parse_args() -> argparse.Namespace:
+         choices=["error", "legacy"],
+         help="Whether missing calibration data is fatal or falls back to the retired legacy objective.",
+     )
++    parser.add_argument(
++        "--joint-calibration-capture-path",
++        default=None,
++        help=(
++            "Opt-in offline/periodic matched clean/private capture output (.pt). "
++            "This is calibration work, not an online selector input measurement."
++        ),
++    )
++    parser.add_argument(
++        "--joint-calibration-capture-trials",
++        type=int,
++        default=0,
++        help="Private DP-RNG trials per captured (round, client, mode) cell; use >=2 when capture is enabled.",
++    )
++    parser.add_argument(
++        "--joint-calibration-capture-period",
++        type=int,
++        default=10,
++        help="Capture every N rounds in a dedicated calibration pass.",
++    )
++    parser.add_argument(
++        "--joint-calibration-capture-max-clients",
++        type=int,
++        default=8,
++        help="Maximum held-out clients sampled per capture round; 0 means all clients.",
++    )
++    parser.add_argument(
++        "--joint-calibration-capture-sample-limit",
++        type=int,
++        default=64,
++        help="Maximum held-out calibration samples per sampled client; 0 means all held-out samples.",
++    )
++    parser.add_argument(
++        "--joint-calibration-capture-scope",
++        default="candidate_modes",
++        choices=["selected", "candidate_modes"],
++        help=(
++            "selected captures only the chosen mode; candidate_modes captures one feasible Sample-DP "
++            "candidate for every available mode of each sampled client."
++        ),
++    )
+     parser.add_argument("--dp-delta", type=float, default=1e-5)
+     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
+     parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate", "global_release"])
+@@ -517,6 +558,18 @@ def main() -> None:
+         he_workers=max(1, args.he_workers),
+         executor=args.executor,
+         executor_workers=args.executor_workers,
++        joint_calibration_capture_path=args.joint_calibration_capture_path,
++        joint_calibration_capture_trials=args.joint_calibration_capture_trials,
++        joint_calibration_capture_period=args.joint_calibration_capture_period,
++        joint_calibration_capture_max_clients=(
++            None if args.joint_calibration_capture_max_clients == 0
++            else args.joint_calibration_capture_max_clients
++        ),
++        joint_calibration_capture_sample_limit=(
++            None if args.joint_calibration_capture_sample_limit == 0
++            else args.joint_calibration_capture_sample_limit
++        ),
++        joint_calibration_capture_scope=args.joint_calibration_capture_scope,
+     )
+ 
+     result = run_fmnist_lenet5_training(
+diff --git a/experiments/run_joint_calibration_capture.py b/experiments/run_joint_calibration_capture.py
+new file mode 100644
+index 0000000..643c660
+--- /dev/null
++++ b/experiments/run_joint_calibration_capture.py
+@@ -0,0 +1,118 @@
++from __future__ import annotations
++
++"""Run a dedicated matched clean/private calibration pass.
++
++This wrapper intentionally does *not* call the formal paper-config validator:
++calibration is auxiliary offline work and uses exactly one bootstrap policy.
++The resulting table can later be consumed by the formal joint-calibration
++selector.  By default HE execution is profiled because cryptographic runtime is
++irrelevant to the local nonlinear trajectory moments being estimated.
++"""
++
++import argparse
++import copy
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++from experiments.run_paper_config import build_command
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(
++        description="Capture DynFL matched clean/private Sample-DP trajectories into a calibration table."
++    )
++    parser.add_argument("--config", type=Path, required=True, help="Base paper JSON used for model/system/privacy settings.")
++    parser.add_argument("--output", type=Path, required=True, help="Output joint calibration .pt table.")
++    parser.add_argument("--seed", type=int, default=None)
++    parser.add_argument("--policy", default="full_dynfl")
++    parser.add_argument("--rounds", type=int, default=None)
++    parser.add_argument("--trials", type=int, default=5)
++    parser.add_argument("--period", type=int, default=10)
++    parser.add_argument("--max-clients", type=int, default=8, help="0 means all clients.")
++    parser.add_argument("--sample-limit", type=int, default=64, help="0 means all held-out samples per sampled client.")
++    parser.add_argument("--scope", choices=["selected", "candidate_modes"], default="candidate_modes")
++    parser.add_argument(
++        "--real-he",
++        action="store_true",
++        help="Execute real HE during the calibration pass. Default is profiled HE because calibration targets learning trajectories, not HE timing.",
++    )
++    parser.add_argument("--dry-run", action="store_true")
++    return parser.parse_args()
++
++
++def build_capture_command(args: argparse.Namespace) -> tuple[list[str], dict]:
++    config_path = args.config.resolve()
++    config = json.loads(config_path.read_text(encoding="utf-8"))
++    if str(config.get("privacy", {}).get("unit", "sample")).strip().lower() != "sample":
++        raise ValueError("joint calibration capture is Sample-DP only")
++    if int(args.trials) < 2:
++        raise ValueError("--trials must be at least 2")
++    if int(args.period) < 1:
++        raise ValueError("--period must be positive")
++    if int(args.max_clients) < 0 or int(args.sample_limit) < 0:
++        raise ValueError("--max-clients and --sample-limit must be non-negative")
++
++    capture_config = copy.deepcopy(config)
++    capture_config["policies"] = [str(args.policy)]
++    capture_config["seeds"] = [
++        int(args.seed) if args.seed is not None else int(config.get("seeds", [0])[0])
++    ]
++    capture_config["output_root"] = str(
++        ROOT / "out" / "joint_calibration_capture" / config_path.stem
++    )
++    capture_config.setdefault("learning", {})
++    # Bootstrap selection must not depend on the table it is trying to create.
++    capture_config["learning"] = {
++        "objective": "legacy_fusion_dp",
++        "state_key": "default",
++        "e_alg_policy": "zero",
++        "missing_policy": "legacy",
++    }
++    capture_config["calibration_capture"] = {
++        "output_path": str(args.output.resolve()),
++        "trials": int(args.trials),
++        "period": int(args.period),
++        "max_clients": int(args.max_clients),
++        "sample_limit": int(args.sample_limit),
++        "scope": str(args.scope),
++    }
++    if not args.real_he:
++        capture_config.setdefault("he", {})
++        capture_config["he"]["execution"] = "profiled"
++        capture_config["he"]["require_real_he"] = False
++
++    seed = int(capture_config["seeds"][0])
++    command = build_command(
++        capture_config,
++        seed=seed,
++        policies=[str(args.policy)],
++        rounds=(int(args.rounds) if args.rounds is not None else None),
++    )
++    return command, capture_config
++
++
++def main() -> None:
++    args = parse_args()
++    command, capture_config = build_capture_command(args)
++    print(json.dumps({
++        "capture_output": str(args.output.resolve()),
++        "policy": capture_config["policies"][0],
++        "seed": capture_config["seeds"][0],
++        "scope": capture_config["calibration_capture"]["scope"],
++        "trials": capture_config["calibration_capture"]["trials"],
++        "period": capture_config["calibration_capture"]["period"],
++        "he_execution": capture_config["he"].get("execution", "real"),
++    }, indent=2), flush=True)
++    print(subprocess.list2cmdline(command), flush=True)
++    if not args.dry_run:
++        subprocess.run(command, cwd=ROOT, check=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index 5a0cf7d..71332e9 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -114,6 +114,7 @@ def build_command(
+     he = config["he"]
+     optimization = config["optimization"]
+     learning = config.get("learning", {})
++    calibration_capture = config.get("calibration_capture", {})
+     network = config["network"]
+ 
+     command = [sys.executable, str(ROOT / "experiments" / "run_fmnist_lenet5.py")]
+@@ -196,6 +197,12 @@ def build_command(
+         "joint_calibration_state_key": learning.get("state_key", "default"),
+         "joint_calibration_e_alg_policy": learning.get("e_alg_policy", "table"),
+         "joint_calibration_missing_policy": learning.get("missing_policy", "error"),
++        "joint_calibration_capture_path": calibration_capture.get("output_path"),
++        "joint_calibration_capture_trials": calibration_capture.get("trials", 0),
++        "joint_calibration_capture_period": calibration_capture.get("period", 10),
++        "joint_calibration_capture_max_clients": calibration_capture.get("max_clients", 8),
++        "joint_calibration_capture_sample_limit": calibration_capture.get("sample_limit", 64),
++        "joint_calibration_capture_scope": calibration_capture.get("scope", "candidate_modes"),
+         "seed": seed,
+         "output_root": config["output_root"],
+     }
+diff --git a/tests/test_joint_calibration_capture.py b/tests/test_joint_calibration_capture.py
+new file mode 100644
+index 0000000..80a5512
+--- /dev/null
++++ b/tests/test_joint_calibration_capture.py
+@@ -0,0 +1,263 @@
++from __future__ import annotations
++
++import copy
++
++import numpy as np
++import torch
++
++import dynfed.fmnist_lenet5_dynamic as dynamic
++from dynfed.joint_calibration import JointCalibrationCaptureSession
++
++
++def _nested(value: float):
++    return {
++        "end": {"w": torch.tensor([value], dtype=torch.float32)},
++        "edge": {},
++    }
++
++
++def test_capture_session_builds_client_and_mode_fallback_cells(tmp_path):
++    session = JointCalibrationCaptureSession(
++        metadata={"cross_client_rng": "conditionally_independent"},
++        include_mode_fallback=True,
++    )
++    clean = _nested(1.0)
++    session.add_pair(
++        state_key="round:0",
++        mode="LIIC",
++        client_id=3,
++        clean_update=clean,
++        private_update=_nested(1.2),
++    )
++    session.add_pair(
++        state_key="round:0",
++        mode="LIIC",
++        client_id=3,
++        clean_update=clean,
++        private_update=_nested(0.8),
++    )
++    session.set_ideal_update(_nested(-0.1), state_key="round:0")
++
++    table = session.build_table(min_trials=2)
++    exact = table.lookup(mode="LIIC", state_key="round:0", client_id=3)
++    fallback = table.lookup(mode="LIIC", state_key="round:0", client_id=99)
++    assert exact.sample_count == 2
++    assert fallback.sample_count == 2
++    assert torch.allclose(exact.bias_mean, torch.tensor([0.0], dtype=torch.float64), atol=1e-7, rtol=0.0)
++    assert torch.allclose(table.ideal_update(state_key="round:0"), torch.tensor([-0.1], dtype=torch.float64))
++
++    path = session.save(tmp_path / "capture.pt", min_trials=2)
++    assert path.exists()
++
++
++
++def test_mode_fallback_does_not_turn_between_client_bias_into_dp_variance():
++    session = JointCalibrationCaptureSession(include_mode_fallback=True)
++    for private in (1.1, 0.9):
++        session.add_pair(
++            state_key="round:0", mode="LIIC", client_id=1,
++            clean_update=_nested(1.0), private_update=_nested(private),
++        )
++    # Same zero within-client variance pattern shifted by a large client bias.
++    for private in (3.1, 2.9):
++        session.add_pair(
++            state_key="round:0", mode="LIIC", client_id=2,
++            clean_update=_nested(1.0), private_update=_nested(private),
++        )
++    table = session.build_table(min_trials=2)
++    fallback = table.lookup(mode="LIIC", state_key="round:0", client_id=99)
++    c1 = table.lookup(mode="LIIC", state_key="round:0", client_id=1)
++    c2 = table.lookup(mode="LIIC", state_key="round:0", client_id=2)
++    expected = 0.5 * (c1.variance_trace + c2.variance_trace)
++    assert abs(fallback.variance_trace - expected) < 1e-9
++    assert abs(float(fallback.bias_mean.item()) - 1.0) < 1e-7
++
++def test_clean_calibration_payload_removes_sample_dp_but_preserves_common_randomness():
++    private = {
++        "privacy_unit": "sample",
++        "mechanisms": {"emb": "dp", "grad": "dp", "upd": "he3"},
++        "sample_embedding_noise_multiplier": 2.0,
++        "sample_label_grad_noise_multiplier": 2.0,
++        "sample_optimizer_noise_multiplier": 2.0,
++        "dp_update_mode": "upd_only",
++        "dp_seed": 123,
++        "training_seed": 456,
++        "global_end_state": {"w": torch.tensor([1.0])},
++    }
++    clean = dynamic._clean_calibration_payload(private)
++    assert clean["privacy_unit"] == "client"
++    assert all(value == "none" for value in clean["mechanisms"].values())
++    assert clean["sample_embedding_noise_multiplier"] is None
++    assert clean["sample_label_grad_noise_multiplier"] is None
++    assert clean["sample_optimizer_noise_multiplier"] is None
++    assert clean["dp_update_mode"] == "off"
++    assert clean["training_seed"] == private["training_seed"]
++    assert clean["global_end_state"] is private["global_end_state"]
++
++
++def test_paired_payload_reuses_training_seed_and_varies_only_dp_seed(monkeypatch):
++    calls = []
++
++    def fake_worker(payload, model_cache=None):
++        calls.append(copy.copy(payload))
++        value = 0.0 if payload["privacy_unit"] == "client" else float(payload["dp_seed"] % 97)
++        return {"finite": True, "state_diff": _nested(value), "client_id": payload["client_id"]}
++
++    monkeypatch.setattr(dynamic, "_client_train_worker", fake_worker)
++    private = {
++        "client_id": 7,
++        "privacy_unit": "sample",
++        "mechanisms": {"emb": "dp", "grad": "dp", "upd": "none"},
++        "sample_embedding_noise_multiplier": 1.0,
++        "sample_label_grad_noise_multiplier": 1.0,
++        "sample_optimizer_noise_multiplier": 1.0,
++        "dp_update_mode": "upd_only",
++        "dp_seed": 1,
++        "training_seed": 321,
++    }
++    clean, privates = dynamic._run_paired_calibration_payload(
++        private,
++        trials=3,
++        base_seed=11,
++        round_idx=2,
++        client_id=7,
++        mode="LIC",
++    )
++    assert clean["end"]["w"].item() == 0.0
++    assert len(privates) == 3
++    assert len(calls) == 4
++    assert calls[0]["privacy_unit"] == "client"
++    assert all(call["training_seed"] == 321 for call in calls)
++    private_seeds = [call["dp_seed"] for call in calls[1:]]
++    assert len(set(private_seeds)) == 3
++
++
++def test_reference_update_is_gradient_step_without_mutating_models():
++    end = torch.nn.Linear(2, 2, bias=False)
++    edge = torch.nn.Linear(2, 2, bias=False)
++    before_end = {k: v.detach().clone() for k, v in end.state_dict().items()}
++    before_edge = {k: v.detach().clone() for k, v in edge.state_dict().items()}
++    x = np.asarray([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float32)
++    y = np.asarray([0, 1, 0], dtype=np.int64)
++    update = dynamic._calibration_reference_update(
++        global_end=end,
++        global_edge=edge,
++        x=x,
++        y=y,
++        device=torch.device("cpu"),
++        input_shape=(2,),
++        learning_rate=0.1,
++        batch_size=2,
++    )
++    assert set(update) == {"end", "edge"}
++    assert sum(t.numel() for part in update.values() for t in part.values()) == 8
++    assert any(float(torch.linalg.vector_norm(t)) > 0.0 for part in update.values() for t in part.values())
++    for key, value in before_end.items():
++        assert torch.equal(end.state_dict()[key], value)
++    for key, value in before_edge.items():
++        assert torch.equal(edge.state_dict()[key], value)
++
++
++def test_capture_round_resamples_heldout_pool_to_runtime_client_mass(monkeypatch):
++    candidate = dynamic.Candidate(
++        mode="LIIC",
++        mechanisms={"emb": "none", "logits": "none", "grad": "none", "emb_grad": "none", "upd": "he3"},
++        time=1.0,
++        accuracy=0.0,
++        risk=0.0,
++        epsilon_used=0.0,
++        communication_volume=0.0,
++        feasible_resource=True,
++        feasible_privacy=True,
++        feasible_risk=True,
++        feasible_time=True,
++        sample_optimizer_noise_multiplier=1.0,
++    )
++    selection = dynamic.SelectionConfig(
++        privacy_unit="sample",
++        seed=13,
++        L_block_cycles=5,
++    )
++    train_config = dynamic.Lenet5Config(
++        joint_calibration_capture_trials=2,
++        joint_calibration_capture_max_clients=1,
++        joint_calibration_capture_sample_limit=2,
++        joint_calibration_capture_scope="candidate_modes",
++    )
++    session = JointCalibrationCaptureSession(include_mode_fallback=True)
++    observed = {}
++
++    def fake_pairs(payload, **kwargs):
++        observed["trajectory_len"] = len(payload["x"])
++        return _nested(0.0), [_nested(0.1), _nested(-0.1)]
++
++    def fake_reference(**kwargs):
++        observed["reference_len"] = len(kwargs["x"])
++        return _nested(-0.01)
++
++    monkeypatch.setattr(dynamic, "_run_paired_calibration_payload", fake_pairs)
++    monkeypatch.setattr(dynamic, "_calibration_reference_update", fake_reference)
++    monkeypatch.setattr(
++        dynamic,
++        "resolved_privacy_parameters",
++        lambda _selection: {"feature_noise_multiplier": 1.0, "update_noise_multiplier": 1.0},
++    )
++
++    end = torch.nn.Linear(1, 1, bias=False)
++    edge = torch.nn.Identity()
++    x = np.arange(9, dtype=np.float32).reshape(9, 1)
++    y = np.zeros(9, dtype=np.int64)
++    stats = dynamic._capture_joint_calibration_round(
++        session=session,
++        selected=[(0, candidate, [candidate], 1.0)],
++        train_config=train_config,
++        selection=selection,
++        global_end=end,
++        global_edge=edge,
++        client_model_states={},
++        train_client_indices=[np.arange(7, dtype=np.int64)],
++        client_test_indices=[np.asarray([7, 8], dtype=np.int64)],
++        x_train=x,
++        y_train=y,
++        device=torch.device("cpu"),
++        model_name="lenet5",
++        input_shape=(1,),
++        num_classes=2,
++        round_idx=0,
++    )
++    assert stats["captured_pairs"] == 2
++    assert observed["trajectory_len"] == 7
++    assert observed["reference_len"] == 7
++    table = session.build_table(min_trials=2)
++    assert table.lookup(mode="LIIC", state_key="round:0", client_id=0).sample_count == 2
++
++
++def test_capture_wrapper_builds_dedicated_bootstrap_command(tmp_path):
++    from argparse import Namespace
++    from pathlib import Path
++    from experiments.run_joint_calibration_capture import build_capture_command
++
++    root = Path(__file__).resolve().parents[1]
++    args = Namespace(
++        config=root / "configs" / "paper_v34_cifar10_resnet18_joint_proxy.json",
++        output=tmp_path / "joint.pt",
++        seed=41,
++        policy="full_dynfl",
++        rounds=1,
++        trials=2,
++        period=1,
++        max_clients=1,
++        sample_limit=16,
++        scope="candidate_modes",
++        real_he=False,
++        dry_run=True,
++    )
++    command, config = build_capture_command(args)
++    joined = " ".join(command)
++    assert "--learning-objective legacy_fusion_dp" in joined
++    assert "--joint-calibration-capture-trials 2" in joined
++    assert "--joint-calibration-capture-period 1" in joined
++    assert "--joint-calibration-capture-max-clients 1" in joined
++    assert "--joint-calibration-capture-scope candidate_modes" in joined
++    assert config["policies"] == ["full_dynfl"]
++    assert config["he"]["execution"] == "profiled"

@@ -1,0 +1,198 @@
+diff --git a/experiments/independent_joint_proxy_capture.py b/experiments/independent_joint_proxy_capture.py
+index 28cf68f..8addb70 100644
+--- a/experiments/independent_joint_proxy_capture.py
++++ b/experiments/independent_joint_proxy_capture.py
+@@ -113,6 +113,7 @@ def monte_carlo_score(profile: dict[int, str], moments, ideal_update,
+         raise ValueError('invalid Cloud sample mass')
+     mean = torch.zeros_like(ideal)
+     variance = 0.0
++    finite_sample_correction = 0.0
+     for cid, mode in profile.items():
+         entry = moments[(cid, mode)]
+         if entry.sample_count < 2 or entry.clean_update_mean.numel() != ideal.numel():
+@@ -120,13 +121,17 @@ def monte_carlo_score(profile: dict[int, str], moments, ideal_update,
+         a = float(client_samples[cid]) / mass
+         mean += a * (entry.clean_update_mean + entry.bias_mean)
+         variance += a * a * entry.variance_trace
++        # E[||sample mean error||^2] exceeds ||population mean error||^2
++        # by Tr(Cov(sample mean)); subtract that sampling artifact once.
++        finite_sample_correction += a * a * entry.variance_trace / entry.sample_count
+     err = mean - ideal
+     bias_sq = float(torch.dot(err, err).item())
+-    total = bias_sq + variance
++    total = bias_sq + variance - finite_sample_correction
+     if not math.isfinite(total) or total < 0:
+         raise ValueError('nonfinite Monte Carlo second moment')
+     return {'mc_joint_score': total, 'mc_bias_squared': bias_sq,
+-            'mc_variance_trace': variance}
++            'mc_variance_trace': variance,
++            'mc_finite_sample_correction': finite_sample_correction}
+ 
+ 
+ def capture_independent_evaluation(*, output: Path, calibration: Path,
+@@ -249,11 +254,12 @@ def capture_independent_evaluation(*, output: Path, calibration: Path,
+                      'client_count': len(modes), 'trials_per_cell': trials,
+                      'mode_signature': [[int(cid), str(mode)] for cid, mode in signature]})
+     result = {
+-        'format': 'dynfl_independent_joint_summary_v1',
++        'format': 'dynfl_independent_joint_summary_v2',
+         'evaluation_data_independent_of_calibration': True,
+         'evaluation_data_provenance': 'private_local_only',
+         'conditional_cross_client_rng_independence': True,
+         'evaluation_protocol': 'independent_official_test_paired_rng_v1',
++        'mc_estimator': 'unbiased_conditional_second_moment_independent_clients_v2',
+         'calibration_sha256': hashlib.sha256(calibration.read_bytes()).hexdigest(),
+         'calibration_source_verified_as_train_subset': True,
+         'split_manifest': str(manifest),
+diff --git a/experiments/validate_joint_proxy_ranking.py b/experiments/validate_joint_proxy_ranking.py
+index e269e9f..0b974dd 100644
+--- a/experiments/validate_joint_proxy_ranking.py
++++ b/experiments/validate_joint_proxy_ranking.py
+@@ -62,7 +62,11 @@ def spearman(x, y):
+ def evaluate(payload):
+     # Dedicated trusted-local summary path. Unlike legacy raw-vector JSON,
+     # this never serializes per-client parameter trajectories.
+-    if payload.get('format') == 'dynfl_independent_joint_summary_v1':
++    if payload.get('format') in ('dynfl_independent_joint_summary_v1',
++                                 'dynfl_independent_joint_summary_v2'):
++        corrected = payload['format'].endswith('_v2')
++        if corrected and payload.get('mc_estimator') != 'unbiased_conditional_second_moment_independent_clients_v2':
++            raise ValueError('v2 unbiased MC estimator declaration required')
+         if payload.get('evaluation_data_independent_of_calibration') is not True:
+             raise ValueError('independence declaration required')
+         if payload.get('evaluation_data_provenance') != 'private_local_only':
+@@ -96,14 +100,24 @@ def evaluate(payload):
+                 'selector_joint_score', 'mc_joint_score', 'mc_bias_squared', 'mc_variance_trace')]
+             if not all(math.isfinite(v) and v >= 0 for v in vals):
+                 raise ValueError('nonfinite/negative independent evaluation score')
+-            if not math.isclose(vals[1], vals[2] + vals[3], rel_tol=1e-8, abs_tol=1e-10):
++            correction = 0.0
++            if corrected:
++                if 'mc_finite_sample_correction' not in row:
++                    raise ValueError('v2 missing finite-sample MC correction')
++                correction = float(row['mc_finite_sample_correction'])
++                if (not math.isfinite(correction) or correction < 0
++                        or correction > vals[3] + 1e-10):
++                    raise ValueError('invalid finite-sample MC correction')
++            if not math.isclose(vals[1], vals[2] + vals[3] - correction,
++                                rel_tol=1e-8, abs_tol=1e-10):
+                 raise ValueError('inconsistent Monte Carlo bias/variance decomposition')
+             scores.append(vals[0])
+             measured.append(vals[1])
+         rho = spearman(scores, measured)
+         return {
+             'status': 'computed_not_privacy_proof',
+-            'formula': 'v3.3_eq127_independent_client_rng',
++            'formula': ('finite_sample_corrected_joint_second_moment_v2'
++                        if corrected else 'v3.3_eq127_independent_client_rng_legacy_v1'),
+             'candidate_count': len(rows), 'spearman_rho': rho,
+             'evaluation_data_provenance': 'private_local_only',
+             'scope': payload['scope'], 'measurement_boundary': payload['measurement_boundary'],
+@@ -168,7 +182,7 @@ def evaluate(payload):
+         rows.append({"profile_id":name,"selector_joint_score":pred,"mc_joint_score":mc,
+                      "mc_bias_squared":_sq(mean_error),"mc_variance_trace":variance_global})
+     rho = spearman([r["selector_joint_score"] for r in rows], [r["mc_joint_score"] for r in rows])
+-    return {"status":"computed_not_privacy_proof", "formula":"v3.3_eq127_independent_client_rng",
++    return {"status":"computed_not_privacy_proof", "formula":"v3.3_eq127_independent_client_rng_legacy_raw",
+             "candidate_count":len(rows), "spearman_rho":rho,
+             "evaluation_data_provenance":payload["evaluation_data_provenance"], "profiles":rows}
+ 
+diff --git a/tests/test_dynfl_joint_mc_correction.py b/tests/test_dynfl_joint_mc_correction.py
+new file mode 100644
+index 0000000..45f72de
+--- /dev/null
++++ b/tests/test_dynfl_joint_mc_correction.py
+@@ -0,0 +1,80 @@
++"""Finite-trial second-moment correction; no tensors leave the local process."""
++import copy
++import hashlib
++
++import pytest
++import torch
++
++from dynfed.joint_calibration import JointCalibrationEntry
++from experiments.independent_joint_proxy_capture import monte_carlo_score
++from experiments.validate_joint_proxy_ranking import evaluate
++
++
++def test_two_trial_bias_correction():
++    # One client, two symmetric private updates around zero: biased plug-in
++    # ||mean||^2 + sample variance is 2, corrected estimate is 1.
++    entry = JointCalibrationEntry(torch.tensor([0.]), torch.tensor([0.]), 2., 2)
++    out = monte_carlo_score({0: 'LIIC'}, {(0, 'LIIC'): entry},
++                            torch.tensor([0.]), {0: 1.})
++    assert out['mc_bias_squared'] == pytest.approx(0.)
++    assert out['mc_variance_trace'] == pytest.approx(2.)
++    assert out['mc_finite_sample_correction'] == pytest.approx(1.)
++    assert out['mc_joint_score'] == pytest.approx(1.)
++
++
++def test_different_sample_counts_corrected_per_client():
++    a = JointCalibrationEntry(torch.tensor([1.]), torch.tensor([1.]), 2., 2)
++    b = JointCalibrationEntry(torch.tensor([3.]), torch.tensor([0.]), 4., 4)
++    out = monte_carlo_score({0: 'LIIC', 1: 'LIE'},
++                            {(0, 'LIIC'): a, (1, 'LIE'): b},
++                            torch.tensor([1.]), {0: 1., 1: 3.})
++    variance = 2/16 + 9*4/16
++    correction = (2/16)/2 + (9*4/16)/4
++    assert out['mc_finite_sample_correction'] == pytest.approx(correction)
++    assert out['mc_joint_score'] == pytest.approx((2.75-1.)**2 + variance - correction)
++
++
++def _summary_v2():
++    return {
++        'format': 'dynfl_independent_joint_summary_v2',
++        'mc_estimator': 'unbiased_conditional_second_moment_independent_clients_v2',
++        'evaluation_data_independent_of_calibration': True,
++        'evaluation_data_provenance': 'private_local_only',
++        'conditional_cross_client_rng_independence': True,
++        'evaluation_protocol': 'independent_official_test_paired_rng_v1',
++        'calibration_sha256': hashlib.sha256(b'calibration').hexdigest(),
++        'calibration_source_verified_as_train_subset': True,
++        'scope': 'calibration-covered_subcohort_not_full_cohort',
++        'measurement_boundary': 'global_relative_worker_updates_before_cloud_release_processing',
++        'profiles': [
++            {'profile_id': str(i), 'selector_joint_score': float(i),
++             'mc_joint_score': float(i)+1., 'mc_bias_squared': float(i),
++             'mc_variance_trace': 2., 'mc_finite_sample_correction': 1.,
++             'client_count': 1, 'trials_per_cell': 2} for i in (1, 2, 3)
++        ],
++    }
++
++
++def test_v2_summary_requires_and_checks_correction():
++    original = _summary_v2()
++    out = evaluate(original)
++    assert out['spearman_rho'] == pytest.approx(1.)
++    assert out['formula'] == 'finite_sample_corrected_joint_second_moment_v2'
++    bad = copy.deepcopy(original)
++    bad['profiles'][0].pop('mc_finite_sample_correction')
++    with pytest.raises(ValueError, match='missing finite-sample'):
++        evaluate(bad)
++    bad = copy.deepcopy(original)
++    bad['profiles'][0]['mc_finite_sample_correction'] = 0.
++    with pytest.raises(ValueError, match='inconsistent'):
++        evaluate(bad)
++
++
++def test_old_v1_explicitly_legacy_and_still_readable():
++    old = _summary_v2()
++    old['format'] = 'dynfl_independent_joint_summary_v1'
++    for row in old['profiles']:
++        row.pop('mc_finite_sample_correction')
++        row['mc_joint_score'] = row['mc_bias_squared'] + row['mc_variance_trace']
++    out = evaluate(old)
++    assert 'legacy_v1' in out['formula']
+diff --git a/tests/test_independent_joint_proxy_capture.py b/tests/test_independent_joint_proxy_capture.py
+index 8c28ef0..212dcb0 100644
+--- a/tests/test_independent_joint_proxy_capture.py
++++ b/tests/test_independent_joint_proxy_capture.py
+@@ -54,4 +54,7 @@ def test_monte_carlo_weighted_moments():
+                                torch.tensor([1.]), {0: 1., 1: 3.})
+     assert result['mc_bias_squared'] == pytest.approx((2.75-1.)**2)
+     assert result['mc_variance_trace'] == pytest.approx(2/16+9*4/16)
+-    assert result['mc_joint_score'] == pytest.approx(result['mc_bias_squared']+result['mc_variance_trace'])
++    assert result['mc_finite_sample_correction'] == pytest.approx(result['mc_variance_trace'] / 3)
++    assert result['mc_joint_score'] == pytest.approx(
++        result['mc_bias_squared'] + result['mc_variance_trace']
++        - result['mc_finite_sample_correction'])

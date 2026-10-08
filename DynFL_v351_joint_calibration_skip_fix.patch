@@ -1,0 +1,298 @@
+From e8d40e01885709a5c091bd60f27136c7ea0e11bc Mon Sep 17 00:00:00 2001
+From: Patch Builder <patch@example.com>
+Date: Wed, 7 Oct 2026 17:38:52 +0000
+Subject: [PATCH] fix joint calibration SKIP fallback
+
+---
+ dynfed/selection.py                   | 127 +++++++++++++++++++-------
+ tests/test_joint_calibration_proxy.py |  79 ++++++++++++++++
+ 2 files changed, 172 insertions(+), 34 deletions(-)
+
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index 46b2000..89a8ffc 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -3770,13 +3770,39 @@ class _JointCalibrationReplacementStats:
+                 "joint calibration objective requires positive total client sample mass"
+             )
+ 
++        # For the formal table-e_alg objective the ideal update fixes the
++        # update-space dimension even when the current search profile is all
++        # SKIP.  That makes the internal no-training fallback profile a valid
++        # point with cost ||Delta_*||^2 instead of a missing-calibration error.
++        self.ideal_update: torch.Tensor | None = None
+         dimension: int | None = None
++        if config.joint_calibration_e_alg_policy == "table":
++            try:
++                ideal = self.table.ideal_update(state_key=self.state_key)
++            except KeyError:
++                if config.joint_calibration_missing_policy == "legacy":
++                    self.available = False
++                    return
++                raise
++            self.ideal_update = ideal
++            dimension = int(ideal.numel())
++
+         self.cloud_mass = 0.0
+-        self.cloud_q_num: torch.Tensor | None = None
++        self.cloud_q_num: torch.Tensor | None = (
++            torch.zeros(dimension, dtype=torch.float64)
++            if dimension is not None else None
++        )
+         self.cloud_var_num = 0.0
+-        self.full_clean_num: torch.Tensor | None = None
++        self.full_clean_num: torch.Tensor | None = (
++            torch.zeros(dimension, dtype=torch.float64)
++            if dimension is not None else None
++        )
+ 
+         for cid, candidate in profile.items():
++            if candidate.mode == "SKIP":
++                # Phi_clean(SKIP)=Phi_DP(SKIP)=0 exactly; SKIP is not an
++                # empirical calibration cell and must never require a table row.
++                continue
+             entry = self._lookup(cid, candidate)
+             if entry is None:
+                 self.available = False
+@@ -3808,21 +3834,11 @@ class _JointCalibrationReplacementStats:
+         assert self.cloud_q_num is not None
+         assert self.full_clean_num is not None
+ 
+-        self.ideal_update: torch.Tensor | None = None
+-        if config.joint_calibration_e_alg_policy == "table":
+-            try:
+-                ideal = self.table.ideal_update(state_key=self.state_key)
+-            except KeyError:
+-                if config.joint_calibration_missing_policy == "legacy":
+-                    self.available = False
+-                    return
+-                raise
+-            if int(ideal.numel()) != self.dimension:
+-                raise ValueError(
+-                    "joint calibration ideal/reference update dimension does not match "
+-                    "mode entries"
+-                )
+-            self.ideal_update = ideal
++        if self.ideal_update is not None and int(self.ideal_update.numel()) != self.dimension:
++            raise ValueError(
++                "joint calibration ideal/reference update dimension does not match "
++                "mode entries"
++            )
+ 
+     def _mass(self, cid: int) -> float:
+         return max(float(self.samples.get(cid, 0.0)), 0.0)
+@@ -3908,11 +3924,24 @@ class _JointCalibrationReplacementStats:
+             return None
+ 
+         old_candidate = self.profile[cid]
+-        old_entry = self._lookup(cid, old_candidate)
+-        new_entry = self._lookup(cid, candidate)
+-        if old_entry is None or new_entry is None:
++        old_entry = (
++            None if old_candidate.mode == "SKIP"
++            else self._lookup(cid, old_candidate)
++        )
++        new_entry = (
++            None if candidate.mode == "SKIP"
++            else self._lookup(cid, candidate)
++        )
++        if old_candidate.mode != "SKIP" and old_entry is None:
++            return None
++        if candidate.mode != "SKIP" and new_entry is None:
+             return None
+-        if int(new_entry.clean_update_mean.numel()) != self.dimension:
++        if new_entry is not None and int(new_entry.clean_update_mean.numel()) != self.dimension:
++            # The zero-e_alg approximation may build an all-SKIP snapshot
++            # before any empirical vector dimension is known.  In that rare
++            # case, fall back to the exact full-profile path for this neighbor.
++            if self.dimension == 0:
++                return None
+             raise ValueError(
+                 "joint calibration replacement entry has an incompatible dimension"
+             )
+@@ -3926,23 +3955,26 @@ class _JointCalibrationReplacementStats:
+         next_cloud_var_num = self.cloud_var_num
+         next_full_clean_num = self.full_clean_num.clone()
+ 
+-        # Delta_F,0 always changes when the candidate's clean trajectory changes.
+-        next_full_clean_num += mass * (
+-            new_entry.clean_update_mean - old_entry.clean_update_mean
+-        )
++        zero = torch.zeros(self.dimension, dtype=torch.float64)
++        old_clean = zero if old_entry is None else old_entry.clean_update_mean
++        new_clean = zero if new_entry is None else new_entry.clean_update_mean
++        old_bias = zero if old_entry is None else old_entry.bias_mean
++        new_bias = zero if new_entry is None else new_entry.bias_mean
++        old_variance = 0.0 if old_entry is None else float(old_entry.variance_trace)
++        new_variance = 0.0 if new_entry is None else float(new_entry.variance_trace)
++
++        # Delta_F,0 changes with the candidate's clean trajectory.  SKIP has
++        # the exact zero clean trajectory by definition.
++        next_full_clean_num += mass * (new_clean - old_clean)
+ 
+         if old_cloud:
+             next_cloud_mass -= mass
+-            next_cloud_q_num -= mass * (
+-                old_entry.clean_update_mean + old_entry.bias_mean
+-            )
+-            next_cloud_var_num -= mass * mass * float(old_entry.variance_trace)
++            next_cloud_q_num -= mass * (old_clean + old_bias)
++            next_cloud_var_num -= mass * mass * old_variance
+         if new_cloud:
+             next_cloud_mass += mass
+-            next_cloud_q_num += mass * (
+-                new_entry.clean_update_mean + new_entry.bias_mean
+-            )
+-            next_cloud_var_num += mass * mass * float(new_entry.variance_trace)
++            next_cloud_q_num += mass * (new_clean + new_bias)
++            next_cloud_var_num += mass * mass * new_variance
+ 
+         # Floating-point subtraction can leave a tiny negative residue.
+         if next_cloud_mass < 0.0 and abs(next_cloud_mass) < 1e-12:
+@@ -4767,6 +4799,13 @@ def _joint_calibration_learning_components(
+     entries: dict[int, Any] = {}
+     dimension: int | None = None
+     for client_id, candidate in profile.items():
++        # SKIP is an internal no-training/no-release action, not a calibrated
++        # training mode.  Its clean update, DP bias, and DP variance are all
++        # exactly zero by definition, so requiring a table row for ``SKIP``
++        # would make strict missing-policy evaluation fail on valid fallback
++        # profiles used by the Pareto/coverage search.
++        if candidate.mode == "SKIP":
++            continue
+         try:
+             entry = table.lookup(
+                 mode=candidate.mode,
+@@ -4784,6 +4823,26 @@ def _joint_calibration_learning_components(
+         entries[client_id] = entry
+ 
+     if dimension is None:
++        if config.joint_calibration_e_alg_policy == "table":
++            try:
++                ideal_update = table.ideal_update(state_key=state_key)
++            except KeyError:
++                if config.joint_calibration_missing_policy == "legacy":
++                    return None
++                raise
++            # With an all-SKIP profile, Phi_clean(SKIP)=Phi_DP(SKIP)=0.
++            # Hence the exact calibrated mean error is simply -Delta_* and
++            # there is no DP variance term.
++            e_alg_norm_sq = float(torch.dot(ideal_update, ideal_update).item())
++            return _JointLearningProxyComponents(
++                total=e_alg_norm_sq,
++                mean_error_sq=e_alg_norm_sq,
++                variance_trace=0.0,
++                e_alg_norm_sq=e_alg_norm_sq,
++                e_agg_norm_sq=0.0,
++                bias_norm_sq=0.0,
++                source="joint_calibration_table_e_alg",
++            )
+         return _JointLearningProxyComponents(
+             total=0.0,
+             mean_error_sq=0.0,
+@@ -4791,7 +4850,7 @@ def _joint_calibration_learning_components(
+             e_alg_norm_sq=0.0,
+             e_agg_norm_sq=0.0,
+             bias_norm_sq=0.0,
+-            source="joint_calibration_empty",
++            source="joint_calibration_zero_e_alg_approx",
+         )
+ 
+     delta_f0 = torch.zeros(dimension, dtype=torch.float64)
+diff --git a/tests/test_joint_calibration_proxy.py b/tests/test_joint_calibration_proxy.py
+index 46fa63d..550499d 100644
+--- a/tests/test_joint_calibration_proxy.py
++++ b/tests/test_joint_calibration_proxy.py
+@@ -15,6 +15,7 @@ from dynfed.selection import (
+     _LearningReplacementStats,
+     _joint_calibration_learning_components,
+     _sample_dp_event_counts,
++    skipped_candidate,
+ )
+ 
+ 
+@@ -228,3 +229,81 @@ def test_joint_replacement_stats_matches_full_profile_zero_ealg(tmp_path):
+     assert exact is not None
+     assert fast is not None
+     assert math.isclose(fast, exact.total, rel_tol=0.0, abs_tol=1e-12)
++
++
++def test_joint_selector_strict_table_policy_handles_all_skip_without_skip_row(tmp_path):
++    table = JointUpdateCalibrationTable(
++        metadata={"cross_client_rng": "conditionally_independent"}
++    )
++    # The table intentionally has no SKIP entry.  SKIP is a structural
++    # zero-update action, not an empirically calibrated training mode.
++    table.add_entry(
++        mode="LIC",
++        entry=JointCalibrationEntry(
++            clean_update_mean=torch.tensor([0.4, 0.1], dtype=torch.float64),
++            bias_mean=torch.tensor([0.02, -0.01], dtype=torch.float64),
++            variance_trace=0.003,
++            sample_count=4,
++        ),
++    )
++    table.set_ideal_update(torch.tensor([0.2, -0.1], dtype=torch.float64))
++    path = table.save(tmp_path / "skip_table.pt")
++
++    config = SelectionConfig(
++        privacy_unit="sample",
++        learning_objective="joint_calibration",
++        joint_calibration_path=str(path),
++        joint_calibration_e_alg_policy="table",
++        joint_calibration_missing_policy="error",
++    )
++    profile = {1: skipped_candidate(), 2: skipped_candidate()}
++    result = _joint_calibration_learning_components(
++        config,
++        profile,
++        {1: 60.0, 2: 40.0},
++        admitted_client_ids=(),
++    )
++    assert result is not None
++    # Actual expected aggregate is zero, so J = ||0 - Delta_*||^2.
++    assert math.isclose(result.total, 0.05, rel_tol=0.0, abs_tol=1e-12)
++    assert math.isclose(result.mean_error_sq, 0.05, rel_tol=0.0, abs_tol=1e-12)
++    assert result.variance_trace == 0.0
++    assert result.source == "joint_calibration_table_e_alg"
++
++
++def test_joint_replacement_stats_accepts_skip_as_zero_update(tmp_path):
++    table = JointUpdateCalibrationTable(
++        metadata={"cross_client_rng": "conditionally_independent"}
++    )
++    table.add_entry(
++        mode="LIC",
++        client_id=1,
++        entry=JointCalibrationEntry(
++            clean_update_mean=torch.tensor([0.4, 0.1], dtype=torch.float64),
++            bias_mean=torch.tensor([0.02, -0.01], dtype=torch.float64),
++            variance_trace=0.003,
++            sample_count=4,
++        ),
++    )
++    table.set_ideal_update(torch.tensor([0.2, -0.1], dtype=torch.float64))
++    path = table.save(tmp_path / "skip_replacement_table.pt")
++
++    config = SelectionConfig(
++        privacy_unit="sample",
++        learning_objective="joint_calibration",
++        joint_calibration_path=str(path),
++        joint_calibration_e_alg_policy="table",
++        joint_calibration_missing_policy="error",
++    )
++    profile = {1: skipped_candidate()}
++    masses = {1: 100.0}
++    admitted = (1,)
++    stats = _LearningReplacementStats(config, profile, masses, {1: 0}, admitted)
++
++    replacement = _candidate("LIC")
++    fast = stats.replacement_cost(1, replacement, admitted)
++    trial = {1: replacement}
++    exact = _joint_calibration_learning_components(config, trial, masses, admitted)
++    assert fast is not None
++    assert exact is not None
++    assert math.isclose(fast, exact.total, rel_tol=0.0, abs_tol=1e-12)
+-- 
+2.47.3
+

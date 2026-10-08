@@ -1,0 +1,349 @@
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -56,6 +56,8 @@
+ )
+ from .nodes import build_profiles
+ from .privacy import ClientPrivacyLedger, SamplePrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
++from .sample_dispatch_accounting import charge_sample_dispatch_before_worker
++from .sample_stage_event_audit import SampleEventCounts, SampleStageEventAudit
+ from .protection_rules import audit_update_release
+ from .streaming_secagg import streaming_secure_aggregate_exact_target
+ from .selection import (
+@@ -268,10 +270,11 @@
+     selected_by_id: dict[int, Any],
+     worker_results: dict[int, dict[str, Any]],
+ ) -> int:
+-    """Fail closed before ANY Sample ledger commit for admitted clients.
+-
+-    Check the per-client charged events against worker-observed operations;
+-    never treat a missing diagnostic as an observed zero.
++    """Check worker-observed events for EVERY pre-charged dispatched client.
++
++    The argument is retained for existing callers/tests, but now represents
++    dispatched-client IDs rather than just Cloud-admitted IDs. A missing
++    diagnostic is never treated as an observed zero.
+     """
+     expected_to_observed = (
+         ("sample_embedding_events", "feature_dp_release_batches"),
+@@ -2834,6 +2837,62 @@
+             mode_specs=MODE_SPECS,
+         )
+ 
++        # Debit the complete authorized Sample-DP work for EVERY dispatched
++        # client before any private worker execution. Cloud admission is a
++        # later communication decision, not the privacy accounting boundary.
++        sample_dispatch_charges = {}
++        sample_stage_audits = {}
++        if effective_selection.privacy_unit == "sample":
++            sample_stage_audits = {
++                int(cid): SampleStageEventAudit(
++                    client_id=int(cid), candidate=candidate,
++                    scheduled_stages={0: SampleEventCounts.from_candidate(candidate)},
++                )
++                for cid, candidate, _idx, _sequence in train_tasks
++            }
++            sample_dispatch_charges = charge_sample_dispatch_before_worker(
++                train_tasks=train_tasks,
++                privacy_ledgers=privacy_ledgers,
++            )
++            for charged_client_id in sample_dispatch_charges:
++                remaining_epsilon[charged_client_id] = (
++                    privacy_ledgers[charged_client_id].remaining_budget
++                )
++            # Write ahead of worker releases. If a round is interrupted and
++            # resumed, next_round remains the same and the new dispatch must
++            # charge again; previously attempted private releases are NOT
++            # rolled back. An interrupted run needs this checkpoint to resume.
++            if sample_dispatch_charges:
++                _save_policy_checkpoint(
++                    checkpoint_path,
++                    policy=policy,
++                    next_round=round_idx,
++                    global_end=global_end,
++                    global_edge=global_edge,
++                    remaining_epsilon=remaining_epsilon,
++                    privacy_ledgers=privacy_ledgers,
++                    previous_choices=previous_choices,
++                    fixed_mode_assignments=fixed_mode_assignments,
++                    fixed_privacy_profiles=fixed_privacy_profiles,
++                    round_rows=round_rows,
++                    decision_rows=decision_rows,
++                    candidate_mode_audit_rows=candidate_mode_audit_rows,
++                    pareto_profile_audit_rows=pareto_profile_audit_rows,
++                    flow_event_rows=flow_event_rows,
++                    link_state_rows=link_state_rows,
++                    best_accuracy=best_accuracy,
++                    logical_time=logical_time,
++                    rng=rng,
++                    np_rng=np_rng,
++                    train_config=train_config,
++                    selection=selection,
++                    real_he_rounds=real_he_rounds,
++                    real_he_aggregated_clients=real_he_aggregated_clients,
++                    global_pareto_selection_rounds=global_pareto_selection_rounds,
++                    client_model_states=client_model_states,
++                    mainline_release_account=release_account,
++                )
++
+         calibration_capture_stats: dict[str, Any] = {
+             "captured_pairs": 0,
+             "captured_cells": 0,
+@@ -2936,6 +2995,20 @@
+             progress_callback=training_progress_callback,
+             progress_event_callback=training_event_callback,
+         )
++        sample_worker_client_audit_count = 0
++        if effective_selection.privacy_unit == "sample":
++            for sample_cid, sample_stage_audit in sample_stage_audits.items():
++                if sample_cid not in worker_results:
++                    raise RuntimeError(
++                        f"Sample-DP dispatched client {sample_cid} missing worker evidence; fail closed"
++                    )
++                sample_stage_audit.observe(stage=0, worker=worker_results[sample_cid])
++                sample_stage_audit.finalize()
++            sample_worker_client_audit_count = _assert_sample_worker_accounting_matches(
++                admitted_client_ids=set(sample_dispatch_charges),
++                selected_by_id={cid: cand for cid, cand, _pool, _rem in selected},
++                worker_results=worker_results,
++            )
+         _synchronize_device_for_timing(device)
+         training_wall_time_sec = (
+             time.perf_counter()
+@@ -3091,17 +3164,11 @@
+                     f"LIIE SecAgg cohort on edge {edge_id} changed after dispatch; "
+                     "aborting unprotected aggregate publication"
+                 )
+-        sample_worker_client_audit_count = 0
+-        if effective_selection.privacy_unit == "sample":
+-            sample_worker_client_audit_count = _assert_sample_worker_accounting_matches(
+-                admitted_client_ids=admitted_client_ids,
+-                selected_by_id=selected_by_id,
+-                worker_results=worker_results,
+-            )
+         for client_id, candidate in selected_by_id.items():
+             ledger = privacy_ledgers[client_id]
+             row = round_decision_rows_by_client[client_id]
+-            if client_id in admitted_client_ids:
++            if (client_id in admitted_client_ids or
++                    (effective_selection.privacy_unit == "sample" and client_id in sample_dispatch_charges)):
+                 if effective_selection.privacy_unit == "sample":
+                     if not isinstance(
+                         ledger,
+@@ -3141,28 +3208,15 @@
+                         else 1.0
+                     )
+ 
+-                    projection = ledger.add(
+-                        embedding_events=(
+-                            candidate.sample_embedding_events
+-                        ),
+-                        label_grad_events=(
+-                            candidate.sample_label_grad_events
+-                        ),
+-                        optimizer_events=(
+-                            candidate.sample_optimizer_events
+-                        ),
+-                        embedding_noise_multiplier=(
+-                            embedding_sigma
+-                        ),
+-                        label_grad_noise_multiplier=(
+-                            label_grad_sigma
+-                        ),
+-                        optimizer_noise_multiplier=(
+-                            optimizer_sigma
+-                            if optimizer_sigma is not None
+-                            else 1.0
+-                        ),
+-                    )
++                    # PREPAID for every dispatched client, regardless of
++                    # Cloud admission. Never charge a second time here.
++                    charge = sample_dispatch_charges.get(client_id)
++                    if charge is None:
++                        raise RuntimeError(
++                            f"Sample-DP client {client_id} admitted without "
++                            "a pre-dispatch privacy charge; fail closed"
++                        )
++                    projection = charge.projection
+ 
+                     row["feature_dp_events"] = 0
+                     row["update_dp_events"] = 0
+diff --git a/dynfed/sample_dispatch_accounting.py b/dynfed/sample_dispatch_accounting.py
+new file mode 100644
+--- /dev/null
++++ b/dynfed/sample_dispatch_accounting.py
+@@ -0,0 +1,76 @@
++"""Conservative in-memory Sample-DP charge for each dispatched worker.
++
++This does not authorize multi-stage execution: the existing hierarchical
++preflight stays in force. The caller must durably checkpoint the charged
++ledgers before executing any worker (and prohibit calibration-side releases).
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any, Mapping
++
++from .privacy import SamplePrivacyLedger, SamplePrivacyProjection
++
++
++@dataclass(frozen=True)
++class SampleDispatchCharge:
++    projection: SamplePrivacyProjection
++    embedding_sigma: float
++    label_grad_sigma: float
++    optimizer_sigma: float | None
++
++
++def _charge_kwargs(candidate: Any) -> tuple[dict[str, Any], tuple[float, float, float | None]]:
++    optimizer_sigma = candidate.sample_optimizer_noise_multiplier
++    if candidate.sample_optimizer_events > 0 and optimizer_sigma is None:
++        raise ValueError("Sample-DP optimizer events require a noise multiplier")
++    embedding_sigma = (
++        candidate.sample_embedding_noise_multiplier
++        if candidate.sample_embedding_noise_multiplier is not None
++        else optimizer_sigma if optimizer_sigma is not None else 1.0
++    )
++    label_grad_sigma = (
++        candidate.sample_label_grad_noise_multiplier
++        if candidate.sample_label_grad_noise_multiplier is not None
++        else optimizer_sigma if optimizer_sigma is not None else 1.0
++    )
++    return {
++        "embedding_events": candidate.sample_embedding_events,
++        "label_grad_events": candidate.sample_label_grad_events,
++        "optimizer_events": candidate.sample_optimizer_events,
++        "embedding_noise_multiplier": embedding_sigma,
++        "label_grad_noise_multiplier": label_grad_sigma,
++        "optimizer_noise_multiplier": optimizer_sigma if optimizer_sigma is not None else 1.0,
++    }, (float(embedding_sigma), float(label_grad_sigma), optimizer_sigma)
++
++
++def charge_sample_dispatch_before_worker(
++    *,
++    train_tasks: list[tuple[int, Any, Any, int]],
++    privacy_ledgers: Mapping[int, SamplePrivacyLedger],
++) -> dict[int, SampleDispatchCharge]:
++    """Preflight ALL budgets, then charge ALL dispatched clients before execution.
++
++    Once a charge is made, it MUST NOT be rolled back merely because its
++    update is dropped by the flow simulator. Caller writes an atomic checkpoint
++    before launching any private worker and audits all returned observations.
++    """
++    prepared = {}
++    for client_id, candidate, _indices, _sequence in train_tasks:
++        cid = int(client_id)
++        if cid in prepared:
++            raise RuntimeError(f"Sample-DP duplicate dispatched client {cid}")
++        ledger = privacy_ledgers[cid]
++        if not isinstance(ledger, SamplePrivacyLedger):
++            raise TypeError(f"Sample-DP client {cid} has the wrong privacy ledger")
++        kwargs, sigmas = _charge_kwargs(candidate)
++        projection = ledger.project(**kwargs)
++        if not ledger.can_apply(projection):
++            raise ValueError(f"Sample-DP client {cid} exceeds the privacy budget before worker")
++        prepared[cid] = (kwargs, sigmas)
++
++    charged = {}
++    for cid, (kwargs, sigmas) in prepared.items():
++        projection = privacy_ledgers[cid].add(**kwargs)
++        charged[cid] = SampleDispatchCharge(projection, *sigmas)
++    return charged
+diff --git a/tests/test_dynfl_v365_predispatch_sample_accounting.py b/tests/test_dynfl_v365_predispatch_sample_accounting.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_dynfl_v365_predispatch_sample_accounting.py
+@@ -0,0 +1,93 @@
++"""v3.6.5: paid-on-dispatch Sample-DP accounting, NOT seven-mode release proof."""
++import ast
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from dynfed.privacy import SamplePrivacyLedger
++from dynfed.sample_dispatch_accounting import charge_sample_dispatch_before_worker
++
++
++def candidate(z=3, g=3, o=0, sigma=5.0):
++    return SimpleNamespace(
++        sample_embedding_events=z,
++        sample_label_grad_events=g,
++        sample_optimizer_events=o,
++        sample_embedding_noise_multiplier=sigma,
++        sample_label_grad_noise_multiplier=sigma,
++        sample_optimizer_noise_multiplier=sigma if o else None,
++    )
++
++
++def test_all_dispatched_are_debited_including_client_not_admitted_by_cloud():
++    ledgers = {1: SamplePrivacyLedger(20.0), 2: SamplePrivacyLedger(20.0)}
++    charges = charge_sample_dispatch_before_worker(
++        train_tasks=[(1, candidate(), None, 0), (2, candidate(o=1), None, 1)],
++        privacy_ledgers=ledgers,
++    )
++    assert set(charges) == {1, 2}
++    assert ledgers[1].embedding_events == 3
++    assert ledgers[2].optimizer_events == 1
++    # Simulate client 2 NOT being included in the returned Cloud cohort:
++    admitted = {1}
++    assert 2 not in admitted
++    assert ledgers[2].embedding_events == 3
++    assert charges[2].projection.optimizer_events == 1
++
++
++def test_budget_failure_blocks_all_dispatch_before_any_debit():
++    ledgers = {1: SamplePrivacyLedger(20.0), 2: SamplePrivacyLedger(0.1)}
++    with pytest.raises(ValueError, match='before worker'):
++        charge_sample_dispatch_before_worker(
++            train_tasks=[(1, candidate(), None, 0), (2, candidate(), None, 1)],
++            privacy_ledgers=ledgers,
++        )
++    assert ledgers[1].embedding_events == 0
++    assert ledgers[2].embedding_events == 0
++
++
++def test_retry_counts_as_another_execution_when_called_again():
++    ledger = SamplePrivacyLedger(20.0)
++    params = dict(train_tasks=[(1, candidate(), None, 0)], privacy_ledgers={1: ledger})
++    charge_sample_dispatch_before_worker(**params)
++    charge_sample_dispatch_before_worker(**params)
++    assert ledger.embedding_events == 6
++    assert ledger.label_grad_events == 6
++
++
++def test_duplicate_client_rejected_before_charge():
++    ledger = SamplePrivacyLedger(20.0)
++    with pytest.raises(RuntimeError, match='duplicate'):
++        charge_sample_dispatch_before_worker(
++            train_tasks=[(1, candidate(), None, 0), (1, candidate(), None, 1)],
++            privacy_ledgers={1: ledger},
++        )
++    assert ledger.embedding_events == 0
++
++
++def test_optimizer_release_without_multiplier_rejected():
++    ledger = SamplePrivacyLedger(20.0)
++    with pytest.raises(ValueError, match='noise multiplier'):
++        charge_sample_dispatch_before_worker(
++            train_tasks=[(1, candidate(o=2, sigma=None), None, 0)],
++            privacy_ledgers={1: ledger},
++        )
++    assert ledger.optimizer_events == 0
++
++
++def test_runtime_integration_uses_predispatch_charge_checkpoint_and_all_worker_audit():
++    source_path = Path(__file__).resolve().parents[1] / 'dynfed/fmnist_lenet5_dynamic.py'
++    text = source_path.read_text(encoding='utf8')
++    preflight = text.index('        _assert_sample_hierarchical_preflight(\n')
++    debit = text.index('            sample_dispatch_charges = charge_sample_dispatch_before_worker(\n')
++    checkpoint = text.index('                _save_policy_checkpoint(\n', debit)
++    worker = text.index('        worker_results = _run_client_training_tasks(\n')
++    audit = text.index('                admitted_client_ids=set(sample_dispatch_charges),\n')
++    flow = text.index('        flow_result = execute_mixed_round_flow(\n')
++    assert preflight < debit < checkpoint < worker < audit < flow
++    assert 'projection = charge.projection' in text
++    assert 'sample_stage_audit.observe(stage=0, worker=worker_results[sample_cid])' in text
++    assert 'if (client_id in admitted_client_ids or' in text
++    assert 'next_round=round_idx,' in text[checkpoint:worker]
++    ast.parse(text)

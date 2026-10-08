@@ -1,0 +1,100 @@
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -230,6 +230,68 @@
+     if int(train_config.he_aggregation_size) != 0:
+         raise ValueError("Mainline fusion requires he_aggregation_size=0 for full-update encryption")
+ 
++
++
++def _observed_privacy_path_audit(
++    *,
++    privacy_unit: str,
++    decision_rows: list[dict[str, Any]],
++    worker_results: dict[int, dict[str, Any]],
++    protection_releases: list[dict[str, Any]],
++    he_execution: str,
++    selected_he_clients: int,
++) -> dict[str, Any]:
++    """Report distinct evidence streams; never infer a formal DP/security proof.
++
++    Sample event counts are *accountant records*, not observed Gaussian draws.
++    Worker feature batches are execution diagnostics, not an RDP event count.
++    Model-update packets are only the explicit records in protection_releases;
++    an LIC Cloud-internal split contribution does not invent a wire packet.
++    """
++    def accounted(field: str) -> int:
++        return sum(max(0, int(row.get(field, 0) or 0)) for row in decision_rows)
++
++    packets = [
++        item for item in protection_releases
++        if item.get("object") == "model_update"
++        and item.get("destination") in {"cloud", "edge"}
++    ]
++    cloud_packets = [item for item in packets if item.get("destination") == "cloud"]
++    observed_dp_packets = sum(bool(item.get("dp_event_observed")) for item in packets)
++    real_he_packets = sum(bool(item.get("he_crypto_observed")) for item in packets)
++    profiled_he_packets = sum(item.get("he_execution") == "profiled" for item in packets)
++    unprotected_cloud_packets = sum(
++        not bool(item.get("dp_event_observed"))
++        and not bool(item.get("he_crypto_observed"))
++        for item in cloud_packets
++    )
++    # Empty packet set is 'not_applicable', not a successful security check.
++    packet_status = (
++        "not_applicable_no_cloud_packet" if not cloud_packets else
++        "unprotected_observed" if unprotected_cloud_packets else
++        "protected_operation_observed_not_proof"
++    )
++    return {
++        "privacy_path_audit_scope": "observed_operations_not_end_to_end_proof",
++        "sample_accounted_embedding_events": accounted("sample_embedding_events") if privacy_unit == "sample" else 0,
++        "sample_accounted_label_grad_events": accounted("sample_label_grad_events") if privacy_unit == "sample" else 0,
++        "sample_accounted_optimizer_events": accounted("sample_optimizer_events") if privacy_unit == "sample" else 0,
++        "sample_worker_feature_dp_batches": sum(
++            max(0, int(result.get("feature_dp_release_batches", 0) or 0))
++            for result in worker_results.values()
++        ) if privacy_unit == "sample" else 0,
++        "model_update_packet_count": len(packets),
++        "cloud_model_update_packet_count": len(cloud_packets),
++        "model_update_packet_dp_observed_count": observed_dp_packets,
++        "model_update_packet_real_he_observed_count": real_he_packets,
++        "model_update_packet_profiled_he_count": profiled_he_packets,
++        "cloud_model_update_packet_unprotected_count": unprotected_cloud_packets,
++        "cloud_model_update_packet_audit_status": packet_status,
++        "selected_he_profiled_client_count": (
++            int(selected_he_clients) if he_execution == "profiled" else 0
++        ),
++        "sample_dp_postprocessing_dependency_status": "not_verified",
++    }
+ 
+ 
+ def _privacy_reporting_scope(
+@@ -4311,11 +4373,20 @@
+         mode_selection_summary = _summarize_mode_selection_audit(
+             mode_enumeration_audits, selection_diagnostics, selected,
+         )
++        privacy_path_observations = _observed_privacy_path_audit(
++            privacy_unit=effective_selection.privacy_unit,
++            decision_rows=list(round_decision_rows_by_client.values()),
++            worker_results=worker_results,
++            protection_releases=protection_releases,
++            he_execution=train_config.he_execution,
++            selected_he_clients=num_he_clients,
++        )
+         round_rows.append(
+             {
+                 "policy": policy,
+                 "round": round_idx,
+                 "mode_selection_audit": json.dumps(mode_selection_summary, sort_keys=True),
++                **privacy_path_observations,
+                 "logical_time": logical_time,
+                 "accounted_system_time_sec": accounted_system_time_sec,
+                 "round_duration": flow_result.round_duration,
+@@ -4985,6 +5056,7 @@
+             "all_cross_domain_updates_protected": current_round[
+                 "all_cross_domain_updates_protected"
+             ],
++            **privacy_path_observations,
+             "num_budget_exhausted_clients": current_round["num_budget_exhausted_clients"],
+             "omega_feature_clip_excess_sq_mean": current_round["omega_feature_clip_excess_sq_mean"],
+             "omega_feature_clip_excess_sq_max": current_round["omega_feature_clip_excess_sq_max"],

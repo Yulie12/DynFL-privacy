@@ -1,0 +1,112 @@
+﻿  831:                 "full_dynfl",
+  832:             }:
+  833:                 client_samples = {client.client_id: float(client.samples) for client in clients}
+  834:                 client_edges = {client.client_id: int(client.edge_id) for client in clients}
+  835:                 selection_diagnostics: dict[str, Any] = {}
+  836:                 profile_selection_config = (
+  837:                     replace(config, require_edge_cloud_coverage=False)
+  838:                     if policy in {"fixed_mode_fixed_privacy", "fixed_mode_dynamic_privacy"}
+  839:                     and bool(fixed_mode_assignments)
+  840:                     else config
+  841:                 )
+  842:                 round_selected, profile_evaluation = choose_global_pareto_profile(
+  843:                     config=profile_selection_config,
+  844:                     selected=round_selected,
+  845:                     client_samples=client_samples,
+  846:                     client_edges=client_edges,
+  847:                     previous_choices=previous_choices,
+  848:                     diagnostics=selection_diagnostics,
+  849:                 )
+  850:                 for archive_index, evaluation in enumerate(
+  851:                     selection_diagnostics.get("archive", ())
+  852:                 ):
+  853:                     profile_candidates = tuple(evaluation.profile.values())
+  854:                     archive_rows.append(
+  855:                         {
+  856:                             "policy": policy,
+  857:                             "round": round_idx,
+  858:                             "archive_index": archive_index,
+  859:                             "selected": evaluation.profile_signature
+  860:                             == profile_evaluation.profile_signature,
+  861:                             "system_latency_objective": evaluation.system_latency,
+  862:                             "dp_perturbation_objective": evaluation.system_dp,
+  863:                             "feature_perturbation_objective": evaluation.feature_perturbation,
+  864:                             "fusion_bound_objective": evaluation.fusion_bound,
+  865:                             "learning_error_objective": evaluation.system_learning_error,
+  866:                             "learning_proxy_source": evaluation.learning_proxy_source,
+  867:                             "joint_mean_error_sq": evaluation.joint_mean_error_sq,
+  868:                             "joint_variance_trace": evaluation.joint_variance_trace,
+  869:                             "joint_e_alg_norm_sq": evaluation.joint_e_alg_norm_sq,
+  870:                             "joint_e_agg_norm_sq": evaluation.joint_e_agg_norm_sq,
+  871:                             "joint_bias_norm_sq": evaluation.joint_bias_norm_sq,
+  872:                             "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
+  873:                             "he_clients": sum(
+  874:                                 candidate_has_he(candidate)
+  875:                                 for candidate in profile_candidates
+  876:                             ),
+  877:                             "dp_clients": sum(
+  878:                                 any(
+  879:                                     mechanism_uses_dp(mechanism)
+  880:                                     for mechanism in (
+  881:                                         candidate.link_mechanisms
+  882:                                         or candidate.mechanisms
+  883:                                     ).values()
+  884:                                 )
+  885:                                 for candidate in profile_candidates
+  886:                             ),
+ 1901:             pool = [current if current.feasible_device else skipped_candidate()]
+ 1902:         pool = _dedupe_candidates(pool)
+ 1903:         pools_before_stability[client_id] = list(pool)
+ 1904:         if config.enforce_cloud_dp_stability:
+ 1905:             pool = _stable_cloud_candidate_pool(config, pool)
+ 1906:         pools[client_id] = pool
+ 1907: 
+ 1908:     if config.require_edge_cloud_coverage and not _edge_cloud_coverage_possible_from_pools(
+ 1909:         config, pools, client_samples, client_edges
+ 1910:     ):
+ 1911:         coverage_failures = _edge_cloud_coverage_failure_details(
+ 1912:             config, pools, client_samples, client_edges
+ 1913:         )
+ 1914:         fallback_profile = {client_id: skipped_candidate() for client_id in pools}
+ 1915:         fallback = _evaluate_profile(
+ 1916:             config,
+ 1917:             fallback_profile,
+ 1918:             client_samples,
+ 1919:             client_edges,
+ 1920:             previous_choices,
+ 1921:         )
+ 1922:         if diagnostics is not None:
+ 1923:             diagnostics.clear()
+ 1924:             diagnostics.update(
+ 1925:                 {
+ 1926:                     "archive": (),
+ 1927:                     "chosen": fallback,
+ 1928:                     "coverage_infeasible_fallback": True,
+ 1929:                     "coverage_target_ratio": min(
+ 1930:                         max(float(config.min_edge_cloud_fusion_ratio), 0.0), 1.0
+ 1931:                     ),
+ 1932:                     "coverage_failure_edges": coverage_failures,
+ 1933:                     "candidate_pool_sizes": {
+ 1934:                         client_id: len(pool) for client_id, pool in pools.items()
+ 1935:                     },
+ 1936:                     "candidate_pool_sizes_before_stability": {
+ 1937:                         client_id: len(pool)
+ 1938:                         for client_id, pool in pools_before_stability.items()
+ 1939:                     },
+ 1940:                     "update_mechanism_counts_before_stability": (
+ 1941:                         _candidate_update_mechanism_population(pools_before_stability)
+ 1942:                     ),
+ 1943:                     "update_mechanism_counts_after_stability": (
+ 1944:                         _candidate_update_mechanism_population(pools)
+ 1945:                     ),
+ 1946:                     "search_method": search_method,
+ 1947:                     "mode_pool_before_stability": _mode_search_pool_audit(pools_before_stability),
+ 1948:                     "mode_pool_after_stability": _mode_search_pool_audit(pools),
+ 1949:                     "mode_archive_presence": _mode_archive_audit(()),
+ 1950:                     "mode_chosen": _mode_profile_distribution(fallback_profile),
+ 1951:                 }
+ 1952:             )
+ 1953:         rewritten = [
+ 1954:             (client_id, fallback_profile[client_id], by_client[client_id][1], by_client[client_id][2])
+ 1955:             for client_id, _current, _candidates, _remaining in selected
+ 1956:         ]

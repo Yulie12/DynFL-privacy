@@ -1,0 +1,22 @@
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index fec547a..dca1063 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -2821,6 +2821,8 @@ def _run_lenet5_policy(
+                     "actual_local_batches",
+                     "actual_optimizer_steps",
+                     "feature_dp_release_batches",
++                    "sample_label_grad_dp_release_batches",
++                    "sample_dp_optimizer_steps",
+                     "feature_dp_sample_count",
+                     "feature_dimension_sum",
+                     "feature_noise_std_sum",
+@@ -4479,6 +4481,8 @@ def _run_lenet5_policy(
+                 "actual_local_batches": sum(r.get("actual_local_batches", 0) for r in worker_results.values()),
+                 "actual_optimizer_steps": sum(r.get("actual_optimizer_steps", 0) for r in worker_results.values()),
+                 "feature_dp_release_batches": sum(r.get("feature_dp_release_batches", 0) for r in worker_results.values()),
++                "sample_label_grad_dp_release_batches": sum(int(r.get("sample_label_grad_dp_release_batches", 0)) for r in worker_results.values()),
++                "sample_dp_optimizer_steps": sum(int(r.get("sample_dp_optimizer_steps", 0)) for r in worker_results.values()),
+                 "feature_dp_sample_count": feature_dp_sample_count,
+                 "feature_dimension_mean": feature_dimension_sum / max(feature_dp_sample_count, 1.0),
+                 "feature_noise_std_mean": feature_noise_std_sum / max(feature_dp_sample_count, 1.0),

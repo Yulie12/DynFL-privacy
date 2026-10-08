@@ -56,6 +56,8 @@ from .split_learning import (
 )
 from .nodes import build_profiles
 from .privacy import ClientPrivacyLedger, SamplePrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
+from .sample_dispatch_accounting import charge_sample_dispatch_before_worker
+from .sample_stage_event_audit import SampleStageEventAudit, uniform_sample_stage_plan
 from .protection_rules import audit_update_release
 from .streaming_secagg import streaming_secure_aggregate_exact_target
 from .selection import (
@@ -232,16 +234,47 @@ def _validate_mainline_fusion(selection: SelectionConfig, train_config: Lenet5Co
 
 
 
+def _assert_sample_hierarchical_preflight(
+    *,
+    privacy_unit: str,
+    train_tasks: list[tuple[int, Any, Any, int]],
+    mode_specs: dict[str, Any],
+) -> None:
+    """Fail closed before executing any worker if multi-stage accounting is not audited.
+
+    The current round commits Sample RDP after the first worker pass, while
+    hierarchical retraining stages execute later.  A single-pass audit cannot
+    certify their total event count.  Do not silently disable the audit or
+    treat predicted later events as observations.  Lift this restriction only
+    when all stage executions are audited before ledger commit/release.
+    """
+    if privacy_unit != "sample":
+        return
+    unsupported = [
+        (int(client_id), candidate.mode)
+        for client_id, candidate, _idx, _sequence in train_tasks
+        if int(mode_specs[candidate.mode].E_edge_loops) > 1
+    ]
+    if unsupported:
+        raise RuntimeError(
+            "Sample-DP hierarchical retraining preflight: multi-stage modes "
+            f"{unsupported!r} are not yet supported by the full-stage "
+            "worker-event/ledger-commit audit; refusing execution before "
+            "private training (fail closed)."
+        )
+
+
 def _assert_sample_worker_accounting_matches(
     *,
     admitted_client_ids: set[int],
     selected_by_id: dict[int, Any],
     worker_results: dict[int, dict[str, Any]],
 ) -> int:
-    """Fail closed before ANY Sample ledger commit for admitted clients.
+    """Check worker-observed events for EVERY pre-charged dispatched client.
 
-    Check the per-client charged events against worker-observed operations;
-    never treat a missing diagnostic as an observed zero.
+    The argument is retained for existing callers/tests, but now represents
+    dispatched-client IDs rather than just Cloud-admitted IDs. A missing
+    diagnostic is never treated as an observed zero.
     """
     expected_to_observed = (
         ("sample_embedding_events", "feature_dp_release_batches"),
@@ -1045,6 +1078,11 @@ def run_fmnist_lenet5_training(
 ) -> dict[str, Any]:
     if max_new_rounds is not None and max_new_rounds < 1:
         raise ValueError("max_new_rounds must be positive")
+    independent_eval_path = os.environ.get('DYNFL_INDEPENDENT_EVAL_OUTPUT', '').strip()
+    if independent_eval_path and train_config.joint_calibration_capture_path:
+        raise ValueError('independent evaluation must not share a calibration capture session')
+    if independent_eval_path and selection.privacy_unit != 'sample':
+        raise ValueError('independent evaluation requires Sample DP')
     capture_enabled = bool(train_config.joint_calibration_capture_path)
     if capture_enabled:
         if selection.privacy_unit != "sample":
@@ -1651,8 +1689,9 @@ def _run_lenet5_policy(
             "Real HE execution was required, but it is not enabled or unavailable: "
             f"{he_status.detail}"
         )
+    independent_eval_path = os.environ.get('DYNFL_INDEPENDENT_EVAL_OUTPUT', '').strip()
     calibration_profiled_he = bool(
-        train_config.joint_calibration_capture_path
+        (train_config.joint_calibration_capture_path or independent_eval_path)
         and train_config.he_execution == "profiled"
     )
     if policy == "fixed_he" and not real_he_available and not calibration_profiled_he:
@@ -2370,6 +2409,37 @@ def _run_lenet5_policy(
                 previous_choices=prior_choices,
             )
 
+        if independent_eval_path and round_idx == 0:
+            if policy != 'full_dynfl':
+                raise ValueError('independent evaluation requires the full_dynfl policy')
+            from experiments.independent_joint_proxy_capture import capture_independent_evaluation
+            calib = effective_selection.joint_calibration_path
+            if not calib:
+                raise ValueError('joint calibration path is missing')
+            calib_path = Path(calib)
+            if not calib_path.is_absolute():
+                calib_path = (ROOT / calib_path).resolve()
+            print('  [independent] Capturing official-test paired profiles (local only)', flush=True)
+            result = capture_independent_evaluation(
+                output=Path(independent_eval_path).resolve(), calibration=calib_path,
+                selected=selected, selection=effective_selection,
+                train_config=train_config, global_end=global_end, global_edge=global_edge,
+                client_model_states=client_model_states,
+                train_client_indices=train_client_indices, x_test=x_test, y_test=y_test,
+                device=device, model_name=model_name, input_shape=input_shape,
+                num_classes=num_classes, round_idx=round_idx,
+                trials=int(os.environ.get('DYNFL_INDEPENDENT_EVAL_TRIALS', '2')),
+                evaluation_seed=int(os.environ.get('DYNFL_INDEPENDENT_EVAL_SEED', '90217')),
+                client_limit=int(os.environ.get('DYNFL_INDEPENDENT_EVAL_CLIENTS', '3')),
+                sample_limit=int(os.environ.get('DYNFL_INDEPENDENT_EVAL_SAMPLE_LIMIT', '64')),
+                client_edges=client_edges,
+            )
+            print(f'  [independent] Spearman rho={result["spearman_rho"]:.6f} '
+                  f'from {result["candidate_count"]} local subcohort profiles', flush=True)
+            # Deliberate dedicated one-shot diagnostic: no cloud release, no
+            # training round, and no changes to the Sample RDP ledger.
+            raise SystemExit(0)
+
         planned_liie_groups = _liie_planned_edge_aggregate_groups(
             selected,
             client_edges,
@@ -2761,6 +2831,71 @@ def _run_lenet5_policy(
             train_tasks.append((client_id, candidate, idx, dispatch_sequence))
             dispatch_sequence += 1
 
+        _assert_sample_hierarchical_preflight(
+            privacy_unit=effective_selection.privacy_unit,
+            train_tasks=train_tasks,
+            mode_specs=MODE_SPECS,
+        )
+
+        # Debit the complete authorized Sample-DP work for EVERY dispatched
+        # client before any private worker execution. Cloud admission is a
+        # later communication decision, not the privacy accounting boundary.
+        sample_dispatch_charges = {}
+        sample_stage_audits = {}
+        if effective_selection.privacy_unit == "sample":
+            sample_stage_audits = {
+                int(cid): SampleStageEventAudit(
+                    client_id=int(cid), candidate=candidate,
+                    scheduled_stages=uniform_sample_stage_plan(
+                        candidate=candidate,
+                        stage_count=max(1, int(MODE_SPECS[candidate.mode].E_edge_loops)),
+                    ),
+                )
+                for cid, candidate, _idx, _sequence in train_tasks
+            }
+            sample_dispatch_charges = charge_sample_dispatch_before_worker(
+                train_tasks=train_tasks,
+                privacy_ledgers=privacy_ledgers,
+            )
+            for charged_client_id in sample_dispatch_charges:
+                remaining_epsilon[charged_client_id] = (
+                    privacy_ledgers[charged_client_id].remaining_budget
+                )
+            # Write ahead of worker releases. If a round is interrupted and
+            # resumed, next_round remains the same and the new dispatch must
+            # charge again; previously attempted private releases are NOT
+            # rolled back. An interrupted run needs this checkpoint to resume.
+            if sample_dispatch_charges:
+                _save_policy_checkpoint(
+                    checkpoint_path,
+                    policy=policy,
+                    next_round=round_idx,
+                    global_end=global_end,
+                    global_edge=global_edge,
+                    remaining_epsilon=remaining_epsilon,
+                    privacy_ledgers=privacy_ledgers,
+                    previous_choices=previous_choices,
+                    fixed_mode_assignments=fixed_mode_assignments,
+                    fixed_privacy_profiles=fixed_privacy_profiles,
+                    round_rows=round_rows,
+                    decision_rows=decision_rows,
+                    candidate_mode_audit_rows=candidate_mode_audit_rows,
+                    pareto_profile_audit_rows=pareto_profile_audit_rows,
+                    flow_event_rows=flow_event_rows,
+                    link_state_rows=link_state_rows,
+                    best_accuracy=best_accuracy,
+                    logical_time=logical_time,
+                    rng=rng,
+                    np_rng=np_rng,
+                    train_config=train_config,
+                    selection=selection,
+                    real_he_rounds=real_he_rounds,
+                    real_he_aggregated_clients=real_he_aggregated_clients,
+                    global_pareto_selection_rounds=global_pareto_selection_rounds,
+                    client_model_states=client_model_states,
+                    mainline_release_account=release_account,
+                )
+
         calibration_capture_stats: dict[str, Any] = {
             "captured_pairs": 0,
             "captured_cells": 0,
@@ -2863,6 +2998,28 @@ def _run_lenet5_policy(
             progress_callback=training_progress_callback,
             progress_event_callback=training_event_callback,
         )
+        sample_worker_client_audit_count = 0
+        if effective_selection.privacy_unit == "sample":
+            for sample_cid, sample_stage_audit in sample_stage_audits.items():
+                if sample_cid not in worker_results:
+                    raise RuntimeError(
+                        f"Sample-DP dispatched client {sample_cid} missing worker evidence; fail closed"
+                    )
+                sample_stage_audit.observe(stage=0, worker=worker_results[sample_cid])
+                if len(sample_stage_audit.stages) == 1:
+                    sample_stage_audit.finalize()
+            # Only one-stage candidates can be compared to full-round totals
+            # immediately. Hierarchical receipts must be checked one stage at
+            # a time and completed AFTER the Edge retraining loop.
+            first_pass_complete_ids = {
+                cid for cid, audit in sample_stage_audits.items()
+                if len(audit.stages) == 1
+            }
+            sample_worker_client_audit_count = _assert_sample_worker_accounting_matches(
+                admitted_client_ids=first_pass_complete_ids,
+                selected_by_id={cid: cand for cid, cand, _pool, _rem in selected},
+                worker_results=worker_results,
+            )
         _synchronize_device_for_timing(device)
         training_wall_time_sec = (
             time.perf_counter()
@@ -3018,17 +3175,11 @@ def _run_lenet5_policy(
                     f"LIIE SecAgg cohort on edge {edge_id} changed after dispatch; "
                     "aborting unprotected aggregate publication"
                 )
-        sample_worker_client_audit_count = 0
-        if effective_selection.privacy_unit == "sample":
-            sample_worker_client_audit_count = _assert_sample_worker_accounting_matches(
-                admitted_client_ids=admitted_client_ids,
-                selected_by_id=selected_by_id,
-                worker_results=worker_results,
-            )
         for client_id, candidate in selected_by_id.items():
             ledger = privacy_ledgers[client_id]
             row = round_decision_rows_by_client[client_id]
-            if client_id in admitted_client_ids:
+            if (client_id in admitted_client_ids or
+                    (effective_selection.privacy_unit == "sample" and client_id in sample_dispatch_charges)):
                 if effective_selection.privacy_unit == "sample":
                     if not isinstance(
                         ledger,
@@ -3068,28 +3219,15 @@ def _run_lenet5_policy(
                         else 1.0
                     )
 
-                    projection = ledger.add(
-                        embedding_events=(
-                            candidate.sample_embedding_events
-                        ),
-                        label_grad_events=(
-                            candidate.sample_label_grad_events
-                        ),
-                        optimizer_events=(
-                            candidate.sample_optimizer_events
-                        ),
-                        embedding_noise_multiplier=(
-                            embedding_sigma
-                        ),
-                        label_grad_noise_multiplier=(
-                            label_grad_sigma
-                        ),
-                        optimizer_noise_multiplier=(
-                            optimizer_sigma
-                            if optimizer_sigma is not None
-                            else 1.0
-                        ),
-                    )
+                    # PREPAID for every dispatched client, regardless of
+                    # Cloud admission. Never charge a second time here.
+                    charge = sample_dispatch_charges.get(client_id)
+                    if charge is None:
+                        raise RuntimeError(
+                            f"Sample-DP client {client_id} admitted without "
+                            "a pre-dispatch privacy charge; fail closed"
+                        )
+                    projection = charge.projection
 
                     row["feature_dp_events"] = 0
                     row["update_dp_events"] = 0
@@ -3268,6 +3406,18 @@ def _run_lenet5_policy(
                     )
                     multi_edge_retraining_calls += 1
                     multi_edge_retraining_tasks += len(cycle_tasks)
+                    if effective_selection.privacy_unit == "sample":
+                        # Audits run BEFORE using this stage's private update
+                        # in any Edge aggregate or subsequent client state.
+                        for cycle_cid in client_ids:
+                            if cycle_cid not in cycle_results:
+                                raise RuntimeError(
+                                    f"Sample-DP hierarchical stage {edge_loop_idx} "
+                                    f"missing worker receipt for client {cycle_cid}; fail closed"
+                                )
+                            sample_stage_audits[cycle_cid].observe(
+                                stage=edge_loop_idx, worker=cycle_results[cycle_cid]
+                            )
                     cycle_updates = [
                         (
                             client_id,
@@ -3316,6 +3466,18 @@ def _run_lenet5_policy(
                 zero_diff = _zero_state_difference(global_end, global_edge, device)
                 for client_id in client_ids:
                     overridden_admitted_diffs[client_id] = zero_diff
+
+        if effective_selection.privacy_unit == "sample":
+            # The Flow may drop a client AFTER its first private worker pass.
+            # Its undispatched later stages have no worker receipts; we audit
+            # only the actual prefix, retaining the FULL prepaid RDP charge.
+            # Every Cloud-admitted client must have ALL scheduled receipts.
+            for sample_cid, sample_stage_audit in sample_stage_audits.items():
+                if sample_cid in admitted_client_ids:
+                    sample_stage_audit.finalize()
+                else:
+                    sample_stage_audit.finalize_executed_prefix(executed_stages=1)
+            sample_worker_client_audit_count = len(sample_stage_audits)
 
         admitted_updates = [
             (

@@ -1,0 +1,27 @@
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -2451,6 +2451,24 @@
+             break
+         archive = next_archive
+ 
++    # Incremental Pareto neighbors carry an exact scalar learning cost but do
++    # not carry the full joint-calibration decomposition.  Re-evaluate the
++    # bounded final archive *before* ranking it so selection and exported
++    # diagnostics use the same complete ProfileEvaluation objects.  Do not
++    # touch the large neighbor loop: this costs at most archive_size full
++    # evaluations per selection round.
++    if config.learning_objective == "joint_calibration":
++        archive = [
++            evaluate(item.profile, profile_signature=item.profile_signature)
++            for item in archive
++        ]
++        # Seeds are also exposed in pareto_profile_audit.csv.  They must not
++        # retain scalar-only incremental/default diagnostics either.
++        seed_evaluations = [
++            evaluate(item.profile, profile_signature=item.profile_signature)
++            for item in seed_evaluations
++        ]
++
+     chosen = (
+         _choose_tchebycheff(archive, config.pareto_norm_eps)
+         if objective == "pareto"

@@ -1,0 +1,177 @@
+"""Pure, fail-closed stage event reconciliation for planned Sample-DP training.
+
+This module does NOT reserve/commit privacy budgets and does NOT authorize
+hierarchical execution. The runtime must reserve a conservative budget before
+any release, identify all released objects, and pass per-stage worker evidence.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+_COUNTERS = (
+    ("sample_embedding_events", "feature_dp_release_batches"),
+    ("sample_label_grad_events", "sample_label_grad_dp_release_batches"),
+    ("sample_optimizer_events", "sample_dp_optimizer_steps"),
+)
+
+
+def _nonnegative_integer(value: Any, *, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field}: bool is not a valid event counter")
+    try:
+        converted = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field}: missing or invalid event counter") from exc
+    if converted < 0 or converted != value:
+        raise ValueError(f"{field}: expected nonnegative integer, got {value!r}")
+    return converted
+
+
+@dataclass(frozen=True)
+class SampleEventCounts:
+    embedding: int
+    label_grad: int
+    optimizer: int
+
+    def __post_init__(self) -> None:
+        for field in ("embedding", "label_grad", "optimizer"):
+            _nonnegative_integer(getattr(self, field), field=field)
+
+    @classmethod
+    def from_worker(cls, diagnostic: Mapping[str, Any]) -> "SampleEventCounts":
+        values = []
+        for _candidate_name, worker_name in _COUNTERS:
+            if worker_name not in diagnostic:
+                raise ValueError(f"worker event audit missing {worker_name}")
+            values.append(_nonnegative_integer(diagnostic[worker_name], field=worker_name))
+        return cls(*values)
+
+    @classmethod
+    def from_candidate(cls, candidate: Any) -> "SampleEventCounts":
+        values = []
+        for candidate_name, _worker_name in _COUNTERS:
+            if not hasattr(candidate, candidate_name):
+                raise ValueError(f"candidate event audit missing {candidate_name}")
+            values.append(_nonnegative_integer(getattr(candidate, candidate_name), field=candidate_name))
+        return cls(*values)
+
+    def __add__(self, other: "SampleEventCounts") -> "SampleEventCounts":
+        return SampleEventCounts(
+            self.embedding + other.embedding,
+            self.label_grad + other.label_grad,
+            self.optimizer + other.optimizer,
+        )
+
+
+def uniform_sample_stage_plan(*, candidate: Any, stage_count: int) -> dict[int, SampleEventCounts]:
+    """Partition the *charged upper bound* across real worker invocations.
+
+    The selection candidate has cumulative events; a worker runs one training
+    block each time. Reject non-divisible counters rather than rounding away
+    privacy events. This function does NOT authorize a release or a retry.
+    """
+    count = _nonnegative_integer(stage_count, field="stage_count")
+    if count < 1:
+        raise ValueError("Sample-DP stage_count must be positive")
+    total = SampleEventCounts.from_candidate(candidate)
+    values = (total.embedding, total.label_grad, total.optimizer)
+    if any(value % count for value in values):
+        raise ValueError(
+            f"Sample-DP candidate event totals {total} are not divisible "
+            f"by {count} worker stages; fail closed"
+        )
+    per_stage = SampleEventCounts(*(value // count for value in values))
+    return {stage: per_stage for stage in range(count)}
+
+
+class SampleStageEventAudit:
+    """Reconcile actual per-stage events to an explicitly scheduled event plan.
+
+    A schedule must cover EVERY execution, including retries. Event count
+    equality is a *runtime consistency check*, not a Sample-DP proof.
+    """
+
+    def __init__(
+        self,
+        *,
+        client_id: int,
+        candidate: Any,
+        scheduled_stages: Mapping[int, SampleEventCounts],
+    ) -> None:
+        if not scheduled_stages:
+            raise ValueError("Sample-DP stage plan cannot be empty")
+        if set(scheduled_stages) != set(range(len(scheduled_stages))):
+            raise ValueError("Sample-DP stage indices must be contiguous from zero")
+        if any(not isinstance(c, SampleEventCounts) for c in scheduled_stages.values()):
+            raise TypeError("stage counts must be SampleEventCounts")
+        self.client_id = int(client_id)
+        self.expected = SampleEventCounts.from_candidate(candidate)
+        self.stages = dict(scheduled_stages)
+        total = SampleEventCounts(0, 0, 0)
+        for counters in self.stages.values():
+            total += counters
+        if total != self.expected:
+            raise ValueError(
+                f"Sample-DP client {self.client_id} stage plan {total} "
+                f"!= candidate charged events {self.expected}"
+            )
+        self._observed: dict[int, SampleEventCounts] = {}
+
+    def observe(self, *, stage: int, worker: Mapping[str, Any]) -> None:
+        stage = _nonnegative_integer(stage, field="stage")
+        if stage not in self.stages:
+            raise RuntimeError(f"Sample-DP client {self.client_id}: unknown/retry stage {stage}")
+        if stage in self._observed:
+            raise RuntimeError(f"Sample-DP client {self.client_id}: duplicate stage {stage}")
+        if stage != len(self._observed):
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id}: out-of-order stage {stage}; "
+                f"expected {len(self._observed)}"
+            )
+        actual = SampleEventCounts.from_worker(worker)
+        expected = self.stages[stage]
+        if actual != expected:
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id} stage {stage}: "
+                f"observed {actual}, expected {expected}; fail closed"
+            )
+        self._observed[stage] = actual
+
+    def finalize_executed_prefix(self, *, executed_stages: int) -> SampleEventCounts:
+        """Audit an explicitly stopped prefix (e.g., dropped after Cloud Flow).
+
+        Only the caller, *after* determining which clients were admitted, may
+        use this for a client whose later stages were not dispatched. The
+        privacy ledger retains its conservative FULL pre-dispatch charge.
+        This never proves absence of hidden releases outside the worker.
+        """
+        count = _nonnegative_integer(executed_stages, field="executed_stages")
+        if count < 1 or count > len(self.stages):
+            raise ValueError("executed_stages outside the scheduled stage range")
+        expected = set(range(count))
+        actual = set(self._observed)
+        if actual != expected:
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id}: stage receipt prefix mismatch "
+                f"expected {sorted(expected)}, observed {sorted(actual)}; fail closed"
+            )
+        total = SampleEventCounts(0, 0, 0)
+        for index in range(count):
+            total += self._observed[index]
+        return total
+
+    def finalize(self) -> SampleEventCounts:
+        missing = set(self.stages) - set(self._observed)
+        if missing:
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id}: missing stage observations "
+                f"{sorted(missing)}; fail closed"
+            )
+        total = SampleEventCounts(0, 0, 0)
+        for counters in self._observed.values():
+            total += counters
+        if total != self.expected:
+            raise RuntimeError("Sample-DP total event count mismatch; fail closed")
+        return total

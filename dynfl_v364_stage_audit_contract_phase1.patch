@@ -1,0 +1,261 @@
+diff --git a/dynfed/sample_stage_event_audit.py b/dynfed/sample_stage_event_audit.py
+new file mode 100644
+--- /dev/null
++++ b/dynfed/sample_stage_event_audit.py
+@@ -0,0 +1,133 @@
++"""Pure, fail-closed stage event reconciliation for planned Sample-DP training.
++
++This module does NOT reserve/commit privacy budgets and does NOT authorize
++hierarchical execution. The runtime must reserve a conservative budget before
++any release, identify all released objects, and pass per-stage worker evidence.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any, Mapping
++
++
++_COUNTERS = (
++    ("sample_embedding_events", "feature_dp_release_batches"),
++    ("sample_label_grad_events", "sample_label_grad_dp_release_batches"),
++    ("sample_optimizer_events", "sample_dp_optimizer_steps"),
++)
++
++
++def _nonnegative_integer(value: Any, *, field: str) -> int:
++    if isinstance(value, bool):
++        raise ValueError(f"{field}: bool is not a valid event counter")
++    try:
++        converted = int(value)
++    except (TypeError, ValueError, OverflowError) as exc:
++        raise ValueError(f"{field}: missing or invalid event counter") from exc
++    if converted < 0 or converted != value:
++        raise ValueError(f"{field}: expected nonnegative integer, got {value!r}")
++    return converted
++
++
++@dataclass(frozen=True)
++class SampleEventCounts:
++    embedding: int
++    label_grad: int
++    optimizer: int
++
++    def __post_init__(self) -> None:
++        for field in ("embedding", "label_grad", "optimizer"):
++            _nonnegative_integer(getattr(self, field), field=field)
++
++    @classmethod
++    def from_worker(cls, diagnostic: Mapping[str, Any]) -> "SampleEventCounts":
++        values = []
++        for _candidate_name, worker_name in _COUNTERS:
++            if worker_name not in diagnostic:
++                raise ValueError(f"worker event audit missing {worker_name}")
++            values.append(_nonnegative_integer(diagnostic[worker_name], field=worker_name))
++        return cls(*values)
++
++    @classmethod
++    def from_candidate(cls, candidate: Any) -> "SampleEventCounts":
++        values = []
++        for candidate_name, _worker_name in _COUNTERS:
++            if not hasattr(candidate, candidate_name):
++                raise ValueError(f"candidate event audit missing {candidate_name}")
++            values.append(_nonnegative_integer(getattr(candidate, candidate_name), field=candidate_name))
++        return cls(*values)
++
++    def __add__(self, other: "SampleEventCounts") -> "SampleEventCounts":
++        return SampleEventCounts(
++            self.embedding + other.embedding,
++            self.label_grad + other.label_grad,
++            self.optimizer + other.optimizer,
++        )
++
++
++class SampleStageEventAudit:
++    """Reconcile actual per-stage events to an explicitly scheduled event plan.
++
++    A schedule must cover EVERY execution, including retries. Event count
++    equality is a *runtime consistency check*, not a Sample-DP proof.
++    """
++
++    def __init__(
++        self,
++        *,
++        client_id: int,
++        candidate: Any,
++        scheduled_stages: Mapping[int, SampleEventCounts],
++    ) -> None:
++        if not scheduled_stages:
++            raise ValueError("Sample-DP stage plan cannot be empty")
++        if set(scheduled_stages) != set(range(len(scheduled_stages))):
++            raise ValueError("Sample-DP stage indices must be contiguous from zero")
++        if any(not isinstance(c, SampleEventCounts) for c in scheduled_stages.values()):
++            raise TypeError("stage counts must be SampleEventCounts")
++        self.client_id = int(client_id)
++        self.expected = SampleEventCounts.from_candidate(candidate)
++        self.stages = dict(scheduled_stages)
++        total = SampleEventCounts(0, 0, 0)
++        for counters in self.stages.values():
++            total += counters
++        if total != self.expected:
++            raise ValueError(
++                f"Sample-DP client {self.client_id} stage plan {total} "
++                f"!= candidate charged events {self.expected}"
++            )
++        self._observed: dict[int, SampleEventCounts] = {}
++
++    def observe(self, *, stage: int, worker: Mapping[str, Any]) -> None:
++        stage = _nonnegative_integer(stage, field="stage")
++        if stage not in self.stages:
++            raise RuntimeError(f"Sample-DP client {self.client_id}: unknown/retry stage {stage}")
++        if stage in self._observed:
++            raise RuntimeError(f"Sample-DP client {self.client_id}: duplicate stage {stage}")
++        if stage != len(self._observed):
++            raise RuntimeError(
++                f"Sample-DP client {self.client_id}: out-of-order stage {stage}; "
++                f"expected {len(self._observed)}"
++            )
++        actual = SampleEventCounts.from_worker(worker)
++        expected = self.stages[stage]
++        if actual != expected:
++            raise RuntimeError(
++                f"Sample-DP client {self.client_id} stage {stage}: "
++                f"observed {actual}, expected {expected}; fail closed"
++            )
++        self._observed[stage] = actual
++
++    def finalize(self) -> SampleEventCounts:
++        missing = set(self.stages) - set(self._observed)
++        if missing:
++            raise RuntimeError(
++                f"Sample-DP client {self.client_id}: missing stage observations "
++                f"{sorted(missing)}; fail closed"
++            )
++        total = SampleEventCounts(0, 0, 0)
++        for counters in self._observed.values():
++            total += counters
++        if total != self.expected:
++            raise RuntimeError("Sample-DP total event count mismatch; fail closed")
++        return total
+diff --git a/tests/test_dynfl_v364_stage_event_audit.py b/tests/test_dynfl_v364_stage_event_audit.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_dynfl_v364_stage_event_audit.py
+@@ -0,0 +1,118 @@
++"""v3.6.4 audit primitive: stage evidence cannot be replaced by predictions."""
++from types import SimpleNamespace
++
++import pytest
++
++from dynfed.sample_stage_event_audit import SampleEventCounts as C
++from dynfed.sample_stage_event_audit import SampleStageEventAudit
++
++
++def candidate(z, g, o):
++    return SimpleNamespace(
++        sample_embedding_events=z,
++        sample_label_grad_events=g,
++        sample_optimizer_events=o,
++    )
++
++
++def worker(z, g, o):
++    return {
++        "feature_dp_release_batches": z,
++        "sample_label_grad_dp_release_batches": g,
++        "sample_dp_optimizer_steps": o,
++    }
++
++
++def test_split_hierarchical_all_stages_reconciled():
++    audit = SampleStageEventAudit(
++        client_id=44, candidate=candidate(9, 9, 0),
++        scheduled_stages={0: C(3, 3, 0), 1: C(3, 3, 0), 2: C(3, 3, 0)},
++    )
++    for s in range(3):
++        audit.observe(stage=s, worker=worker(3, 3, 0))
++    assert audit.finalize() == C(9, 9, 0)
++
++
++def test_full_local_hierarchical_counts_optimizer():
++    audit = SampleStageEventAudit(
++        client_id=79, candidate=candidate(0, 0, 6),
++        scheduled_stages={0: C(0, 0, 2), 1: C(0, 0, 2), 2: C(0, 0, 2)},
++    )
++    for stage in range(3):
++        audit.observe(stage=stage, worker=worker(0, 0, 2))
++    assert audit.finalize().optimizer == 6
++
++
++def test_first_stage_alone_does_not_complete():
++    audit = SampleStageEventAudit(
++        client_id=1, candidate=candidate(9, 9, 0),
++        scheduled_stages={0: C(3, 3, 0), 1: C(3, 3, 0), 2: C(3, 3, 0)},
++    )
++    audit.observe(stage=0, worker=worker(3, 3, 0))
++    with pytest.raises(RuntimeError, match="missing stage"):
++        audit.finalize()
++
++
++def test_predicted_counts_are_not_worker_observations():
++    audit = SampleStageEventAudit(
++        client_id=1, candidate=candidate(6, 6, 0),
++        scheduled_stages={0: C(3, 3, 0), 1: C(3, 3, 0)},
++    )
++    with pytest.raises(RuntimeError, match="observed"):
++        audit.observe(stage=0, worker=worker(6, 6, 0))
++
++
++def test_cannot_silently_drop_or_duplicate_stage():
++    audit = SampleStageEventAudit(
++        client_id=1, candidate=candidate(0, 0, 4),
++        scheduled_stages={0: C(0, 0, 2), 1: C(0, 0, 2)},
++    )
++    audit.observe(stage=0, worker=worker(0, 0, 2))
++    with pytest.raises(RuntimeError, match="duplicate"):
++        audit.observe(stage=0, worker=worker(0, 0, 2))
++    with pytest.raises(RuntimeError, match="unknown/retry"):
++        audit.observe(stage=2, worker=worker(0, 0, 2))
++
++
++@pytest.mark.parametrize("bad", [None, True, -1, 1.5, "NaN"])
++def test_bad_worker_counter_fails_closed(bad):
++    audit = SampleStageEventAudit(
++        client_id=1, candidate=candidate(1, 1, 0),
++        scheduled_stages={0: C(1, 1, 0)},
++    )
++    with pytest.raises((ValueError, TypeError)):
++        audit.observe(stage=0, worker=worker(bad, 1, 0))
++
++
++def test_missing_worker_field_fails_closed():
++    audit = SampleStageEventAudit(
++        client_id=1, candidate=candidate(1, 1, 0),
++        scheduled_stages={0: C(1, 1, 0)},
++    )
++    with pytest.raises(ValueError, match="missing"):
++        audit.observe(stage=0, worker={"feature_dp_release_batches": 1})
++
++
++def test_stage_plan_must_equal_candidate_precharge():
++    with pytest.raises(ValueError, match="stage plan"):
++        SampleStageEventAudit(
++            client_id=1, candidate=candidate(9, 9, 0),
++            scheduled_stages={0: C(3, 3, 0)},
++        )
++
++
++def test_noncontiguous_schedule_rejected():
++    with pytest.raises(ValueError, match="contiguous"):
++        SampleStageEventAudit(
++            client_id=1, candidate=candidate(2, 2, 0),
++            scheduled_stages={0: C(1, 1, 0), 2: C(1, 1, 0)},
++        )
++
++
++def test_out_of_order_stage_fails_closed():
++    audit = SampleStageEventAudit(
++        client_id=1, candidate=candidate(2, 2, 0),
++        scheduled_stages={0: C(1, 1, 0), 1: C(1, 1, 0)},
++    )
++    with pytest.raises(RuntimeError, match="out-of-order"):
++        audit.observe(stage=1, worker=worker(1, 1, 0))

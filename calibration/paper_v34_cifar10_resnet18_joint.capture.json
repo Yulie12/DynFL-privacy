@@ -1,0 +1,16 @@
+{
+  "table": "E:\\YTT\\GROUP\\DynFL-privacy\\calibration\\paper_v34_cifar10_resnet18_joint.pt",
+  "entry_count": 45,
+  "pair_count": 190,
+  "capture_rows": [
+    {
+      "round": 0,
+      "captured_pairs": 190,
+      "captured_cells": 38,
+      "captured_clients": 8,
+      "state_key": "round:0",
+      "wall_time_sec": 18.090442698448896
+    }
+  ],
+  "note": "Capture is offline/periodic calibration work. Online selector runs only load the saved table."
+}

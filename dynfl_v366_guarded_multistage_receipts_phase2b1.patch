@@ -1,0 +1,275 @@
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -57,7 +57,7 @@
+ from .nodes import build_profiles
+ from .privacy import ClientPrivacyLedger, SamplePrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
+ from .sample_dispatch_accounting import charge_sample_dispatch_before_worker
+-from .sample_stage_event_audit import SampleEventCounts, SampleStageEventAudit
++from .sample_stage_event_audit import SampleStageEventAudit, uniform_sample_stage_plan
+ from .protection_rules import audit_update_release
+ from .streaming_secagg import streaming_secure_aggregate_exact_target
+ from .selection import (
+@@ -2846,7 +2846,10 @@
+             sample_stage_audits = {
+                 int(cid): SampleStageEventAudit(
+                     client_id=int(cid), candidate=candidate,
+-                    scheduled_stages={0: SampleEventCounts.from_candidate(candidate)},
++                    scheduled_stages=uniform_sample_stage_plan(
++                        candidate=candidate,
++                        stage_count=max(1, int(MODE_SPECS[candidate.mode].E_edge_loops)),
++                    ),
+                 )
+                 for cid, candidate, _idx, _sequence in train_tasks
+             }
+@@ -3003,9 +3006,17 @@
+                         f"Sample-DP dispatched client {sample_cid} missing worker evidence; fail closed"
+                     )
+                 sample_stage_audit.observe(stage=0, worker=worker_results[sample_cid])
+-                sample_stage_audit.finalize()
++                if len(sample_stage_audit.stages) == 1:
++                    sample_stage_audit.finalize()
++            # Only one-stage candidates can be compared to full-round totals
++            # immediately. Hierarchical receipts must be checked one stage at
++            # a time and completed AFTER the Edge retraining loop.
++            first_pass_complete_ids = {
++                cid for cid, audit in sample_stage_audits.items()
++                if len(audit.stages) == 1
++            }
+             sample_worker_client_audit_count = _assert_sample_worker_accounting_matches(
+-                admitted_client_ids=set(sample_dispatch_charges),
++                admitted_client_ids=first_pass_complete_ids,
+                 selected_by_id={cid: cand for cid, cand, _pool, _rem in selected},
+                 worker_results=worker_results,
+             )
+@@ -3395,6 +3406,18 @@
+                     )
+                     multi_edge_retraining_calls += 1
+                     multi_edge_retraining_tasks += len(cycle_tasks)
++                    if effective_selection.privacy_unit == "sample":
++                        # Audits run BEFORE using this stage's private update
++                        # in any Edge aggregate or subsequent client state.
++                        for cycle_cid in client_ids:
++                            if cycle_cid not in cycle_results:
++                                raise RuntimeError(
++                                    f"Sample-DP hierarchical stage {edge_loop_idx} "
++                                    f"missing worker receipt for client {cycle_cid}; fail closed"
++                                )
++                            sample_stage_audits[cycle_cid].observe(
++                                stage=edge_loop_idx, worker=cycle_results[cycle_cid]
++                            )
+                     cycle_updates = [
+                         (
+                             client_id,
+@@ -3443,6 +3466,18 @@
+                 zero_diff = _zero_state_difference(global_end, global_edge, device)
+                 for client_id in client_ids:
+                     overridden_admitted_diffs[client_id] = zero_diff
++
++        if effective_selection.privacy_unit == "sample":
++            # The Flow may drop a client AFTER its first private worker pass.
++            # Its undispatched later stages have no worker receipts; we audit
++            # only the actual prefix, retaining the FULL prepaid RDP charge.
++            # Every Cloud-admitted client must have ALL scheduled receipts.
++            for sample_cid, sample_stage_audit in sample_stage_audits.items():
++                if sample_cid in admitted_client_ids:
++                    sample_stage_audit.finalize()
++                else:
++                    sample_stage_audit.finalize_executed_prefix(executed_stages=1)
++            sample_worker_client_audit_count = len(sample_stage_audits)
+ 
+         admitted_updates = [
+             (
+diff --git a/dynfed/sample_stage_event_audit.py b/dynfed/sample_stage_event_audit.py
+--- a/dynfed/sample_stage_event_audit.py
++++ b/dynfed/sample_stage_event_audit.py
+@@ -65,6 +65,27 @@
+         )
+ 
+ 
++def uniform_sample_stage_plan(*, candidate: Any, stage_count: int) -> dict[int, SampleEventCounts]:
++    """Partition the *charged upper bound* across real worker invocations.
++
++    The selection candidate has cumulative events; a worker runs one training
++    block each time. Reject non-divisible counters rather than rounding away
++    privacy events. This function does NOT authorize a release or a retry.
++    """
++    count = _nonnegative_integer(stage_count, field="stage_count")
++    if count < 1:
++        raise ValueError("Sample-DP stage_count must be positive")
++    total = SampleEventCounts.from_candidate(candidate)
++    values = (total.embedding, total.label_grad, total.optimizer)
++    if any(value % count for value in values):
++        raise ValueError(
++            f"Sample-DP candidate event totals {total} are not divisible "
++            f"by {count} worker stages; fail closed"
++        )
++    per_stage = SampleEventCounts(*(value // count for value in values))
++    return {stage: per_stage for stage in range(count)}
++
++
+ class SampleStageEventAudit:
+     """Reconcile actual per-stage events to an explicitly scheduled event plan.
+ 
+@@ -118,6 +139,29 @@
+             )
+         self._observed[stage] = actual
+ 
++    def finalize_executed_prefix(self, *, executed_stages: int) -> SampleEventCounts:
++        """Audit an explicitly stopped prefix (e.g., dropped after Cloud Flow).
++
++        Only the caller, *after* determining which clients were admitted, may
++        use this for a client whose later stages were not dispatched. The
++        privacy ledger retains its conservative FULL pre-dispatch charge.
++        This never proves absence of hidden releases outside the worker.
++        """
++        count = _nonnegative_integer(executed_stages, field="executed_stages")
++        if count < 1 or count > len(self.stages):
++            raise ValueError("executed_stages outside the scheduled stage range")
++        expected = set(range(count))
++        actual = set(self._observed)
++        if actual != expected:
++            raise RuntimeError(
++                f"Sample-DP client {self.client_id}: stage receipt prefix mismatch "
++                f"expected {sorted(expected)}, observed {sorted(actual)}; fail closed"
++            )
++        total = SampleEventCounts(0, 0, 0)
++        for index in range(count):
++            total += self._observed[index]
++        return total
++
+     def finalize(self) -> SampleEventCounts:
+         missing = set(self.stages) - set(self._observed)
+         if missing:
+diff --git a/tests/test_dynfl_v365_predispatch_sample_accounting.py b/tests/test_dynfl_v365_predispatch_sample_accounting.py
+--- a/tests/test_dynfl_v365_predispatch_sample_accounting.py
++++ b/tests/test_dynfl_v365_predispatch_sample_accounting.py
+@@ -83,11 +83,13 @@
+     debit = text.index('            sample_dispatch_charges = charge_sample_dispatch_before_worker(\n')
+     checkpoint = text.index('                _save_policy_checkpoint(\n', debit)
+     worker = text.index('        worker_results = _run_client_training_tasks(\n')
+-    audit = text.index('                admitted_client_ids=set(sample_dispatch_charges),\n')
++    audit = text.index('                admitted_client_ids=first_pass_complete_ids,\n')
+     flow = text.index('        flow_result = execute_mixed_round_flow(\n')
+     assert preflight < debit < checkpoint < worker < audit < flow
+     assert 'projection = charge.projection' in text
+     assert 'sample_stage_audit.observe(stage=0, worker=worker_results[sample_cid])' in text
++    assert 'first_pass_complete_ids' in text
++    assert 'sample_worker_client_audit_count = len(sample_stage_audits)' in text
+     assert 'if (client_id in admitted_client_ids or' in text
+     assert 'next_round=round_idx,' in text[checkpoint:worker]
+     ast.parse(text)
+diff --git a/tests/test_dynfl_v366_guarded_multistage_receipts.py b/tests/test_dynfl_v366_guarded_multistage_receipts.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_dynfl_v366_guarded_multistage_receipts.py
+@@ -0,0 +1,109 @@
++"""v3.6.6 Stage receipts wired while multi-stage Sample-DP stays blocked."""
++import ast
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from dynfed.sample_stage_event_audit import (
++    SampleEventCounts as C,
++    SampleStageEventAudit,
++    uniform_sample_stage_plan,
++)
++from dynfed.privacy import SamplePrivacyLedger
++from dynfed.sample_dispatch_accounting import charge_sample_dispatch_before_worker
++
++
++def candidate(z=9, g=9, o=0, sigma=5.0):
++    return SimpleNamespace(
++        sample_embedding_events=z,
++        sample_label_grad_events=g,
++        sample_optimizer_events=o,
++        sample_embedding_noise_multiplier=sigma,
++        sample_label_grad_noise_multiplier=sigma,
++        sample_optimizer_noise_multiplier=sigma if o else None,
++    )
++
++
++def worker(z=3, g=3, o=0):
++    return dict(feature_dp_release_batches=z,
++                sample_label_grad_dp_release_batches=g,
++                sample_dp_optimizer_steps=o)
++
++
++@pytest.mark.parametrize('totals,stages,each', [
++    ((9,9,0), 3, (3,3,0)),
++    ((0,0,6), 3, (0,0,2)),
++    ((3,3,0), 1, (3,3,0)),
++    ((0,0,0), 3, (0,0,0)),
++])
++def test_uniform_schedule_exact_sum(totals, stages, each):
++    plan = uniform_sample_stage_plan(candidate=candidate(*totals), stage_count=stages)
++    assert len(plan) == stages
++    assert list(plan.values()) == [C(*each)] * stages
++    assert tuple(sum(getattr(item, field) for item in plan.values())
++                 for field in ('embedding','label_grad','optimizer')) == totals
++
++
++@pytest.mark.parametrize('bad_count', [0, -1, 1.5, True, 'NaN'])
++def test_invalid_stage_count_rejected(bad_count):
++    with pytest.raises(ValueError):
++        uniform_sample_stage_plan(candidate=candidate(), stage_count=bad_count)
++
++
++def test_uneven_plan_fails_closed_without_floor_division():
++    with pytest.raises(ValueError, match='not divisible'):
++        uniform_sample_stage_plan(candidate=candidate(z=8,g=9), stage_count=3)
++
++
++def test_cloud_dropped_client_has_audited_first_stage_and_no_refund():
++    spec = candidate()
++    ledger = SamplePrivacyLedger(20.0)
++    charge_sample_dispatch_before_worker(
++        train_tasks=[(7,spec,None,0)], privacy_ledgers={7:ledger})
++    audit = SampleStageEventAudit(client_id=7,candidate=spec,
++        scheduled_stages=uniform_sample_stage_plan(candidate=spec,stage_count=3))
++    audit.observe(stage=0,worker=worker())
++    assert audit.finalize_executed_prefix(executed_stages=1) == C(3,3,0)
++    assert ledger.embedding_events == 9  # conservatively charged all stages
++    with pytest.raises(RuntimeError,match='missing stage'):
++        audit.finalize()
++
++
++def test_admitted_client_must_have_all_stage_receipts():
++    spec = candidate()
++    audit = SampleStageEventAudit(client_id=7,candidate=spec,
++        scheduled_stages=uniform_sample_stage_plan(candidate=spec,stage_count=3))
++    audit.observe(stage=0,worker=worker())
++    audit.observe(stage=1,worker=worker())
++    with pytest.raises(RuntimeError,match='missing stage'):
++        audit.finalize()
++    audit.observe(stage=2,worker=worker())
++    assert audit.finalize() == C(9,9,0)
++
++
++def test_dropped_prefix_needs_all_expected_receipts():
++    spec=candidate()
++    audit=SampleStageEventAudit(client_id=7,candidate=spec,
++        scheduled_stages=uniform_sample_stage_plan(candidate=spec,stage_count=3))
++    with pytest.raises(RuntimeError,match='prefix mismatch'):
++        audit.finalize_executed_prefix(executed_stages=1)
++    audit.observe(stage=0,worker=worker())
++    with pytest.raises(RuntimeError,match='prefix mismatch'):
++        audit.finalize_executed_prefix(executed_stages=2)
++    with pytest.raises(ValueError,match='range'):
++        audit.finalize_executed_prefix(executed_stages=4)
++
++
++def test_stage_zero_must_be_observed_before_flow_and_later_before_aggregate():
++    source=(Path(__file__).resolve().parents[1]/'dynfed/fmnist_lenet5_dynamic.py').read_text(encoding='utf8')
++    guard=source.index('        _assert_sample_hierarchical_preflight(\n')
++    charge=source.index('            sample_dispatch_charges = charge_sample_dispatch_before_worker(\n')
++    stage_zero=source.index('                sample_stage_audit.observe(stage=0, worker=worker_results[sample_cid])')
++    flow=source.index('        flow_result = execute_mixed_round_flow(\n')
++    later_stage=source.index('                            sample_stage_audits[cycle_cid].observe(\n')
++    edge_aggregate=source.index('                returned_state, used_real_he = _aggregate_returned_client_models(\n')
++    final_audit=source.index('                    sample_stage_audit.finalize_executed_prefix(executed_stages=1)')
++    cloud_updates=source.index('        admitted_updates = [\n')
++    assert guard < charge < stage_zero < flow < later_stage < edge_aggregate < final_audit < cloud_updates
++    ast.parse(source)

@@ -1,0 +1,94 @@
+diff --git a/tests/test_sample_dp_privacy_path_audit_contract.py b/tests/test_sample_dp_privacy_path_audit_contract.py
+new file mode 100644
+index 0000000..bb5856c
+--- /dev/null
++++ b/tests/test_sample_dp_privacy_path_audit_contract.py
+@@ -0,0 +1,88 @@
++"""Audit-observation semantics; these tests do not establish end-to-end DP."""
++
++import ast
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++
++def _load_privacy_path_audit():
++    # Extract only the pure audit helper from the real production source.
++    # This avoids loading GPU/training modules during lightweight audit tests.
++    source = Path(__file__).resolve().parents[1] / "dynfed" / "fmnist_lenet5_dynamic.py"
++    module = ast.parse(source.read_text(encoding="utf-8-sig"), filename=str(source))
++    matching = [
++        node for node in module.body
++        if isinstance(node, ast.FunctionDef) and node.name == "_observed_privacy_path_audit"
++    ]
++    assert len(matching) == 1, "Privacy path audit implementation is missing or duplicated"
++    isolated = ast.Module(body=matching, type_ignores=[])
++    namespace = {"Any": Any}
++    exec(compile(isolated, str(source), "exec"), namespace)
++    return namespace["_observed_privacy_path_audit"]
++
++
++@pytest.fixture
++def audit():
++    return _load_privacy_path_audit()
++
++
++def _call(audit, packets=(), he_execution="profiled", he_clients=0):
++    return audit(
++        privacy_unit="sample",
++        decision_rows=[{
++            "sample_embedding_events": 3,
++            "sample_label_grad_events": 3,
++            "sample_optimizer_events": 0,
++        }],
++        worker_results={1: {"feature_dp_release_batches": 3}},
++        protection_releases=list(packets),
++        he_execution=he_execution,
++        selected_he_clients=he_clients,
++    )
++
++
++def test_no_explicit_cloud_packet_does_not_claim_protection(audit):
++    result = _call(audit)
++    assert result["cloud_model_update_packet_count"] == 0
++    assert result["cloud_model_update_packet_audit_status"] == "not_applicable_no_cloud_packet"
++    assert result["sample_dp_postprocessing_dependency_status"] == "not_verified"
++    assert result["privacy_path_audit_scope"] == "observed_operations_not_end_to_end_proof"
++    assert result["sample_accounted_label_grad_events"] == 3
++
++
++def test_profiled_he_is_not_real_cryptography(audit):
++    result = _call(audit, [{
++        "object": "model_update", "destination": "cloud",
++        "dp_event_observed": False, "he_crypto_observed": False,
++        "he_execution": "profiled",
++    }], he_clients=1)
++    assert result["cloud_model_update_packet_count"] == 1
++    assert result["model_update_packet_profiled_he_count"] == 1
++    assert result["model_update_packet_real_he_observed_count"] == 0
++    assert result["cloud_model_update_packet_unprotected_count"] == 1
++    assert result["cloud_model_update_packet_audit_status"] == "unprotected_observed"
++    assert result["sample_dp_postprocessing_dependency_status"] == "not_verified"
++
++
++@pytest.mark.parametrize("dp_observed,he_observed", [(True, False), (False, True)])
++def test_observed_packet_protection_is_not_end_to_end_dp(audit, dp_observed, he_observed):
++    result = _call(audit, [{
++        "object": "model_update", "destination": "cloud",
++        "dp_event_observed": dp_observed, "he_crypto_observed": he_observed,
++        "he_execution": "real" if he_observed else "not_selected",
++    }])
++    assert result["cloud_model_update_packet_unprotected_count"] == 0
++    assert result["cloud_model_update_packet_audit_status"] == "protected_operation_observed_not_proof"
++    assert result["sample_dp_postprocessing_dependency_status"] == "not_verified"
++
++
++def test_non_update_or_non_cloud_packet_does_not_fake_cloud_update(audit):
++    result = _call(audit, [
++        {"object": "embedding", "destination": "cloud", "dp_event_observed": True},
++        {"object": "model_update", "destination": "edge", "dp_event_observed": True},
++    ])
++    assert result["model_update_packet_count"] == 1
++    assert result["cloud_model_update_packet_count"] == 0
++    assert result["cloud_model_update_packet_audit_status"] == "not_applicable_no_cloud_packet"

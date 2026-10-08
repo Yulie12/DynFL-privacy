@@ -1,0 +1,279 @@
+﻿ 2191:                 # Online selection performs no paired measurement. It only
+ 2192:                 # queries the offline table for the current round-conditioned
+ 2193:                 # cell; the table can fall back to the nearest calibrated round.
+ 2194:                 profile_selection_config = replace(
+ 2195:                     profile_selection_config,
+ 2196:                     joint_calibration_state_key=f"round:{round_idx}",
+ 2197:                 )
+ 2198:             selected, profile_evaluation = (
+ 2199:                 choose_cloud_dp_pareto_profile
+ 2200:                 if policy == "full_dynfl" and effective_selection.cloud_dp_plan != "legacy"
+ 2201:                 else choose_global_pareto_profile
+ 2202:             )(
+ 2203:                 config=profile_selection_config,
+ 2204:                 selected=selected,
+ 2205:                 client_samples=client_samples,
+ 2206:                 client_edges=client_edges,
+ 2207:                 previous_choices=prior_choices,
+ 2208:                 objective=objective,
+ 2209:                 search_method=search_method,
+ 2210:                 diagnostics=selection_diagnostics,
+ 2211:                 previous_client_updates=previous_client_updates,
+ 2212:                 fusion_objective_enabled=False,
+ 2213:             )
+ 2214:             for audit_stage, audit_evaluations in (
+ 2215:                 ("seed", selection_diagnostics.get("seed_evaluations", ())),
+ 2216:                 ("archive", selection_diagnostics.get("archive", ())),
+ 2217:             ):
+ 2218:                 pareto_profile_audit_rows.extend(
+ 2219:                     _pareto_profile_audit_rows(
+ 2220:                         round_idx=round_idx,
+ 2221:                         stage=audit_stage,
+ 2222:                         evaluations=list(audit_evaluations),
+ 2223:                         chosen=selection_diagnostics.get("chosen"),
+ 2224:                         norm_eps=effective_selection.pareto_norm_eps,
+ 2225:                     )
+ 2226:                 )
+ 2227:             if frozen_mode_runtime_active:
+ 2228:                 selection_diagnostics["coverage_constraint_bypassed_for_frozen_mode"] = True
+ 2229:             if policy in {"ours", "full_dynfl"}:
+ 2230:                 global_pareto_selection_rounds += 1
+ 2231: 
+ 2232:         if policy in {
+ 2233:             "ours",
+ 2234:             "ours_no_omega",
+ 2235:             "ours_fixed_liieiiic",
+ 2236:             "full_dynfl",
+ 2237:             "full_dynfl_3obj_diag",
+ 2238:             "fixed_mode_fixed_privacy",
+ 2239:             "dynamic_mode_fixed_privacy",
+ 2240:             "fixed_mode_dynamic_privacy",
+ 2241:             "no_protection",
+ 2481:                         else "frozen"
+ 2482:                         if policy in _FROZEN_MODE_POLICIES
+ 2483:                         else ""
+ 2484:                     ),
+ 2485:                     "frozen_mode_runtime_skip": int(
+ 2486:                         policy in _FROZEN_MODE_POLICIES
+ 2487:                         and candidate.mode == "SKIP"
+ 2488:                         and frozen_mode_assignment not in {None, "SKIP"}
+ 2489:                     ),
+ 2490:                     "frozen_mode_violation": int(
+ 2491:                         policy in _FROZEN_MODE_POLICIES
+ 2492:                         and candidate.mode not in {"SKIP", frozen_mode_assignment}
+ 2493:                     ),
+ 2494:                     "mechanisms": candidate_mechanism_label(candidate),
+ 2495:                     "dp_execution_plan": candidate.dp_execution_plan,
+ 2496:                     "update_mechanism": (
+ 2497:                         _reported_release_mechanism(
+ 2498:                             candidate,
+ 2499:                             mainline_fusion=effective_selection.mainline_fusion,
+ 2500:                             mainline_dp_enabled=mainline_dp_enabled,
+ 2501:                         )
+ 2502:                         if effective_selection.mainline_fusion
+ 2503:                         else "/".join(
+ 2504:                             sorted(set(candidate_mechanisms_for_object(candidate, "upd")))
+ 2505:                         ) or "none"
+ 2506:                     ),
+ 2507:                     "global_release_required": int(candidate.global_release_required),
+ 2508:                     "local_training_epochs": _client_epoch_count(train_config, effective_selection, candidate),
+ 2509:                     "time": candidate.time,
+ 2510:                     "pre_aggregation_time": candidate.pre_aggregation_time,
+ 2511:                     "risk": candidate.risk,
+ 3211:         ]
+ 3212:         admitted_candidates = [
+ 3213:             candidate
+ 3214:             for client_id, _state_diff, _sample_count, candidate in admitted_updates
+ 3215:             if candidate is not None and client_id in flow_result.selected_client_ids
+ 3216:         ]
+ 3217:         feature_objects = {"emb", "grad", "weakemb", "strongemb", "pseudo_label"}
+ 3218:         num_feature_dp_clients = sum(
+ 3219:             any(
+ 3220:                 mechanism == "dp"
+ 3221:                 for obj in feature_objects
+ 3222:                 for mechanism in candidate_mechanisms_for_object(candidate, obj)
+ 3223:             )
+ 3224:             for candidate in admitted_candidates
+ 3225:         )
+ 3226:         num_update_dp_clients = sum(
+ 3227:             any(
+ 3228:                 mechanism_uses_dp(mechanism)
+ 3229:                 for mechanism in candidate_mechanisms_for_object(candidate, "upd")
+ 3230:             )
+ 3231:             for candidate in admitted_candidates
+ 3232:         )
+ 3233:         num_he_clients = sum(
+ 3234:             candidate_has_he(candidate)
+ 3235:             for candidate in admitted_candidates
+ 3236:         )
+ 3237:         update_protection_mechanisms = [
+ 3238:             _candidate_cloud_update_mechanism(candidate)
+ 3239:             for candidate in admitted_candidates
+ 3240:             if _mode_reaches_cloud(candidate.mode)
+ 3241:         ]
+ 3242:         num_update_dp_only_clients = sum(
+ 3243:             mechanism_uses_dp(mechanism) and not mechanism_uses_he(mechanism)
+ 3244:             for mechanism in update_protection_mechanisms
+ 3245:         )
+ 3246:         num_update_he_only_clients = sum(
+ 3247:             mechanism_uses_he(mechanism) and not mechanism_uses_dp(mechanism)
+ 3248:             for mechanism in update_protection_mechanisms
+ 3249:         )
+ 3250:         num_update_dp_he_clients = sum(
+ 3251:             mechanism_uses_dp(mechanism) and mechanism_uses_he(mechanism)
+ 3252:             for mechanism in update_protection_mechanisms
+ 3253:         )
+ 3254:         global_updates = [
+ 3255:             (client_id, state_diff, sample_count, candidate)
+ 3256:             for client_id, state_diff, sample_count, candidate in admitted_updates
+ 3257:             if (
+ 3258:                 effective_selection.mainline_fusion
+ 3259:                 or _mode_reaches_cloud(candidate.mode if candidate else "")
+ 3260:             )
+ 3261:         ]
+ 3262:         cross_domain_update_clients = len(global_updates)
+ 3263:         update_dp_coverage = (
+ 3264:             num_update_dp_clients / cross_domain_update_clients
+ 3265:             if cross_domain_update_clients
+ 3266:             else 0.0
+ 3267:         )
+ 3268:         update_he_coverage = (
+ 3269:             num_he_clients / cross_domain_update_clients
+ 3270:             if cross_domain_update_clients
+ 3271:             else 0.0
+ 3272:         )
+ 3273:         uniform_update_dp = (
+ 3274:             cross_domain_update_clients > 0
+ 3275:             and num_update_dp_clients == cross_domain_update_clients
+ 3276:         )
+ 3277:         uniform_local_update_dp = (
+ 3278:             cross_domain_update_clients > 0
+ 3279:             and num_update_dp_only_clients == cross_domain_update_clients
+ 3280:         )
+ 3281:         uniform_secure_aggregate_dp = (
+ 3282:             cross_domain_update_clients > 0
+ 3283:             and num_update_dp_he_clients == cross_domain_update_clients
+ 3284:         )
+ 3285:         all_cross_domain_updates_protected = (
+ 3286:             cross_domain_update_clients > 0
+ 3287:             and (
+ 3288:                 num_update_dp_only_clients
+ 3289:                 + num_update_he_only_clients
+ 3290:                 + num_update_dp_he_clients
+ 3291:             )
+ 3292:             == cross_domain_update_clients
+ 3293:         )
+ 3294:         if effective_selection.mainline_fusion:
+ 3295:             num_update_dp_clients = cross_domain_update_clients
+ 3296:             num_he_clients = cross_domain_update_clients
+ 3297:             num_update_dp_only_clients = 0
+ 3298:             num_update_he_only_clients = 0
+ 3299:             num_update_dp_he_clients = cross_domain_update_clients
+ 3300:             update_dp_coverage = 1.0 if cross_domain_update_clients else 0.0
+ 3301:             update_he_coverage = 1.0 if cross_domain_update_clients else 0.0
+ 3302:             uniform_update_dp = cross_domain_update_clients > 0
+ 3303:             uniform_local_update_dp = False
+ 3304:             uniform_secure_aggregate_dp = cross_domain_update_clients > 0
+ 3305:             all_cross_domain_updates_protected = cross_domain_update_clients > 0
+ 3306:         total_profile_samples = max(1, sum(int(client.samples) for client in clients))
+ 3307:         actual_cloud_samples = sum(item[2] for item in global_updates)
+ 3308:         actual_admitted_samples = max(1, sum(item[2] for item in admitted_updates))
+ 3309:         actual_cloud_fusion_ratio = actual_cloud_samples / total_profile_samples
+ 3310:         actual_cloud_share_of_admitted = actual_cloud_samples / actual_admitted_samples
+ 3311: 
+ 3312:         direction_client_updates: list[dict[str, dict[str, torch.Tensor]]] = []
+ 3313:         direction_client_sample_counts: list[float] = []
+ 3314:         if effective_selection.mainline_fusion:
+ 3315:             for client_id, state_diff, sample_count, _candidate in global_updates:
+ 3316:                 direction_client_updates.append(
+ 3317:                     _state_difference_from_client_update(
+ 3318:                         client_id=client_id,
+ 3319:                         state_diff=state_diff,
+ 3320:                         client_model_states={},
+ 3321:                         global_end=global_end,
+ 7226: def _pareto_profile_audit_rows(
+ 7227:     *,
+ 7228:     round_idx: int,
+ 7229:     stage: str,
+ 7230:     evaluations: list[ProfileEvaluation],
+ 7231:     chosen: ProfileEvaluation | None,
+ 7232:     norm_eps: float,
+ 7233: ) -> list[dict[str, Any]]:
+ 7234:     if not evaluations:
+ 7235:         return []
+ 7236: 
+ 7237:     latency_values = [item.system_latency for item in evaluations]
+ 7238:     learning_values = [item.system_learning_error for item in evaluations]
+ 7239:     latency_min, latency_max = min(latency_values), max(latency_values)
+ 7240:     learning_min, learning_max = min(learning_values), max(learning_values)
+ 7241:     use_fusion = any(item.fusion_objective_enabled for item in evaluations)
+ 7242:     fusion_values = [item.fusion_distortion for item in evaluations]
+ 7243:     fusion_min = min(fusion_values) if use_fusion else 0.0
+ 7244:     fusion_max = max(fusion_values) if use_fusion else 0.0
+ 7245:     chosen_signature = chosen.profile_signature if chosen is not None else ()
+ 7246: 
+ 7247:     rows: list[dict[str, Any]] = []
+ 7248:     for profile_index, evaluation in enumerate(evaluations):
+ 7249:         mode_counts = {mode: 0 for mode in MODE_SPECS}
+ 7250:         for candidate in evaluation.profile.values():
+ 7251:             if candidate.mode in mode_counts:
+ 7252:                 mode_counts[candidate.mode] += 1
+ 7253:         normalized_latency = (
+ 7254:             evaluation.system_latency - latency_min
+ 7255:         ) / (latency_max - latency_min + norm_eps)
+ 7256:         normalized_learning = (
+ 7257:             evaluation.system_learning_error - learning_min
+ 7258:         ) / (learning_max - learning_min + norm_eps)
+ 7259:         normalized_fusion = (
+ 7260:             (evaluation.fusion_distortion - fusion_min)
+ 7261:             / (fusion_max - fusion_min + norm_eps)
+ 7262:             if use_fusion
+ 7263:             else 0.0
+ 7264:         )
+ 7265:         tchebycheff_score = max(
+ 7266:             abs(normalized_latency),
+ 7267:             abs(normalized_learning),
+ 7268:             abs(normalized_fusion) if use_fusion else 0.0,
+ 7269:         )
+ 7270:         rows.append(
+ 7271:             {
+ 7272:                 "round": round_idx,
+ 7273:                 "stage": stage,
+ 7274:                 "profile_index": profile_index,
+ 7275:                 "selected": int(
+ 7276:                     chosen is evaluation
+ 7277:                     or (
+ 7278:                         bool(chosen_signature)
+ 7279:                         and evaluation.profile_signature == chosen_signature
+ 7280:                     )
+ 7281:                 ),
+ 7282:                 "LIE_count": mode_counts.get("LIE", 0),
+ 7283:                 "LIC_count": mode_counts.get("LIC", 0),
+ 7284:                 "LIIE_count": mode_counts.get("LIIE", 0),
+ 7285:                 "LIIC_count": mode_counts.get("LIIC", 0),
+ 7286:                 "LIEIIC_count": mode_counts.get("LIEIIC", 0),
+ 7287:                 "LIEIIIC_count": mode_counts.get("LIEIIIC", 0),
+ 7288:                 "LIIEIIIC_count": mode_counts.get("LIIEIIIC", 0),
+ 7289:                 "system_latency_objective": evaluation.system_latency,
+ 7290:                 "dp_perturbation_objective": evaluation.system_dp,
+ 7291:                 "feature_perturbation_objective": evaluation.feature_perturbation,
+ 7292:                 "fusion_bound_objective": evaluation.fusion_bound,
+ 7293:                 "learning_error_objective": evaluation.system_learning_error,
+ 7294:                 "learning_proxy_source": evaluation.learning_proxy_source,
+ 7295:                 "joint_mean_error_sq": evaluation.joint_mean_error_sq,
+ 7296:                 "joint_variance_trace": evaluation.joint_variance_trace,
+ 7297:                 "joint_e_alg_norm_sq": evaluation.joint_e_alg_norm_sq,
+ 7298:                 "joint_e_agg_norm_sq": evaluation.joint_e_agg_norm_sq,
+ 7299:                 "joint_bias_norm_sq": evaluation.joint_bias_norm_sq,
+ 7300:                 "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
+ 7301:                 "fusion_distortion_objective": evaluation.fusion_distortion,
+ 7302:                 "normalized_latency_within_stage": normalized_latency,
+ 7303:                 "normalized_learning_within_stage": normalized_learning,
+ 7304:                 "tchebycheff_score_within_stage": tchebycheff_score,
+ 7305:                 "admitted_client_count": len(evaluation.admitted_client_ids),
+ 7306:             }
+ 7307:         )
+ 7308:     return rows
+ 7309: 
+ 7310: 
+ 7311: def _save_policy_checkpoint(

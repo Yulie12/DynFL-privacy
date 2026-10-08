@@ -60,6 +60,70 @@ def spearman(x, y):
 
 
 def evaluate(payload):
+    # Dedicated trusted-local summary path. Unlike legacy raw-vector JSON,
+    # this never serializes per-client parameter trajectories.
+    if payload.get('format') in ('dynfl_independent_joint_summary_v1',
+                                 'dynfl_independent_joint_summary_v2'):
+        corrected = payload['format'].endswith('_v2')
+        if corrected and payload.get('mc_estimator') != 'unbiased_conditional_second_moment_independent_clients_v2':
+            raise ValueError('v2 unbiased MC estimator declaration required')
+        if payload.get('evaluation_data_independent_of_calibration') is not True:
+            raise ValueError('independence declaration required')
+        if payload.get('evaluation_data_provenance') != 'private_local_only':
+            raise ValueError('compact summary is local-only')
+        if payload.get('conditional_cross_client_rng_independence') is not True:
+            raise ValueError('cross-client DP RNG independence required')
+        if payload.get('evaluation_protocol') != 'independent_official_test_paired_rng_v1':
+            raise ValueError('unrecognized independent capture protocol')
+        if payload.get('calibration_source_verified_as_train_subset') is not True:
+            raise ValueError('calibration/train split provenance not verified')
+        digest = payload.get('calibration_sha256')
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+            raise ValueError('calibration SHA256 is required')
+        if payload.get('scope') != 'calibration-covered_subcohort_not_full_cohort':
+            raise ValueError('compact ranking must declare restricted subcohort scope')
+        if payload.get('measurement_boundary') != 'global_relative_worker_updates_before_cloud_release_processing':
+            raise ValueError('measurement boundary must explicitly exclude cloud release processing')
+        rows = payload.get('profiles')
+        if not isinstance(rows, list) or len(rows) < 3:
+            raise ValueError('need >=3 independently measured profiles')
+        found = set()
+        scores, measured = [], []
+        for row in rows:
+            key = str(row['profile_id'])
+            if key in found:
+                raise ValueError('duplicate profile ID')
+            found.add(key)
+            if int(row['client_count']) < 1 or int(row['trials_per_cell']) < 2:
+                raise ValueError('insufficient independent paired observations')
+            vals = [float(row[k]) for k in (
+                'selector_joint_score', 'mc_joint_score', 'mc_bias_squared', 'mc_variance_trace')]
+            if not all(math.isfinite(v) and v >= 0 for v in vals):
+                raise ValueError('nonfinite/negative independent evaluation score')
+            correction = 0.0
+            if corrected:
+                if 'mc_finite_sample_correction' not in row:
+                    raise ValueError('v2 missing finite-sample MC correction')
+                correction = float(row['mc_finite_sample_correction'])
+                if (not math.isfinite(correction) or correction < 0
+                        or correction > vals[3] + 1e-10):
+                    raise ValueError('invalid finite-sample MC correction')
+            if not math.isclose(vals[1], vals[2] + vals[3] - correction,
+                                rel_tol=1e-8, abs_tol=1e-10):
+                raise ValueError('inconsistent Monte Carlo bias/variance decomposition')
+            scores.append(vals[0])
+            measured.append(vals[1])
+        rho = spearman(scores, measured)
+        return {
+            'status': 'computed_not_privacy_proof',
+            'formula': ('finite_sample_corrected_joint_second_moment_v2'
+                        if corrected else 'v3.3_eq127_independent_client_rng_legacy_v1'),
+            'candidate_count': len(rows), 'spearman_rho': rho,
+            'evaluation_data_provenance': 'private_local_only',
+            'scope': payload['scope'], 'measurement_boundary': payload['measurement_boundary'],
+            'calibration_sha256': digest,
+            'profiles': rows,
+        }
     if payload.get("evaluation_data_independent_of_calibration") is not True:
         raise ValueError("independence must be explicitly declared true; no in-sample ranking validation")
     if payload.get("evaluation_data_provenance") not in ("public", "synthetic", "private_local_only"):
@@ -118,7 +182,7 @@ def evaluate(payload):
         rows.append({"profile_id":name,"selector_joint_score":pred,"mc_joint_score":mc,
                      "mc_bias_squared":_sq(mean_error),"mc_variance_trace":variance_global})
     rho = spearman([r["selector_joint_score"] for r in rows], [r["mc_joint_score"] for r in rows])
-    return {"status":"computed_not_privacy_proof", "formula":"v3.3_eq127_independent_client_rng",
+    return {"status":"computed_not_privacy_proof", "formula":"v3.3_eq127_independent_client_rng_legacy_raw",
             "candidate_count":len(rows), "spearman_rho":rho,
             "evaluation_data_provenance":payload["evaluation_data_provenance"], "profiles":rows}
 

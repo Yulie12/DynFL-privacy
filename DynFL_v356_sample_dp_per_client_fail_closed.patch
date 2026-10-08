@@ -1,0 +1,85 @@
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -230,6 +230,56 @@
+     if int(train_config.he_aggregation_size) != 0:
+         raise ValueError("Mainline fusion requires he_aggregation_size=0 for full-update encryption")
+ 
++
++
++def _assert_sample_worker_accounting_matches(
++    *,
++    admitted_client_ids: set[int],
++    selected_by_id: dict[int, Any],
++    worker_results: dict[int, dict[str, Any]],
++) -> int:
++    """Fail closed before ANY Sample ledger commit for admitted clients.
++
++    Check the per-client charged events against worker-observed operations;
++    never treat a missing diagnostic as an observed zero.
++    """
++    expected_to_observed = (
++        ("sample_embedding_events", "feature_dp_release_batches"),
++        ("sample_label_grad_events", "sample_label_grad_dp_release_batches"),
++        ("sample_optimizer_events", "sample_dp_optimizer_steps"),
++    )
++    for client_id in sorted(admitted_client_ids):
++        if client_id not in selected_by_id:
++            raise RuntimeError(f"Sample-DP audit: admitted client {client_id} has no selected candidate")
++        result = worker_results.get(client_id)
++        if result is None:
++            raise RuntimeError(f"Sample-DP audit: admitted client {client_id} has no worker result")
++        candidate = selected_by_id[client_id]
++        for charged_field, observed_field in expected_to_observed:
++            if observed_field not in result or result[observed_field] is None:
++                raise RuntimeError(
++                    f"Sample-DP audit: client {client_id} missing worker field {observed_field}"
++                )
++            charged_raw = getattr(candidate, charged_field)
++            observed_raw = result[observed_field]
++            try:
++                charged = int(charged_raw)
++                observed = int(observed_raw)
++            except (TypeError, ValueError, OverflowError) as exc:
++                raise RuntimeError(
++                    f"Sample-DP audit: client {client_id} invalid counter {charged_field}/{observed_field}"
++                ) from exc
++            if charged < 0 or observed < 0 or charged != charged_raw or observed != observed_raw:
++                raise RuntimeError(
++                    f"Sample-DP audit: client {client_id} invalid event count "
++                    f"{charged_field}={charged_raw!r}, {observed_field}={observed_raw!r}"
++                )
++            if charged != observed:
++                raise RuntimeError(
++                    f"Sample-DP audit: client {client_id} {charged_field} "
++                    f"ledger={charged}, worker {observed_field}={observed}; aborting before ledger commit"
++                )
++    return len(admitted_client_ids)
+ 
+ 
+ def _observed_privacy_path_audit(
+@@ -2964,6 +3014,13 @@
+                     f"LIIE SecAgg cohort on edge {edge_id} changed after dispatch; "
+                     "aborting unprotected aggregate publication"
+                 )
++        sample_worker_client_audit_count = 0
++        if effective_selection.privacy_unit == "sample":
++            sample_worker_client_audit_count = _assert_sample_worker_accounting_matches(
++                admitted_client_ids=admitted_client_ids,
++                selected_by_id=selected_by_id,
++                worker_results=worker_results,
++            )
+         for client_id, candidate in selected_by_id.items():
+             ledger = privacy_ledgers[client_id]
+             row = round_decision_rows_by_client[client_id]
+@@ -4389,6 +4446,11 @@
+                 "round": round_idx,
+                 "mode_selection_audit": json.dumps(mode_selection_summary, sort_keys=True),
+                 **privacy_path_observations,
++                "sample_worker_client_audit_status": (
++                    "passed_admitted_clients" if effective_selection.privacy_unit == "sample"
++                    else "not_applicable"
++                ),
++                "sample_worker_client_audited_count": sample_worker_client_audit_count,
+                 "logical_time": logical_time,
+                 "accounted_system_time_sec": accounted_system_time_sec,
+                 "round_duration": flow_result.round_duration,
