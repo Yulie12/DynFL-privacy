@@ -419,7 +419,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
     for mode, spec in MODE_SPECS.items():
         if mode in config.excluded_modes:
             continue
-        if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+        if (config.mainline_fusion or (config.trusted_edge_split_execution and config.privacy_unit != "sample")) and mode == "LIC":
             continue
         events = _mode_link_transmissions(
             mode,
@@ -1112,7 +1112,7 @@ def enumerate_candidates(
             audit_exclusions[mode] = "excluded_mode"
             continue
 
-        if (config.trusted_edge_split_execution or config.mainline_fusion) and mode == "LIC":
+        if (config.mainline_fusion or (config.trusted_edge_split_execution and config.privacy_unit != "sample")) and mode == "LIC":
             audit_exclusions[mode] = "trusted_edge_or_mainline_excludes_LIC"
             continue
 
@@ -2078,19 +2078,6 @@ def choose_global_pareto_profile(
             )
             for item in seeds
         ]
-    if objective == "pareto":
-        # A global-learning profile must contribute nonzero represented
-        # sample mass to the Cloud. Individual Edge-terminating modes remain
-        # valid inside a mixed profile as long as the overall r_C is positive.
-        seed_evaluations = [
-            item for item in seed_evaluations
-            if item.cloud_fusion_ratio > 1e-12
-        ]
-        if not seed_evaluations:
-            raise ValueError(
-                "pareto selection requires at least one feasible profile "
-                "with cloud_fusion_ratio > 0"
-            )
     if config.require_edge_cloud_coverage:
         feasible_seeds: list[ProfileEvaluation] = []
         for evaluation in seed_evaluations:
@@ -2422,11 +2409,6 @@ def choose_global_pareto_profile(
             "neighbor_evaluation_sec",
             time.perf_counter() - neighbor_eval_started_at,
         )
-        if objective == "pareto":
-            evaluated_neighbors = [
-                item for item in evaluated_neighbors
-                if item.cloud_fusion_ratio > 1e-12
-            ]
         expanded = archive + evaluated_neighbors
         if config.require_edge_cloud_coverage:
             expanded = [
@@ -2706,7 +2688,7 @@ def _run_nsga2_search(
     client_ids = tuple(sorted(pools))
     rng = random.Random(int(config.seed) * 1_000_003 + 91_733)
     population = _nsga2_environmental_selection(
-        [item for item in initial if item.cloud_fusion_ratio > 1e-12],
+        initial,
         population_size,
     )
 
@@ -2722,8 +2704,7 @@ def _run_nsga2_search(
         ):
             continue
         evaluated = evaluate(profile)
-        if evaluated.cloud_fusion_ratio <= 1e-12:
-            continue
+
         population = _nsga2_environmental_selection(
             population + [evaluated],
             population_size,
@@ -2761,8 +2742,7 @@ def _run_nsga2_search(
             ):
                 continue
             evaluated = evaluate(profile)
-            if evaluated.cloud_fusion_ratio <= 1e-12:
-                continue
+
             offspring.append(evaluated)
         next_population = _nsga2_environmental_selection(
             population + offspring,

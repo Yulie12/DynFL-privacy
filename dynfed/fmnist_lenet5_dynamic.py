@@ -8142,6 +8142,7 @@ def fedavg_split_tenseal(
     he_aggregation_size: int | None = None,
     he_metrics: HEOperationMetrics | None = None,
 ) -> tuple[torch.nn.Module, torch.nn.Module]:
+    import tenseal as ts
     total = max(1, sum(sample_counts))
     total_size = sum(
         int(param.numel())
@@ -8715,6 +8716,7 @@ def _fedavg_prefix_tenseal(
     chunk_size: int = 4096,
     he_metrics: HEOperationMetrics | None = None,
 ) -> torch.Tensor:
+    import tenseal as ts
     if not prefix_updates:
         return torch.zeros(0)
     encrypted_mask = _validated_encrypted_mask(encrypted_mask, len(prefix_updates))

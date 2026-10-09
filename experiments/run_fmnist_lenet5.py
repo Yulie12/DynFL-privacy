@@ -259,8 +259,17 @@ def parse_args() -> argparse.Namespace:
         "--trusted-edge-split-execution",
         action="store_true",
         help=(
-            "LEGACY/REMOVED: trusted/untrusted execution-domain labels are not part "
-            "of the current DynFL privacy model."
+            "Explicitly declare End and Edge as one trusted execution domain; "
+            "required for --trusted-lie-joint-sample-dp."
+        ),
+    )
+    parser.add_argument(
+        "--trusted-lie-joint-sample-dp",
+        action="store_true",
+        help=(
+            "Opt into joint per-sample gradient DP-SGD for trusted LIE only. "
+            "Requires --trusted-edge-split-execution and --privacy-unit sample; "
+            "incompatible with the old joint-calibration learning objective."
         ),
     )
     parser.add_argument("--he-backend", default="none", choices=["none", "seal", "tenseal"])
@@ -366,12 +375,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _validate_trusted_lie_cli(args: argparse.Namespace) -> None:
+    """Fail closed before constructing the training run or writing output."""
+    if args.trusted_edge_split_execution and not args.trusted_lie_joint_sample_dp:
+        raise ValueError(
+            "--trusted-edge-split-execution requires explicit "
+            "--trusted-lie-joint-sample-dp opt-in in this experimental CLI"
+        )
+    if not args.trusted_lie_joint_sample_dp:
+        return
+    if not args.trusted_edge_split_execution:
+        raise ValueError("trusted LIE requires --trusted-edge-split-execution")
+    if args.privacy_unit != "sample":
+        raise ValueError("trusted LIE requires --privacy-unit sample")
+    if args.learning_objective == "joint_calibration":
+        raise ValueError(
+            "trusted LIE requires a new learning-proxy calibration; "
+            "the old noisy-embedding joint calibration is incompatible"
+        )
+
+
 def main() -> None:
     args = parse_args()
-    if args.trusted_edge_split_execution:
-        raise ValueError(
-            "--trusted-edge-split-execution has been removed; use exposure-aware privacy requirements instead"
-        )
+    _validate_trusted_lie_cli(args)
     policies = _resolved_policies(args)
     feature_clip_norm = float(
         args.dp_feature_clip_norm if args.dp_feature_clip_norm is not None else args.dp_clip_norm
@@ -481,7 +507,8 @@ def main() -> None:
         aggregation_fraction=args.aggregation_fraction,
         privacy_local_epochs=args.local_epochs,
         split_end_optimizer_enabled=split_end_optimizer_enabled,
-        trusted_edge_split_execution=False,
+        trusted_edge_split_execution=args.trusted_edge_split_execution,
+        trusted_lie_joint_sample_dp=args.trusted_lie_joint_sample_dp,
         pareto_archive_size=args.pareto_archive_size,
         pareto_beam_size=args.pareto_beam_size,
         pareto_max_iters=args.pareto_max_iters,
