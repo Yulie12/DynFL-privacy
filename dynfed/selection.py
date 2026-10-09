@@ -169,6 +169,9 @@ class SelectionConfig:
     # remain independently trainable/accounted.
     split_end_optimizer_enabled: bool = True
     trusted_edge_split_execution: bool = False
+    # Opt-in: trusted, single-domain LIE with ONE joint DP-SGD optimizer event
+    # per minibatch. No embedding or label-gradient DP releases are charged.
+    trusted_lie_joint_sample_dp: bool = False
     allow_he: bool = True
     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3")
     update_protection_goal: str = "packet_protection"
@@ -239,6 +242,16 @@ class SelectionConfig:
     joint_calibration_missing_policy: str = "error"
 
     def __post_init__(self) -> None:
+        if self.trusted_lie_joint_sample_dp:
+            if self.privacy_unit != "sample":
+                raise ValueError("trusted LIE requires privacy_unit='sample'")
+            if not self.trusted_edge_split_execution:
+                raise ValueError("trusted LIE requires trusted_edge_split_execution=True")
+            if self.learning_objective == "joint_calibration":
+                raise ValueError(
+                    "trusted LIE needs a new learning-proxy calibration; "
+                    "existing joint_calibration tables describe noisy embeddings"
+                )
         seen_fast_clients: set[int] = set()
         for client_id, deadline in self.fast_client_deadlines:
             if int(client_id) < 0:
@@ -1201,6 +1214,9 @@ def enumerate_candidates(
                 spec,
                 allow_he=config.allow_he,
                 mainline_fusion=config.mainline_fusion,
+                trusted_lie_joint_sample_dp=(
+                    config.trusted_lie_joint_sample_dp and mode == "LIE"
+                ),
             )
             if config.privacy_unit == "sample"
             else _mechanism_assignments(
@@ -7102,6 +7118,7 @@ def _sample_mechanism_assignments(
     *,
     allow_he: bool = True,
     mainline_fusion: bool = False,
+    trusted_lie_joint_sample_dp: bool = False,
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     """Return the fixed protection layout for the sample-level DP path.
 
@@ -7112,6 +7129,8 @@ def _sample_mechanism_assignments(
 
     HE remains a confidentiality layer for updates crossing into Cloud.
     """
+    if trusted_lie_joint_sample_dp and spec.name != "LIE":
+        raise ValueError("joint Sample-DP trusted links currently support LIE only")
     all_transmissions = _mode_link_transmissions(
         spec.name,
         local_block_cycles=1,
@@ -7138,7 +7157,7 @@ def _sample_mechanism_assignments(
 
     for link_id, obj, _count, _privacy_eligible in transmissions:
         if obj in {"emb", "grad"}:
-            mechanism = "dp"
+            mechanism = "trusted" if trusted_lie_joint_sample_dp else "dp"
         elif obj == "upd" and link_id.endswith("_C_upd"):
             if not allow_he:
                 return []
@@ -7993,6 +8012,11 @@ def _sample_dp_event_counts(
     )
     training_blocks = max(int(spec.E_edge_loops), 1)
     local_batch_events = per_block_batch_events * training_blocks
+
+    if config.trusted_lie_joint_sample_dp and mode == "LIE":
+        # One jointly clipped/noised End+Edge optimizer step per batch.
+        # Trusted-domain activations and label gradients are NOT DP releases.
+        return (0, 0, local_batch_events)
 
     if local_batch_events <= 0:
         return 0, 0, 0

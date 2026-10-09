@@ -805,6 +805,8 @@ def split_local_train_lenet5(
     sample_label_grad_noise_multiplier: float | None = None,
     sample_optimizer_noise_multiplier: float | None = None,
     sample_optimizer_clip_norm: float = 1.0,
+    trusted_split_joint_sample_dp: bool = False,
+    trusted_edge: bool = False,
 ) -> dict[str, dict[str, torch.Tensor]]:
     """Split learning with labels retained at the client.
 
@@ -832,6 +834,7 @@ def split_local_train_lenet5(
         sample_dp_clipped_sample_count=0,
         sample_dp_max_raw_grad_norm=0.0,
         sample_dp_max_clipped_grad_norm=0.0,
+        trusted_split_joint_dp_steps=0,
     )
     batch_size = 128 if device.type == "cuda" and normalize_model_name(model_name) in {
         "resnet18pretrainedadapter",
@@ -900,6 +903,60 @@ def split_local_train_lenet5(
 
     # Whether training uses split (end+edge) or full (end only) mode
     is_split = mode in ("LIE", "LIC", "LIEIIC", "LIEIIIC")
+
+    if trusted_edge and not trusted_split_joint_sample_dp:
+        raise ValueError("trusted_edge requires trusted_split_joint_sample_dp=True")
+
+    if trusted_split_joint_sample_dp:
+        # Explicit opt-in, never a silent fallback. The old SamplePrivacyLedger
+        # charges embedding / label-gradient releases and CANNOT account for
+        # this new path without a separate joint-optimizer adapter.
+        if mode != "LIE":
+            raise ValueError("trusted joint Sample-DP currently supports LIE only")
+        if not trusted_edge:
+            raise ValueError("LIE trusted split requires explicit trusted_edge=True")
+        if normalized_privacy_unit != "sample":
+            raise ValueError("trusted joint split requires privacy_unit='sample'")
+        if any(mechanisms.get(obj) != "trusted" for obj in ("emb", "grad")):
+            raise ValueError("trusted joint split requires emb=trusted and grad=trusted")
+        if sample_embedding_noise_multiplier is not None or sample_label_grad_noise_multiplier is not None:
+            raise ValueError("trusted joint split must not charge embedding/label-gradient DP")
+        sigma = sample_optimizer_noise_multiplier
+        if sigma is None or not math.isfinite(float(sigma)) or float(sigma) <= 0.0:
+            raise ValueError("trusted joint split requires positive finite optimizer noise")
+        if not math.isfinite(float(sample_optimizer_clip_norm)) or float(sample_optimizer_clip_norm) <= 0.0:
+            raise ValueError("trusted joint split requires positive finite optimizer clipping")
+
+        from .trusted_split_sample_dp import train_trusted_lie_joint_dp
+
+        cached_split = None if model_cache is None else model_cache.get("split")
+        if cached_split is None:
+            end, edge = build_split_pair(
+                model_name, device,
+                input_channels=input_shape[0], image_size=input_shape[1],
+                num_classes=num_classes,
+            )
+            if model_cache is not None:
+                model_cache["split"] = (end, edge)
+        else:
+            end, edge = cached_split
+        end.load_state_dict(global_end_state)
+        edge.load_state_dict(global_edge_state)
+        end.train()
+        edge.train()
+        _prepare_model_for_training(end, model_name)
+        _prepare_model_for_training(edge, model_name)
+        return train_trusted_lie_joint_dp(
+            end=end, edge=edge,
+            batches=_training_batches(loader, epochs, local_steps),
+            global_end_state=global_end_state, global_edge_state=global_edge_state,
+            end_optimizer=_make_optimizer(end, lr, model_name, weight_decay=l2),
+            edge_optimizer=_make_optimizer(edge, lr, model_name, weight_decay=l2),
+            clip_norm=float(sample_optimizer_clip_norm),
+            noise_multiplier=float(sigma),
+            generator=sample_dp_generator,
+            diagnostics=diagnostics,
+        )
 
     if normalized_privacy_unit == "sample" and is_split:
         if sample_embedding_noise_multiplier is None:

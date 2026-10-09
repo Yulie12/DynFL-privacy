@@ -597,6 +597,41 @@ def _candidate_uses_secure_aggregate_update_dp(
     return mechanism_uses_dp(mechanism) and mechanism_uses_he(mechanism)
 
 
+def _assert_trusted_lie_accounting_plan(
+    *,
+    selection: SelectionConfig,
+    candidate: Candidate,
+    model_name: str,
+    worker_device: torch.device,
+) -> None:
+    """Reject any known trusted-LIE event-plan mismatch before private work."""
+    if not (selection.trusted_lie_joint_sample_dp and candidate.mode == "LIE"):
+        return
+    from .split_learning import normalize_model_name
+    runtime_batch = (
+        128 if worker_device.type == "cuda"
+        and normalize_model_name(model_name) in {
+            "resnet18pretrainedadapter", "resnet18pretrainedhead",
+            "resnet18pretrainedhead256", "resnet18pretrainedlayer4head",
+            "resnet18", "resnet50", "resnet18pretrained", "resnet50pretrained",
+        } else 64
+    )
+    if int(selection.split_batch_size) != runtime_batch:
+        raise RuntimeError(
+            "Trusted LIE Sample-DP accounting batch size mismatch: "
+            f"selection={selection.split_batch_size}, runtime={runtime_batch}"
+        )
+    if candidate.sample_embedding_events or candidate.sample_label_grad_events:
+        raise RuntimeError("Trusted LIE candidate incorrectly charges link DP")
+    if candidate.sample_optimizer_events <= 0:
+        raise RuntimeError("Trusted LIE candidate missing joint optimizer events")
+    if candidate.sample_embedding_noise_multiplier is not None or candidate.sample_label_grad_noise_multiplier is not None:
+        raise RuntimeError("Trusted LIE candidate incorrectly enables link Gaussian noise")
+    link_mechanisms = _candidate_training_mechanisms(candidate)
+    if any(link_mechanisms.get(obj) != "trusted" for obj in ("emb", "grad")):
+        raise RuntimeError("Trusted LIE candidate requires emb=trusted and grad=trusted")
+
+
 def _client_train_worker(
     payload: dict[str, Any],
     model_cache: dict[str, Any] | None = None,
@@ -625,6 +660,10 @@ def _client_train_worker(
             "sample_optimizer_clip_norm",
             1.0,
         ),
+        trusted_split_joint_sample_dp=payload.get(
+            "trusted_split_joint_sample_dp", False
+        ),
+        trusted_edge=payload.get("trusted_edge", False),
         mode=payload["mode"],
         global_end_state=payload["global_end_state"],
         global_edge_state=payload["global_edge_state"],
@@ -5987,6 +6026,10 @@ def _run_client_training_tasks(
     privacy_parameters = resolved_privacy_parameters(selection)
 
     def build_payload(client_id: int, candidate: Candidate, idx: np.ndarray) -> dict[str, Any]:
+        _assert_trusted_lie_accounting_plan(
+            selection=selection, candidate=candidate,
+            model_name=model_name, worker_device=worker_device,
+        )
         if _mode_reaches_cloud(candidate.mode) and training_stage == 0:
             client_model_states.pop(client_id, None)
         returned_state = _training_base_state(
@@ -6020,6 +6063,15 @@ def _run_client_training_tasks(
                 aggregate_cloud_update_dp=True,
             ),
             "privacy_unit": selection.privacy_unit,
+            # The option is explicit; never infer trust from a low sigma.
+            "trusted_split_joint_sample_dp": bool(
+                selection.trusted_lie_joint_sample_dp and candidate.mode == "LIE"
+            ),
+            "trusted_edge": bool(
+                selection.trusted_lie_joint_sample_dp
+                and selection.trusted_edge_split_execution
+                and candidate.mode == "LIE"
+            ),
             "sample_embedding_noise_multiplier": (
                 candidate.sample_embedding_noise_multiplier
             ),
