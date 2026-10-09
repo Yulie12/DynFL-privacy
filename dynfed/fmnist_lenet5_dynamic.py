@@ -58,6 +58,7 @@ from .nodes import build_profiles
 from .privacy import ClientPrivacyLedger, SamplePrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
 from .sample_dispatch_accounting import charge_sample_dispatch_before_worker
 from .sample_dispatch_identity import SampleDispatchAttempt, SampleDispatchIdentity
+from .sample_flow_boundary import resolve_sample_admitted_updates
 from .sample_stage_event_audit import SampleStageEventAudit, uniform_sample_stage_plan
 from .protection_rules import audit_update_release
 from .streaming_secagg import streaming_secure_aggregate_exact_target
@@ -3182,7 +3183,13 @@ def _run_lenet5_policy(
                     estimated_local_time=est_local,
                     measured_local_time=measured_local,
                     communication_volume=candidate.communication_volume,
-                    state_diff=state_diff,
+                    # The Flow executor is a timing/admission simulator, not a
+                    # private-update transport or a trusted DP release site.
+                    # Never hand it private model deltas in Sample-DP mode.
+                    state_diff=(
+                        None if effective_selection.privacy_unit == "sample"
+                        else state_diff
+                    ),
                     sample_count=len(idx),
                     edge_loops=spec_mode.E_edge_loops,
                     fused_release=effective_selection.mainline_fusion,
@@ -3223,6 +3230,22 @@ def _run_lenet5_policy(
         )
         for event in flow_result.flow_events:
             flow_event_rows.append({"policy": policy, **event})
+        if effective_selection.privacy_unit == "sample":
+            # Only metadata enters Flow. Recover worker-owned private updates
+            # AFTER admission, with exact IDs, sample counts and finite status.
+            # This is an in-process trust-boundary check, NOT a network DP proof.
+            admitted_flow_state_diffs = resolve_sample_admitted_updates(
+                selected_client_ids=flow_result.selected_client_ids,
+                flow_state_diffs=flow_result.state_diffs,
+                flow_sample_counts=flow_result.sample_counts,
+                worker_results=worker_results,
+                train_sample_counts={
+                    int(cid): len(indices)
+                    for cid, _candidate, indices, _sequence in train_tasks
+                },
+            )
+        else:
+            admitted_flow_state_diffs = flow_result.state_diffs
         if effective_selection.mainline_fusion:
             expected_ids = {client.client_id for client in clients}
             if set(flow_result.selected_client_ids) != expected_ids:
@@ -3409,7 +3432,7 @@ def _run_lenet5_policy(
             client_id: (state_diff, sample_count)
             for client_id, state_diff, sample_count in zip(
                 flow_result.selected_client_ids,
-                flow_result.state_diffs,
+                admitted_flow_state_diffs,
                 flow_result.sample_counts,
             )
         }
@@ -3584,7 +3607,7 @@ def _run_lenet5_policy(
             )
             for client_id, state_diff, sample_count in zip(
                 flow_result.selected_client_ids,
-                flow_result.state_diffs,
+                admitted_flow_state_diffs,
                 flow_result.sample_counts,
             )
         ]
@@ -5521,6 +5544,7 @@ def _run_lenet5_policy(
             previous_client_updates = {}
 
         worker_results.clear()
+        admitted_flow_state_diffs.clear()
         flow_inputs.clear()
         initial_admitted_updates.clear()
         overridden_admitted_diffs.clear()
