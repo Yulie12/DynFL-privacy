@@ -57,6 +57,7 @@ from .split_learning import (
 from .nodes import build_profiles
 from .privacy import ClientPrivacyLedger, SamplePrivacyLedger, mechanism_uses_dp, mechanism_uses_he, privacy_execution_audit, training_privacy_diagnostics
 from .sample_dispatch_accounting import charge_sample_dispatch_before_worker
+from .sample_dispatch_identity import SampleDispatchAttempt, SampleDispatchIdentity
 from .sample_stage_event_audit import SampleStageEventAudit, uniform_sample_stage_plan
 from .protection_rules import audit_update_release
 from .streaming_secagg import streaming_secure_aggregate_exact_target
@@ -1863,6 +1864,7 @@ def _run_lenet5_policy(
     fixed_mode_assignments: dict[int, str] = {}
     fixed_privacy_profiles: dict[int, tuple[dict[str, str], float | None]] = {}
     start_round = 0
+    sample_dispatch_identity = SampleDispatchIdentity() if effective_selection.privacy_unit == "sample" else None
     real_he_rounds = 0
     real_he_aggregated_clients = 0
     global_pareto_selection_rounds = 0
@@ -2095,6 +2097,15 @@ def _run_lenet5_policy(
             for client_id, parts in saved_client_states.items()
         }
         start_round = int(checkpoint.get("next_round", len(round_rows)))
+        if effective_selection.privacy_unit == "sample":
+            saved_dispatch_identity = checkpoint.get("sample_dispatch_identity")
+            if saved_dispatch_identity is None:
+                raise RuntimeError(
+                    "Cannot resume legacy Sample-DP checkpoint without a persisted "
+                    "dispatch identity: retry randomness cannot be certified. "
+                    "Start a new run from this version (old checkpoints remain intact)."
+                )
+            sample_dispatch_identity = SampleDispatchIdentity.from_state_dict(saved_dispatch_identity)
         if (
             policy in _FROZEN_MODE_POLICIES
             and start_round > 0
@@ -2881,6 +2892,7 @@ def _run_lenet5_policy(
         # later communication decision, not the privacy accounting boundary.
         sample_dispatch_charges = {}
         sample_stage_audits = {}
+        sample_dispatch_attempt: SampleDispatchAttempt | None = None
         if effective_selection.privacy_unit == "sample":
             sample_stage_audits = {
                 int(cid): SampleStageEventAudit(
@@ -2905,6 +2917,11 @@ def _run_lenet5_policy(
             # charge again; previously attempted private releases are NOT
             # rolled back. An interrupted run needs this checkpoint to resume.
             if sample_dispatch_charges:
+                # Advance the attempt number and persist it together with the
+                # conservative privacy charge before any private execution.
+                # Re-dispatch after a crash must not reuse the DP noise stream.
+                assert sample_dispatch_identity is not None
+                sample_dispatch_attempt = sample_dispatch_identity.next_attempt()
                 _save_policy_checkpoint(
                     checkpoint_path,
                     policy=policy,
@@ -2933,7 +2950,19 @@ def _run_lenet5_policy(
                     global_pareto_selection_rounds=global_pareto_selection_rounds,
                     client_model_states=client_model_states,
                     mainline_release_account=release_account,
+                    sample_dispatch_identity=sample_dispatch_identity,
                 )
+
+        def _round_noise_seed(
+            entity: Any, stage: int = 0, *, namespace: str = "generic"
+        ) -> int:
+            if sample_dispatch_attempt is not None:
+                # Domain-separate simultaneous release mechanisms. In
+                # particular, client_id and edge_id can be the same integer.
+                return sample_dispatch_attempt.seed(
+                    f"aggregate-dp:{namespace}", round_idx, entity, stage
+                )
+            return _dp_noise_seed(selection.seed, round_idx, entity, stage)
 
         calibration_capture_stats: dict[str, Any] = {
             "captured_pairs": 0,
@@ -3034,6 +3063,7 @@ def _run_lenet5_policy(
             num_classes=num_classes,
             np_rng=np_rng,
             round_idx=round_idx,
+            sample_dispatch_attempt=sample_dispatch_attempt,
             progress_callback=training_progress_callback,
             progress_event_callback=training_event_callback,
         )
@@ -3434,6 +3464,7 @@ def _run_lenet5_policy(
                         num_classes=num_classes,
                         np_rng=np_rng,
                         round_idx=round_idx,
+                        sample_dispatch_attempt=sample_dispatch_attempt,
                         training_stage=edge_loop_idx,
                         model_cache=multi_edge_training_model_cache,
                     )
@@ -3751,11 +3782,8 @@ def _run_lenet5_policy(
                             (
                                 cloud_index,
                                 noise_std,
-                                _dp_noise_seed(
-                                    selection.seed,
-                                    round_idx,
-                                    client_id,
-                                    10_000,
+                                _round_noise_seed(client_id,
+                                    10_000, namespace="client-local-update",
                                 ),
                             )
                         )
@@ -3840,11 +3868,8 @@ def _run_lenet5_policy(
                             (
                                 cloud_index,
                                 noise_std,
-                                _dp_noise_seed(
-                                    selection.seed,
-                                    round_idx,
-                                    edge_id,
-                                    10_000,
+                                _round_noise_seed(edge_id,
+                                    10_000, namespace="edge-local-update",
                                 ),
                             )
                         )
@@ -3996,10 +4021,7 @@ def _run_lenet5_policy(
                 [item[2] for item in updates],
                 clip_norm=_update_clip_norm(train_config),
                 noise_multiplier=effective_edge_sigma,
-                round_seed=_dp_noise_seed(
-                    selection.seed,
-                    round_idx,
-                    ("liieiiic_streaming_secagg", int(client_by_id[updates[0][0]].edge_id)),
+                round_seed=_round_noise_seed(("liieiiic_streaming_secagg", int(client_by_id[updates[0][0]].edge_id)),
                     50_000,
                 ),
             )
@@ -4054,10 +4076,7 @@ def _run_lenet5_policy(
                 state_diff,
                 share_std,
                 np.random.default_rng(
-                    _dp_noise_seed(
-                        selection.seed,
-                        round_idx,
-                        ("aggregate_dp_share", cloud_index, client_ids),
+                    _round_noise_seed(("aggregate_dp_share", cloud_index, client_ids),
                         20_000,
                     )
                 ),
@@ -4150,10 +4169,7 @@ def _run_lenet5_policy(
                     [item[2] for item in updates],
                     clip_norm=_update_clip_norm(train_config),
                     noise_multiplier=sigma,
-                    round_seed=_dp_noise_seed(
-                        selection.seed,
-                        round_idx,
-                        ("liie_streaming_secagg", int(client_by_id[updates[0][0]].edge_id)),
+                    round_seed=_round_noise_seed(("liie_streaming_secagg", int(client_by_id[updates[0][0]].edge_id)),
                         40_000,
                     ),
                 )
@@ -4213,7 +4229,7 @@ def _run_lenet5_policy(
                         candidate=candidate,
                         clip_norm=_update_clip_norm(train_config),
                         fallback_noise_multiplier=float(privacy_parameters["update_noise_multiplier"]),
-                        noise_seed=_dp_noise_seed(selection.seed, round_idx, client_id, 20_000),
+                        noise_seed=_round_noise_seed(client_id, 20_000),
                     )
                 elif (
                     diagnostic_clip_only
@@ -4387,7 +4403,7 @@ def _run_lenet5_policy(
                         global_sample_counts,
                         clip_norm=_update_clip_norm(train_config),
                         noise_multiplier=aggregate_noise_multiplier,
-                        round_seed=_dp_noise_seed(selection.seed, round_idx, "liic_streaming_secagg", 30_000),
+                        round_seed=_round_noise_seed("liic_streaming_secagg", 30_000),
                     )
                     secagg_wall_time_sec += time.perf_counter() - secagg_started
                     secagg_call_count += 1
@@ -5417,6 +5433,7 @@ def _run_lenet5_policy(
             global_pareto_selection_rounds=global_pareto_selection_rounds,
             client_model_states=client_model_states,
             mainline_release_account=release_account,
+            sample_dispatch_identity=sample_dispatch_identity,
         )
         privacy_progress = (
             f"sample_eps={max_sample_epsilon:.3f}"
@@ -6010,6 +6027,7 @@ def _run_client_training_tasks(
     np_rng: np.random.Generator,
     round_idx: int,
     training_stage: int = 0,
+    sample_dispatch_attempt: SampleDispatchAttempt | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     progress_event_callback: Callable[[str, int, int], None] | None = None,
     model_cache: dict[str, Any] | None = None,
@@ -6022,6 +6040,8 @@ def _run_client_training_tasks(
     if executor == "process_pool" and device.type != "cpu":
         raise ValueError("process_pool executor is CPU-only; use --device cpu or --executor serial.")
 
+    if selection.privacy_unit == "sample" and sample_dispatch_attempt is None:
+        raise RuntimeError("Sample-DP worker dispatch missing persisted attempt identity; fail closed")
     worker_device = device if executor == "serial" else torch.device("cpu")
     privacy_parameters = resolved_privacy_parameters(selection)
 
@@ -6095,17 +6115,15 @@ def _run_client_training_tasks(
             ),
             "dp_update_mode": train_config.dp_update_mode,
             "dp_epsilon": max(selection.dp_emb_epsilon, 1e-6),
-            "dp_seed": _dp_noise_seed(
-                selection.seed,
-                round_idx,
-                client_id,
-                training_stage,
+            "dp_seed": (
+                sample_dispatch_attempt.seed("worker-dp", round_idx, client_id, training_stage)
+                if sample_dispatch_attempt is not None
+                else _dp_noise_seed(selection.seed, round_idx, client_id, training_stage)
             ),
-            "training_seed": _client_training_seed(
-                selection.seed,
-                round_idx,
-                client_id,
-                training_stage,
+            "training_seed": (
+                sample_dispatch_attempt.seed("worker-train", round_idx, client_id, training_stage)
+                if sample_dispatch_attempt is not None
+                else _client_training_seed(selection.seed, round_idx, client_id, training_stage)
             ),
             "device": str(worker_device),
         }
@@ -7696,11 +7714,11 @@ def _save_policy_checkpoint(
     global_pareto_selection_rounds: int,
     client_model_states: dict[int, dict[str, dict[str, torch.Tensor]]],
     mainline_release_account: IndependentReleaseAccount | None = None,
+    sample_dispatch_identity: SampleDispatchIdentity | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
-    torch.save(
-        {
+    checkpoint_payload = {
             "policy": policy,
             "next_round": next_round,
             "global_end_state": global_end.state_dict(),
@@ -7732,11 +7750,24 @@ def _save_policy_checkpoint(
             "mainline_release_account": (
                 mainline_release_account.state_dict() if mainline_release_account is not None else None
             ),
+            "sample_dispatch_identity": (
+                sample_dispatch_identity.state_dict() if sample_dispatch_identity is not None else None
+            ),
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        },
-        temporary_path,
-    )
-    temporary_path.replace(path)
+    }
+    # An atomic rename alone does not make a write-ahead privacy debit durable
+    # across host failures. Flush both the bytes and the directory entry BEFORE
+    # returning to the caller that starts a Sample-DP private worker.
+    with temporary_path.open("wb") as checkpoint_file:
+        torch.save(checkpoint_payload, checkpoint_file)
+        checkpoint_file.flush()
+        os.fsync(checkpoint_file.fileno())
+    os.replace(temporary_path, path)
+    parent_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def _load_policy_checkpoint(policy_dir: Path, device: torch.device) -> dict[str, Any] | None:
