@@ -241,14 +241,13 @@ def _assert_sample_hierarchical_preflight(
     privacy_unit: str,
     train_tasks: list[tuple[int, Any, Any, int]],
     mode_specs: dict[str, Any],
+    allow_experimental_guarded_multistage: bool = False,
 ) -> None:
-    """Fail closed before executing any worker if multi-stage accounting is not audited.
+    """Fail closed by default; explicitly opt into guarded engineering trials.
 
-    The current round commits Sample RDP after the first worker pass, while
-    hierarchical retraining stages execute later.  A single-pass audit cannot
-    certify their total event count.  Do not silently disable the audit or
-    treat predicted later events as observations.  Lift this restriction only
-    when all stage executions are audited before ledger commit/release.
+    Write-ahead full-stage Sample-DP charging, actual worker parameter receipts,
+    Edge feedback authorization and metadata-only Flow must remain in place.
+    This opt-in is NOT an end-to-end Sample-DP security certification.
     """
     if privacy_unit != "sample":
         return
@@ -257,6 +256,22 @@ def _assert_sample_hierarchical_preflight(
         for client_id, candidate, _idx, _sequence in train_tasks
         if int(mode_specs[candidate.mode].E_edge_loops) > 1
     ]
+    if unsupported and allow_experimental_guarded_multistage:
+        for _cid, candidate, _idx, _sequence in train_tasks:
+            if int(mode_specs[candidate.mode].E_edge_loops) <= 1:
+                continue
+            if candidate.mode not in EDGE_CLOUD_MODES:
+                raise RuntimeError(
+                    f"Experimental Sample-DP multi-stage mode {candidate.mode} "
+                    "is not a recognized Edge/Cloud hierarchy; fail closed"
+                )
+            # Validate the whole proposed receipt schedule before any private
+            # worker or ledger mutation; reject fractional/underplanned events.
+            uniform_sample_stage_plan(
+                candidate=candidate,
+                stage_count=int(mode_specs[candidate.mode].E_edge_loops),
+            )
+        return
     if unsupported:
         raise RuntimeError(
             "Sample-DP hierarchical retraining preflight: multi-stage modes "
@@ -2882,11 +2897,39 @@ def _run_lenet5_policy(
             train_tasks.append((client_id, candidate, idx, dispatch_sequence))
             dispatch_sequence += 1
 
+        experimental_multistage_opt_in = os.environ.get(
+            "DYNFL_EXPERIMENTAL_SAMPLE_MULTISTAGE", ""
+        ).strip()
+        if experimental_multistage_opt_in not in {"", "1"}:
+            raise ValueError(
+                "DYNFL_EXPERIMENTAL_SAMPLE_MULTISTAGE accepts only 1 (or unset)"
+            )
+        if experimental_multistage_opt_in == "1" and (
+            effective_selection.mainline_fusion
+            or train_config.he_execution != "profiled"
+            or effective_selection.privacy_unit != "sample"
+        ):
+            raise RuntimeError(
+                "Experimental multi-stage Sample-DP is allowed only for "
+                "non-fused Sample-DP with profiled HE; fail closed"
+            )
+        guarded_multistage_trial = experimental_multistage_opt_in == "1"
         _assert_sample_hierarchical_preflight(
             privacy_unit=effective_selection.privacy_unit,
             train_tasks=train_tasks,
             mode_specs=MODE_SPECS,
+            allow_experimental_guarded_multistage=guarded_multistage_trial,
         )
+        if guarded_multistage_trial and any(
+            int(MODE_SPECS[candidate.mode].E_edge_loops) > 1
+            for _cid, candidate, _idx, _seq in train_tasks
+        ):
+            print(
+                f"  [{policy}] EXPERIMENTAL guarded Sample-DP multi-stage trial: "
+                "full-stage precharge/receipts enabled, profiled HE is NOT encryption, "
+                "end_to_end_dp=not_established; do not use as formal privacy evidence.",
+                flush=True,
+            )
 
         # Debit the complete authorized Sample-DP work for EVERY dispatched
         # client before any private worker execution. Cloud admission is a
