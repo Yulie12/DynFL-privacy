@@ -3491,6 +3491,12 @@ def _run_lenet5_policy(
                             sample_stage_audits[cycle_cid].observe(
                                 stage=edge_loop_idx, worker=cycle_results[cycle_cid]
                             )
+                            if not bool(cycle_results[cycle_cid].get("finite", False)):
+                                raise RuntimeError(
+                                    f"Sample-DP hierarchical stage {edge_loop_idx} "
+                                    f"non-finite worker for admitted client {cycle_cid}; "
+                                    "refusing Edge aggregation (fail closed)"
+                                )
                     cycle_updates = [
                         (
                             client_id,
@@ -3501,6 +3507,21 @@ def _run_lenet5_policy(
                         for client_id in client_ids
                         if client_id in cycle_results and cycle_results[client_id]["finite"]
                     ]
+                if effective_selection.privacy_unit == "sample":
+                    # Stage 0 is audited before the Flow admission decision;
+                    # subsequent stages are audited above. No update enters
+                    # Edge aggregation without an exact, unused stage receipt.
+                    update_ids = {int(item[0]) for item in cycle_updates}
+                    if update_ids != set(client_ids):
+                        raise RuntimeError(
+                            f"Sample-DP hierarchical stage {edge_loop_idx} "
+                            f"Edge cohort mismatch, expected={sorted(client_ids)}, "
+                            f"received={sorted(update_ids)}; fail closed"
+                        )
+                    for cycle_cid in client_ids:
+                        sample_stage_audits[cycle_cid].authorize_edge_aggregate(
+                            stage=edge_loop_idx
+                        )
                 if not cycle_updates:
                     continue
                 multi_edge_loop_client_cycles += len(cycle_updates)
@@ -3548,6 +3569,8 @@ def _run_lenet5_policy(
             for sample_cid, sample_stage_audit in sample_stage_audits.items():
                 if sample_cid in admitted_client_ids:
                     sample_stage_audit.finalize()
+                    if len(sample_stage_audit.stages) > 1:
+                        sample_stage_audit.finalize_edge_aggregations()
                 else:
                     sample_stage_audit.finalize_executed_prefix(executed_stages=1)
             sample_worker_client_audit_count = len(sample_stage_audits)

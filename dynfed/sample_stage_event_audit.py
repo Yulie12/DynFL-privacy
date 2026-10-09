@@ -134,6 +134,9 @@ class SampleStageEventAudit:
                 f"!= candidate charged events {self.expected}"
             )
         self._observed: dict[int, SampleEventCounts] = {}
+        # These are actual Edge aggregation authorizations, not predicted
+        # privacy events. A receipt may authorize at most one such operation.
+        self._edge_aggregated: set[int] = set()
         # Legacy count-only unit tests remain supported; production enables
         # strict verification of parameters recorded at DP execution sites.
         self.require_runtime_parameters = bool(require_runtime_parameters)
@@ -190,6 +193,40 @@ class SampleStageEventAudit:
                         f"{field} observed={observed_value}, charged={expected_value}; fail closed"
                     )
         self._observed[stage] = actual
+
+    def authorize_edge_aggregate(self, *, stage: int) -> None:
+        """Authorize one Edge aggregation only after its private worker receipt.
+
+        This does not prove end-to-end DP; it prevents a stale, missing or
+        duplicated receipt from being used for hierarchical model feedback.
+        """
+        stage = _nonnegative_integer(stage, field="stage")
+        if stage not in self.stages or stage not in self._observed:
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id}: Edge aggregation stage {stage} "
+                "has no audited worker receipt; fail closed"
+            )
+        if stage in self._edge_aggregated:
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id}: duplicate Edge aggregation "
+                f"at stage {stage}; fail closed"
+            )
+        if stage != len(self._edge_aggregated):
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id}: Edge aggregation out of order, "
+                f"stage={stage}, expected={len(self._edge_aggregated)}; fail closed"
+            )
+        self._edge_aggregated.add(stage)
+
+    def finalize_edge_aggregations(self) -> None:
+        """Require one audited Edge feedback operation per scheduled stage."""
+        required = set(self.stages)
+        if self._edge_aggregated != required:
+            raise RuntimeError(
+                f"Sample-DP client {self.client_id}: Edge aggregations "
+                f"{sorted(self._edge_aggregated)} do not match stages "
+                f"{sorted(required)}; fail closed"
+            )
 
     def finalize_executed_prefix(self, *, executed_stages: int) -> SampleEventCounts:
         """Audit an explicitly stopped prefix (e.g., dropped after Cloud Flow).
