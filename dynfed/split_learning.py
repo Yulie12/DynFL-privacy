@@ -1073,6 +1073,8 @@ def split_local_train_lenet5(
                     )
                 )
 
+                diagnostics["executed_sample_optimizer_sigma"] = float(sample_optimizer_sigma)
+                diagnostics["executed_sample_optimizer_clip_norm"] = float(sample_optimizer_clip_norm)
                 for name, param in model.named_parameters():
                     if not param.requires_grad:
                         continue
@@ -1274,6 +1276,8 @@ def split_local_train_lenet5(
             dp_epsilon,
         )
         if normalized_privacy_unit == "sample":
+            diagnostics["executed_sample_label_grad_sigma"] = float(label_grad_noise_multiplier)
+            diagnostics["executed_sample_feature_clip_norm"] = float(dp_clip_norm)
             diagnostics["sample_label_grad_dp_release_batches"] += 1
         logits.backward(protected_label_grad)
         grad_to_end = edge_input.grad.detach()
@@ -1352,6 +1356,8 @@ def split_local_train_lenet5(
                     generator=sample_dp_generator,
                 )
 
+                diagnostics["executed_sample_optimizer_sigma"] = float(sample_optimizer_sigma)
+                diagnostics["executed_sample_optimizer_clip_norm"] = float(sample_optimizer_clip_norm)
                 for name, param in end.named_parameters():
                     if not param.requires_grad:
                         continue
@@ -1644,6 +1650,8 @@ def _protect_tensor_dp(
     released = protected + noise
 
     if diagnostics is not None:
+        diagnostics["executed_sample_embedding_sigma"] = float(noise_multiplier)
+        diagnostics["executed_sample_feature_clip_norm"] = float(clip_norm)
         with torch.no_grad():
             if tensor.ndim >= 2:
                 batch_size = int(tensor.shape[0])

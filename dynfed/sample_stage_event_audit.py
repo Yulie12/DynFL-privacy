@@ -7,6 +7,7 @@ any release, identify all released objects, and pass per-stage worker evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Mapping
 
 
@@ -27,6 +28,18 @@ def _nonnegative_integer(value: Any, *, field: str) -> int:
     if converted < 0 or converted != value:
         raise ValueError(f"{field}: expected nonnegative integer, got {value!r}")
     return converted
+
+
+def _positive_finite(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field}: boolean is not a valid DP parameter")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field}: missing or invalid DP parameter") from exc
+    if not math.isfinite(number) or number <= 0.0:
+        raise ValueError(f"{field}: DP parameter must be positive and finite")
+    return number
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,9 @@ class SampleStageEventAudit:
         client_id: int,
         candidate: Any,
         scheduled_stages: Mapping[int, SampleEventCounts],
+        require_runtime_parameters: bool = False,
+        feature_clip_norm: float | None = None,
+        optimizer_clip_norm: float | None = None,
     ) -> None:
         if not scheduled_stages:
             raise ValueError("Sample-DP stage plan cannot be empty")
@@ -118,6 +134,28 @@ class SampleStageEventAudit:
                 f"!= candidate charged events {self.expected}"
             )
         self._observed: dict[int, SampleEventCounts] = {}
+        # Legacy count-only unit tests remain supported; production enables
+        # strict verification of parameters recorded at DP execution sites.
+        self.require_runtime_parameters = bool(require_runtime_parameters)
+        self._expected_parameters: dict[str, float] = {}
+        if self.require_runtime_parameters:
+            for count, candidate_field, receipt_field in (
+                (self.expected.embedding, "sample_embedding_noise_multiplier", "executed_sample_embedding_sigma"),
+                (self.expected.label_grad, "sample_label_grad_noise_multiplier", "executed_sample_label_grad_sigma"),
+                (self.expected.optimizer, "sample_optimizer_noise_multiplier", "executed_sample_optimizer_sigma"),
+            ):
+                if count:
+                    self._expected_parameters[receipt_field] = _positive_finite(
+                        getattr(candidate, candidate_field, None), field=candidate_field
+                    )
+            if self.expected.embedding or self.expected.label_grad:
+                self._expected_parameters["executed_sample_feature_clip_norm"] = _positive_finite(
+                    feature_clip_norm, field="feature_clip_norm"
+                )
+            if self.expected.optimizer:
+                self._expected_parameters["executed_sample_optimizer_clip_norm"] = _positive_finite(
+                    optimizer_clip_norm, field="optimizer_clip_norm"
+                )
 
     def observe(self, *, stage: int, worker: Mapping[str, Any]) -> None:
         stage = _nonnegative_integer(stage, field="stage")
@@ -137,6 +175,20 @@ class SampleStageEventAudit:
                 f"Sample-DP client {self.client_id} stage {stage}: "
                 f"observed {actual}, expected {expected}; fail closed"
             )
+        if self.require_runtime_parameters:
+            for field, expected_value in self._expected_parameters.items():
+                try:
+                    observed_value = _positive_finite(worker.get(field), field=field)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"Sample-DP client {self.client_id} stage {stage}: "
+                        f"missing/invalid runtime {field}; fail closed"
+                    ) from exc
+                if not math.isclose(observed_value, expected_value, rel_tol=0, abs_tol=1e-12):
+                    raise RuntimeError(
+                        f"Sample-DP client {self.client_id} stage {stage}: "
+                        f"{field} observed={observed_value}, charged={expected_value}; fail closed"
+                    )
         self._observed[stage] = actual
 
     def finalize_executed_prefix(self, *, executed_stages: int) -> SampleEventCounts:

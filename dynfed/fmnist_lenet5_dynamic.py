@@ -2901,6 +2901,9 @@ def _run_lenet5_policy(
                         candidate=candidate,
                         stage_count=max(1, int(MODE_SPECS[candidate.mode].E_edge_loops)),
                     ),
+                    require_runtime_parameters=True,
+                    feature_clip_norm=_feature_clip_norm(train_config),
+                    optimizer_clip_norm=_sample_optimizer_clip_norm(train_config),
                 )
                 for cid, candidate, _idx, _sequence in train_tasks
             }

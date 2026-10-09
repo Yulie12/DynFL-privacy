@@ -101,6 +101,8 @@ def train_trusted_lie_joint_dp(
             noise_multiplier=noise_multiplier,
             generator=generator,
         )
+        diagnostics["executed_sample_optimizer_sigma"] = float(noise_multiplier)
+        diagnostics["executed_sample_optimizer_clip_norm"] = float(clip_norm)
         for name, parameter in named:
             if name not in protected:
                 raise RuntimeError(f"missing protected joint gradient: {name}")
