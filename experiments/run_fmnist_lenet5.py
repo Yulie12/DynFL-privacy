@@ -84,6 +84,7 @@ def parse_args() -> argparse.Namespace:
             "resnet18_pretrained",
             "resnet18_pretrained_head",
             "resnet18_pretrained_head256",
+                            "resnet18_pretrained_layer4_head",
             "resnet18_pretrained_adapter",
             "resnet50_pretrained",
         ],

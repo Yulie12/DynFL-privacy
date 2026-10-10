@@ -2555,7 +2555,11 @@ def _run_lenet5_policy(
                 if client_id not in fixed_privacy_profiles and candidate.mode != "SKIP":
                     fixed_privacy_profiles[client_id] = (
                         dict(candidate.mechanisms),
-                        candidate.update_noise_multiplier,
+                        (
+                            candidate.sample_optimizer_noise_multiplier
+                            if effective_selection.privacy_unit == "sample"
+                            else candidate.update_noise_multiplier
+                        ),
                     )
         previous_choices = {client_id: candidate for client_id, candidate, _candidates, _rem in selected}
 
@@ -7857,11 +7861,12 @@ def _save_policy_checkpoint(
         checkpoint_file.flush()
         os.fsync(checkpoint_file.fileno())
     os.replace(temporary_path, path)
-    parent_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+    if os.name != 'nt':
+        parent_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
 
 
 def _load_policy_checkpoint(policy_dir: Path, device: torch.device) -> dict[str, Any] | None:
