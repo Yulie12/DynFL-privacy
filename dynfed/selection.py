@@ -240,6 +240,11 @@ class SelectionConfig:
     # ``error`` prevents silent fallback to the retired learning objective.
     # ``legacy`` exists only for backward-compatible diagnostics/tests.
     joint_calibration_missing_policy: str = "error"
+    # V370: opt-in explicit, fixed Client->Edge pair trust admission. Omitted
+    # trust entries are untrusted; runtime supplies the actual Edge id.
+    # New fields are appended to preserve existing positional construction.
+    strict_pair_admission: bool = False
+    trusted_client_edge_pairs: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.trusted_lie_joint_sample_dp:
@@ -252,6 +257,17 @@ class SelectionConfig:
                     "trusted LIE needs a new learning-proxy calibration; "
                     "existing joint_calibration tables describe noisy embeddings"
                 )
+        seen_trust_clients: set[int] = set()
+        for client_id, edge_id in self.trusted_client_edge_pairs:
+            if not (0 <= int(client_id) < self.num_clients):
+                raise ValueError("trusted pair client id is outside configured topology")
+            if not (0 <= int(edge_id) < self.num_edges):
+                raise ValueError("trusted pair edge id is outside configured topology")
+            if int(client_id) in seen_trust_clients:
+                raise ValueError("trusted_client_edge_pairs must not repeat a client id")
+            seen_trust_clients.add(int(client_id))
+        if self.strict_pair_admission and not self.fl_first_split_on_demand:
+            raise ValueError("strict_pair_admission requires fl_first_split_on_demand=True")
         seen_fast_clients: set[int] = set()
         for client_id, deadline in self.fast_client_deadlines:
             if int(client_id) < 0:
@@ -287,6 +303,47 @@ class SelectionConfig:
             raise ValueError(
                 "joint_calibration_path is required when learning_objective='joint_calibration'"
             )
+
+
+def enable_static_pair_admission(
+    config: SelectionConfig,
+    manifest_path: str | Path,
+) -> SelectionConfig:
+    """Opt in to V370 using a reproducible JSON Client->Edge trust manifest.
+
+    Example::
+
+        {"trusted_client_edge_pairs": [[1, 1]],
+         "fast_client_deadlines": [[1, 3.5]]}
+
+    The runner must still pass each Client's actual connected_edge_id to
+    enumerate_candidates(). Trust is never derived from the manifest alone.
+    """
+    payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("static admission manifest must be a JSON object")
+    allowed = {"trusted_client_edge_pairs", "fast_client_deadlines"}
+    unknown = set(payload).difference(allowed)
+    if unknown:
+        raise ValueError(f"unknown static admission manifest fields: {sorted(unknown)}")
+    if "trusted_client_edge_pairs" not in payload:
+        raise ValueError("manifest requires explicit trusted_client_edge_pairs")
+    pairs = payload["trusted_client_edge_pairs"]
+    deadlines = payload.get("fast_client_deadlines", [])
+    if not isinstance(pairs, list) or not isinstance(deadlines, list):
+        raise ValueError("trusted pairs and fast deadlines must be JSON lists")
+    if any(not isinstance(x, list) or len(x) != 2 for x in pairs + deadlines):
+        raise ValueError("each trusted pair / fast deadline must have two values")
+    return replace(
+        config,
+        strict_pair_admission=True,
+        trusted_client_edge_pairs=tuple(
+            (int(client_id), int(edge_id)) for client_id, edge_id in pairs
+        ),
+        fast_client_deadlines=tuple(
+            (int(client_id), float(deadline)) for client_id, deadline in deadlines
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -334,6 +391,7 @@ class Candidate:
     sample_embedding_noise_multiplier: float | None = None
     sample_label_grad_noise_multiplier: float | None = None
     sample_optimizer_noise_multiplier: float | None = None
+    risk_hard_gate: bool = False  # V370 opt-in; do not retroactively change legacy runs
 
     @property
     def feasible(self) -> bool:
@@ -341,6 +399,7 @@ class Candidate:
             self.feasible_resource
             and self.feasible_memory
             and self.feasible_privacy
+            and (not self.risk_hard_gate or self.feasible_risk)
         )
 
     @property
@@ -814,6 +873,11 @@ def run_selection_experiment(
                     rng=rng,
                     policy=policy,
                     privacy_ledger=privacy_ledgers[client.client_id],
+                    connected_edge_id=int(client.edge_id),
+                    fast_response_deadline=(
+                        dict(config.fast_client_deadlines).get(client.client_id)
+                        if config.strict_pair_admission else None
+                    ),
                     fixed_privacy_profile=(
                         fixed_privacy_profiles.get(client.client_id)
                         if policy in {"fixed_mode_fixed_privacy", "dynamic_mode_fixed_privacy"}
@@ -1062,6 +1126,7 @@ def enumerate_candidates(
     privacy_ledger: ClientPrivacyLedger | SamplePrivacyLedger | None = None,
     privacy_requirement: ExposurePrivacyRequirement | None = None,
     fast_response_deadline: float | None = None,
+    connected_edge_id: int | None = None,
     fixed_privacy_profile: tuple[dict[str, str], float | None] | None = None,
     frozen_mode: str | None = None,
     mode_audit: dict[str, Any] | None = None,
@@ -1082,6 +1147,29 @@ def enumerate_candidates(
             raise TypeError(
                 "sample privacy_unit requires SamplePrivacyLedger"
             )
+    # V370: require the actual topology input in the new, explicit policy.
+    # A configured trusted pair is useless unless it matches the client's
+    # *actual* fixed Edge. This fail-closed check also catches missing runner
+    # integration, rather than silently treating all Edges as trusted.
+    if config.strict_pair_admission:
+        if connected_edge_id is None:
+            raise ValueError(
+                "strict_pair_admission requires connected_edge_id from the fixed topology"
+            )
+        if not (0 <= int(connected_edge_id) < config.num_edges):
+            raise ValueError("connected_edge_id is outside configured topology")
+        configured_deadline = dict(config.fast_client_deadlines).get(int(client_id))
+        if configured_deadline is not None:
+            if (fast_response_deadline is not None
+                    and abs(float(fast_response_deadline) - float(configured_deadline)) > 1e-9):
+                raise ValueError("runtime fast deadline disagrees with configured deadline")
+            fast_response_deadline = float(configured_deadline)
+        elif fast_response_deadline is not None:
+            raise ValueError("fast deadline must be predeclared in fast_client_deadlines")
+        pair_trusted = (int(client_id), int(connected_edge_id)) in config.trusted_client_edge_pairs
+    else:
+        pair_trusted = False
+
     candidates: list[Candidate] = []
     # Counts describe candidates, not clients. Stages are snapshots; their
     # differences must not be conflated with Pareto rejection.
@@ -1120,10 +1208,20 @@ def enumerate_candidates(
             audit_exclusions[mode] = "cloud_participation_required"
             continue
 
-        # Ordinary clients are not allowed to terminate at Edge.
-        # The existence of a fast-response deadline grants Edge-only
-        # modes admission; exact deadline satisfaction is checked later.
-        if (
+        if config.strict_pair_admission:
+            # LIE is a Split Edge-only mode and has NO fast-client gate.
+            # LIIE is No-Split Edge-only and requires a predeclared fast
+            # client with a deadline. Neither gains trust/DP by this gate.
+            if mode == "LIIE" and fast_response_deadline is None:
+                audit_exclusions[mode] = "fast_response_not_required"
+                continue
+            # Split is allowed only when the Client's *connected* Edge is
+            # trusted. This conservatively also applies to LIC's direct
+            # Cloud split path under the user's simplified policy.
+            if mode in {"LIE", "LIC", "LIEIIC", "LIEIIIC"} and not pair_trusted:
+                audit_exclusions[mode] = "client_edge_untrusted"
+                continue
+        elif (
             config.edge_only_requires_fast_deadline
             and fast_response_deadline is None
             and not _mode_reaches_cloud(spec)
@@ -1139,7 +1237,8 @@ def enumerate_candidates(
     # If at least one full-local mode fits the device, split modes are
     # unnecessary.  Otherwise only device-feasible split modes are admitted.
     if (
-        config.edge_only_requires_fast_deadline
+        not config.strict_pair_admission
+        and config.edge_only_requires_fast_deadline
         and config.fl_first_split_on_demand
         and _policy_uses_fl_first_mode_admissibility(policy)
     ):
@@ -1202,6 +1301,29 @@ def enumerate_candidates(
                 for mode, spec in device_feasible_specs
                 if mode not in full_local_modes
             ]
+
+    # Under strict admission, remove device-infeasible modes before the
+    # DP/HE expansion without deciding FL-first based on memory/CPU alone.
+    # FL-first itself happens below, after candidate latency is predicted.
+    if config.strict_pair_admission and _policy_uses_fl_first_mode_admissibility(policy):
+        device_admitted_specs = []
+        for mode, spec in admitted_mode_specs:
+            (_, _, feasible_resource, _, _, feasible_memory) = (
+                _mode_device_feasibility_metrics(
+                    config=config,
+                    local_work=spec.local_work,
+                    local_memory=spec.local_memory,
+                    samples=samples,
+                    memory_capacity_factor=memory_capacity_factor,
+                )
+            )
+            if not feasible_resource:
+                audit_exclusions[mode] = "local_resource_infeasible"
+            elif not feasible_memory:
+                audit_exclusions[mode] = "local_memory_infeasible"
+            else:
+                device_admitted_specs.append((mode, spec))
+        admitted_mode_specs = device_admitted_specs
 
     for mode, spec in admitted_mode_specs:
         policy_allow_none = allow_none or policy in {
@@ -1470,10 +1592,44 @@ def enumerate_candidates(
     # candidate/mechanism generation.
     snapshot("after_qos_cloud_admissibility")
 
+    # V370: FL-first uses actual candidate predictions for resource, memory,
+    # and the *client-specific* fast deadline together. No universal 8-second
+    # reporting time_limit is silently treated as a deadline. Privacy
+    # feasibility is also required before we remove Split alternatives.
+    if config.strict_pair_admission and _policy_uses_fl_first_mode_admissibility(policy):
+        full_local_modes = {"LIIE", "LIIC", "LIIEIIIC"}
+        local_feasible = any(
+            candidate.mode in full_local_modes
+            and candidate.feasible_resource
+            and candidate.feasible_memory
+            and candidate.feasible_time
+            and candidate.feasible_privacy
+            for candidate in candidates
+        )
+        filtered = []
+        for candidate in candidates:
+            is_local = candidate.mode in full_local_modes
+            if is_local != local_feasible:
+                audit_exclusions.setdefault(
+                    candidate.mode,
+                    "fl_first_local_feasible" if local_feasible
+                    else "full_local_infeasible_uses_split",
+                )
+                continue
+            filtered.append(candidate)
+        candidates = filtered
+        # Explain deadline failures, including when all full-local plans
+        # fail their configured fast deadline and the selector tries Split.
+        if fast_response_deadline is not None and not local_feasible:
+            for mode in full_local_modes:
+                if mode not in audit_exclusions:
+                    audit_exclusions[mode] = "local_deadline_or_privacy_infeasible"
+
     # Preserve the historical post-generation FL-first behavior for configs
     # that have not opted into the new admission-first rule.
     if (
-        not config.edge_only_requires_fast_deadline
+        not config.strict_pair_admission
+        and not config.edge_only_requires_fast_deadline
         and config.fl_first_split_on_demand
         and _policy_uses_fl_first_mode_admissibility(policy)
     ):
@@ -1508,6 +1664,24 @@ def enumerate_candidates(
         mode_audit.clear()
         mode_audit["stages"] = audit_stages
         mode_audit["generation_exclusions"] = audit_exclusions
+        # Extra opt-in audit metadata; existing stage/CSV column names stay
+        # unchanged so the legacy experiment analysis continues to work.
+        mode_audit["strict_pair_admission"] = bool(config.strict_pair_admission)
+        mode_audit["connected_edge_id"] = (
+            int(connected_edge_id) if connected_edge_id is not None else None
+        )
+        mode_audit["client_edge_trusted"] = (
+            bool(pair_trusted) if config.strict_pair_admission else None
+        )
+        mode_audit["fast_response_predeclared"] = (
+            fast_response_deadline is not None
+        )
+        mode_audit["local_training_feasible"] = (
+            bool(local_feasible)
+            if config.strict_pair_admission
+            and _policy_uses_fl_first_mode_admissibility(policy)
+            else None
+        )
         mode_audit["generation_counts"] = audit_counts
         mode_audit["feasible"] = {
             mode: sum(item.mode == mode and item.feasible for item in candidates)
@@ -1644,7 +1818,7 @@ def choose_candidate(
         return skipped_candidate()
 
     feasible = [item for item in privacy_feasible if item.feasible]
-    if require_feasible and not feasible:
+    if (require_feasible or any(item.risk_hard_gate for item in candidates)) and not feasible:
         return skipped_candidate()
     pool = feasible or privacy_feasible
 
@@ -1908,13 +2082,13 @@ def choose_global_pareto_profile(
             item for item in candidates
             if item.feasible and item.epsilon_used <= remaining + 1e-12
         ]
-        if not pool and not config.require_feasible:
+        if not pool and not config.require_feasible and not config.strict_pair_admission:
             pool = [
                 item for item in candidates
                 if item.feasible_device and item.epsilon_used <= remaining + 1e-12
             ]
         if not pool:
-            pool = [current if current.feasible_device else skipped_candidate()]
+            pool = [current if (current.feasible if config.strict_pair_admission else current.feasible_device) else skipped_candidate()]
         pool = _dedupe_candidates(pool)
         pools_before_stability[client_id] = list(pool)
         if config.enforce_cloud_dp_stability:
@@ -7867,6 +8041,7 @@ def _estimate_candidate(
         feasible_resource=feasible_resource,
         feasible_privacy=feasible_privacy,
         feasible_risk=feasible_risk,
+        risk_hard_gate=False,  # heuristic score is diagnostic only
         feasible_time=feasible_time,
         feasible_edge=feasible_edge,
         feasible_cloud=feasible_cloud,

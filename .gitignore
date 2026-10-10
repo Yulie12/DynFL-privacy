@@ -45,3 +45,50 @@ third_party/SEAL-python/*.so
 third_party/SEAL-python/*.pyd
 third_party/SEAL-python/*.egg-info/
 .he_deps
+
+# Python and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Training datasets, outputs and logs
+data/
+datasets/
+out/
+outputs/
+runs/
+logs/
+wandb/
+checkpoints/
+*.log
+
+# Large model files and local archives
+*.pth
+*.ckpt
+*.pt
+*.zip
+*.tar
+*.tar.gz
+
+# Credentials and machine-local files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local source backups
+*.before_*
+
+# Historical patch snapshots
+dynfl_v369*.patch
+v370_selection_admission.patch
+
+# Credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key

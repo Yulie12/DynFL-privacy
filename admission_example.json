@@ -1,0 +1,22 @@
+{
+  "trusted_client_edge_pairs": [
+    [
+      1,
+      1
+    ],
+    [
+      3,
+      3
+    ],
+    [
+      5,
+      5
+    ]
+  ],
+  "fast_client_deadlines": [
+    [
+      1,
+      3.5
+    ]
+  ]
+}

@@ -372,6 +372,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Policies to run. Mainline fusion defaults exclude privacy-bypass controls.",
     )
+    # V370_STATIC_PAIR_MANIFEST_ARG
+    parser.add_argument("--static-pair-admission-manifest", type=str, default=None, help="V370 fixed Client-Edge trust JSON manifest")
     return parser.parse_args()
 
 
@@ -557,6 +559,19 @@ def main() -> None:
         joint_calibration_e_alg_policy=args.joint_calibration_e_alg_policy,
         joint_calibration_missing_policy=args.joint_calibration_missing_policy,
     )
+    # V370_STATIC_PAIR_MANIFEST_RUNNER: load manifest before training starts.
+    if args.static_pair_admission_manifest is not None:
+        if not args.fl_first_split_on_demand:
+            raise ValueError("V370 requires --fl-first-split-on-demand")
+        if args.edge_only_requires_fast_deadline:
+            raise ValueError("V370 disallows --edge-only-requires-fast-deadline (LIE need not be fast)")
+        if args.fast_client_deadlines:
+            raise ValueError("V370 fast client deadlines must come solely from its manifest")
+        from dynfed.selection import enable_static_pair_admission
+        selection = enable_static_pair_admission(selection, args.static_pair_admission_manifest)
+        if not selection.strict_pair_admission:
+            raise RuntimeError("V370 static pair admission did not activate")
+        print("V370 static pair admission: ENABLED; manifest=", args.static_pair_admission_manifest, flush=True)
     train_config = Lenet5Config(
         execution_revision=args.execution_revision,
         dataset_name=args.dataset,

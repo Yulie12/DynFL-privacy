@@ -2207,6 +2207,7 @@ def _run_lenet5_policy(
             candidates = enumerate_candidates(
                 config=effective_selection,
                 client_id=client.client_id,
+                connected_edge_id=int(client.edge_id),
                 edge_factor=staged_compute_factor(selection, edge_by_id[client.edge_id].compute_factor, round_idx),
                 compute_factor=staged_compute_factor(selection, client.compute_factor, round_idx),
                 memory_capacity_factor=client.memory_capacity_factor,

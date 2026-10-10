@@ -213,6 +213,18 @@ def build_command(
         command.extend(["--dp-update-mode", "off"])
     if exclude_modes:
         command.extend(["--exclude-modes", *exclude_modes])
+    # V370_STATIC_PAIR_MANIFEST_PAPER: opt-in, fail closed on inconsistent flags.
+    static_pair_manifest = system.get("static_pair_admission_manifest")
+    if static_pair_manifest is not None:
+        if not isinstance(static_pair_manifest, str) or not static_pair_manifest.strip():
+            raise ValueError("system.static_pair_admission_manifest must be a nonempty path")
+        if not system.get("fl_first_split_on_demand", False):
+            raise ValueError("V370 requires system.fl_first_split_on_demand=true")
+        if system.get("edge_only_requires_fast_deadline", False):
+            raise ValueError("V370 requires system.edge_only_requires_fast_deadline=false; LIE is not fast-only")
+        if system.get("fast_client_deadlines"):
+            raise ValueError("V370 fast_client_deadlines must come from the manifest, not both sources")
+        command.extend(["--static-pair-admission-manifest", static_pair_manifest])
     fast_deadlines = system.get("fast_client_deadlines", {})
     if fast_deadlines:
         if not isinstance(fast_deadlines, dict):
