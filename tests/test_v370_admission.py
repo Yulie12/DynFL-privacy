@@ -34,7 +34,7 @@ def load_selection():
     stub('privacy', ClientPrivacyLedger=ClientPrivacyLedger, SamplePrivacyLedger=SamplePrivacyLedger, OBJECT_SIZES={'emb':1,'grad':1,'upd':1,'emb_grad':1, 'logits':1, 'weakemb':1, 'strongemb':1, 'pseudo_label':1}, PRIVACY_ALPHA=1., PRIVACY_BASE_TIME=1., calibrate_gaussian_noise=lambda *a,**k:1, mechanism_uses_dp=lambda m:False, mechanism_uses_he=lambda m:False, utility_penalty=lambda *a,**k:0.)
     # Load actual mode definitions from the supplied training.py (no DynFL runtime).
     namespace = {'dataclass':dataclass}
-    source=TRAINING.read_text()
+    source=TRAINING.read_text(encoding='utf-8')
     start=source.index('@dataclass(frozen=True)\nclass ModeSpec:')
     end=source.index('\n\ndef run_experiment(',start)
     exec(source[start:end],namespace)
