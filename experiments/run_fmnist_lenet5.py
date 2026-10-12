@@ -291,6 +291,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resource-limit", type=float, default=1.35)
     parser.add_argument("--memory-limit", type=float, default=1.35)
+    parser.add_argument("--tier-capacity-policy", choices=["legacy", "enforce"], default="legacy",
+                        help="Opt-in global Edge/Cloud capacity admission; historical runs use legacy")
+    parser.add_argument("--edge-cpu-limit", type=float, default=15.0)
+    parser.add_argument("--cloud-cpu-limit", type=float, default=20.0)
+    parser.add_argument("--edge-memory-limit-mb", type=float, default=None)
+    parser.add_argument("--cloud-memory-limit-mb", type=float, default=None)
     parser.add_argument(
         "--split-interaction-mode", choices=["fixed", "workload"], default="fixed",
         help="Use fixed L_block_cycles or workload-derived split minibatch interactions.",
@@ -500,6 +506,11 @@ def main() -> None:
         omega_update_clip_norm=update_clip_norm,
         resource_limit=args.resource_limit,
         memory_limit=args.memory_limit,
+        tier_capacity_policy=args.tier_capacity_policy,
+        edge_cpu_limit=args.edge_cpu_limit,
+        cloud_cpu_limit=args.cloud_cpu_limit,
+        edge_memory_limit_mb=args.edge_memory_limit_mb,
+        cloud_memory_limit_mb=args.cloud_memory_limit_mb,
         split_interaction_mode=args.split_interaction_mode,
         split_batch_size=args.split_batch_size,
         fl_first_split_on_demand=args.fl_first_split_on_demand,

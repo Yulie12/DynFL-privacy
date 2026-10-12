@@ -78,6 +78,7 @@ from .selection import (
     choose_global_pareto_profile,
     choose_cloud_dp_pareto_profile,
     evaluate_global_profile,
+    repair_selected_tier_capacity,
     enumerate_candidates,
     paper_client_privacy_requirement,
     build_client_privacy_ledger,
@@ -2189,6 +2190,18 @@ def _run_lenet5_policy(
             round_value=round_idx,
         )
         prior_choices = dict(previous_choices)
+        # The on-disk calibration table stores round:N keys, never the
+        # configuration sentinel "auto_round". Reuse the resolved config
+        # in every subsequent evaluation (including tier-capacity repair).
+        round_evaluation_config = (
+            replace(
+                effective_selection,
+                joint_calibration_state_key=f"round:{round_idx}",
+            )
+            if effective_selection.learning_objective == "joint_calibration"
+            and effective_selection.joint_calibration_state_key == "auto_round"
+            else effective_selection
+        )
         selected = []
         round_comm = 0.0
         round_risk = 0.0
@@ -2388,7 +2401,13 @@ def _run_lenet5_policy(
             "nsga2",
         } and should_update_policy:
             objective = "latency" if policy == "ours_no_omega" else "pareto"
-            search_method = "nsga2" if policy == "nsga2" else "bounded"
+            _requested_search_method = str(
+                __import__("os").environ.get("DYNFL_SEARCH_METHOD", "")
+            ).strip().lower()
+            if policy == "full_dynfl" and _requested_search_method == "mo_lns":
+                search_method = "mo_lns"
+            else:
+                search_method = "nsga2" if policy == "nsga2" else "bounded"
             emit_stage_status(
                 (
                     f"Round {round_idx + 1}/{selection.rounds}: solving Pareto mode selection"
@@ -2400,21 +2419,10 @@ def _run_lenet5_policy(
             )
             client_samples = {client.client_id: float(client.samples) for client in clients}
             profile_selection_config = (
-                replace(effective_selection, require_edge_cloud_coverage=False)
+                replace(round_evaluation_config, require_edge_cloud_coverage=False)
                 if frozen_mode_runtime_active
-                else effective_selection
+                else round_evaluation_config
             )
-            if (
-                profile_selection_config.learning_objective == "joint_calibration"
-                and profile_selection_config.joint_calibration_state_key == "auto_round"
-            ):
-                # Online selection performs no paired measurement. It only
-                # queries the offline table for the current round-conditioned
-                # cell; the table can fall back to the nearest calibrated round.
-                profile_selection_config = replace(
-                    profile_selection_config,
-                    joint_calibration_state_key=f"round:{round_idx}",
-                )
             selected, profile_evaluation = (
                 choose_cloud_dp_pareto_profile
                 if policy == "full_dynfl" and effective_selection.cloud_dp_plan != "legacy"
@@ -2469,7 +2477,7 @@ def _run_lenet5_policy(
             "nsga2",
         } and profile_evaluation is None:
             profile_evaluation = evaluate_global_profile(
-                config=effective_selection,
+                config=round_evaluation_config,
                 selected=selected,
                 client_samples={client.client_id: float(client.samples) for client in clients},
                 client_edges={client.client_id: int(client.edge_id) for client in clients},
@@ -2531,7 +2539,7 @@ def _run_lenet5_policy(
             # estimated DP perturbation, but does not retrospectively claim
             # that the original Pareto search optimized protocol choice.
             profile_evaluation = evaluate_global_profile(
-                config=effective_selection,
+                config=round_evaluation_config,
                 selected=selected,
                 client_samples={client.client_id: float(client.samples) for client in clients},
                 client_edges=client_edges,
@@ -2540,11 +2548,29 @@ def _run_lenet5_policy(
             for client_id in planned_ids:
                 round_decision_rows_by_client[client_id]["dp_execution_plan"] = "aggregate"
 
+        # Optional three-tier hard admission is applied BEFORE freezing and
+        # BEFORE any model update/DP release. Dropped clients remain SKIP.
+        if effective_selection.tier_capacity_policy == "enforce":
+            selected, tier_audit = repair_selected_tier_capacity(
+                effective_selection, selected,
+                client_edges=client_edges,
+                client_samples={client.client_id: float(client.samples) for client in clients},
+            )
+            selection_diagnostics["tier_capacity_audit"] = tier_audit
+            profile_evaluation = evaluate_global_profile(
+                config=round_evaluation_config,
+                selected=selected,
+                client_samples={client.client_id: float(client.samples) for client in clients},
+                client_edges=client_edges,
+                previous_choices=prior_choices,
+            )
+            selection_diagnostics["chosen"] = profile_evaluation
+            selection_diagnostics["mode_chosen"] = {
+                mode: sum(candidate.mode == mode for _, candidate, _, _ in selected)
+                for mode in MODE_SPECS
+            }
         _synchronize_device_for_timing(device)
-        selection_wall_time_sec = (
-            time.perf_counter()
-            - selection_wall_started_at
-        )
+        selection_wall_time_sec = time.perf_counter() - selection_wall_started_at
         if policy in _FROZEN_MODE_POLICIES and not fixed_mode_assignments:
             fixed_mode_assignments = {
                 client_id: candidate.mode
@@ -2705,7 +2731,7 @@ def _run_lenet5_policy(
 
             rem = ledger.remaining_budget
             has_feasible_candidate = any(
-                item.mode != "SKIP" and item.feasible for item in candidates
+                item.mode != "SKIP" and item.feasible for item in _candidates
             )
             fast_response_deadline = dict(effective_selection.fast_client_deadlines).get(client_id)
             deadline_satisfied = (
@@ -2828,6 +2854,14 @@ def _run_lenet5_policy(
                     "feasible_risk": candidate.feasible_risk,
                     "feasible_time": candidate.feasible_time,
                     "has_feasible_candidate": has_feasible_candidate,
+                    "tier_capacity_runtime_skip": int(
+                        effective_selection.tier_capacity_policy == "enforce"
+                        and client_id in selection_diagnostics.get("tier_capacity_audit", {}).get("dropped_client_ids", ())
+                    ),
+                    "tier_capacity_skip_reason": ";".join(
+                        selection_diagnostics.get("tier_capacity_audit", {})
+                        .get("dropped_reasons", {}).get(str(client_id), ())
+                    ),
                     "total_candidates": len(_candidates),
                     "feasible_candidates": sum(
                         bool(item.feasible) for item in _candidates
@@ -4820,6 +4854,18 @@ def _run_lenet5_policy(
                 "selection_neighbor_generation_sec": selection_diagnostics.get(
                     "performance_profile", {}
                 ).get("neighbor_generation_sec", 0.0),
+                "selection_neighbor_key_visited_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_key_visited_sec", 0.0),
+                "selection_neighbor_sort_topk_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_sort_topk_sec", 0.0),
+                "selection_neighbor_append_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_append_sec", 0.0),
+                "selection_neighbor_profile_materialization_sec": selection_diagnostics.get(
+                    "performance_profile", {}
+                ).get("neighbor_profile_materialization_sec", 0.0),
                 "selection_neighbor_evaluation_sec": selection_diagnostics.get(
                     "performance_profile", {}
                 ).get("neighbor_evaluation_sec", 0.0),
@@ -5260,6 +5306,13 @@ def _run_lenet5_policy(
                 ),
                 "actual_edge_cloud_coverage_failure_edges": json.dumps(
                     actual_coverage_failure_edges, sort_keys=True
+                ),
+                "tier_capacity_policy": effective_selection.tier_capacity_policy,
+                "tier_capacity_dropped_count": len(
+                    selection_diagnostics.get("tier_capacity_audit", {}).get("dropped_client_ids", ())
+                ),
+                "tier_capacity_audit_json": json.dumps(
+                    selection_diagnostics.get("tier_capacity_audit", {}), sort_keys=True
                 ),
                 "frozen_mode_assignment_active": int(
                     policy in _FROZEN_MODE_POLICIES and bool(fixed_mode_assignments)

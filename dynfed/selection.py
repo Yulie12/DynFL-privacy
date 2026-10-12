@@ -184,6 +184,11 @@ class SelectionConfig:
     minibatch_reference_samples: float = 600.0
     edge_cpu_limit: float = 15.0  # per-edge CPU capacity
     cloud_cpu_limit: float = 20.0  # global cloud CPU capacity
+    # Opt-in, profile-wide L/E/C admission. The legacy runs remain untouched.
+    # CPU uses normalized workload units; E/C memory uses configured payload MB.
+    tier_capacity_policy: str = "legacy"  # legacy | enforce
+    edge_memory_limit_mb: float | None = None
+    cloud_memory_limit_mb: float | None = None
     require_cloud_participation: bool = False
     require_edge_cloud_coverage: bool = False
     min_edge_cloud_fusion_ratio: float = 0.0
@@ -2033,7 +2038,7 @@ def choose_global_pareto_profile(
     """
     if objective not in {"pareto", "latency"}:
         raise ValueError(f"Unsupported global profile objective: {objective}")
-    if search_method not in {"bounded", "nsga2"}:
+    if search_method not in {"bounded", "nsga2", "mo_lns"}:
         raise ValueError(f"Unsupported global profile search method: {search_method}")
     if search_method == "nsga2" and objective != "pareto":
         raise ValueError("NSGA-II requires the Pareto objective")
@@ -2300,7 +2305,14 @@ def choose_global_pareto_profile(
     visited_profiles = set(evaluation_cache)
     visited_profiles.update(_evaluation_key(item) for item in seed_evaluations)
 
-    bounded_iterations = config.pareto_max_iters if search_method == "bounded" else 0
+    bounded_iterations = config.pareto_max_iters if search_method in {"bounded", "mo_lns"} else 0
+
+    # Scoped to this one Pareto search call. Joint-calibration replacement
+    # statistics depend on the client/mode profile, admitted cohort, and the
+    # fixed config/sample metadata for this call.
+    _replacement_stats_cache = {}
+    _replacement_stats_cache_maxsize = 4
+
     for _iter_idx in range(max(0, bounded_iterations)):
         _perf_add(perf, "search_iterations")
         neighbor_started_at = time.perf_counter()
@@ -2325,15 +2337,60 @@ def choose_global_pareto_profile(
                 evaluated.profile,
                 flow_inputs_by_candidate,
             )
-            stats_started_at = time.perf_counter()
-            replacement_stats = (
-                _LearningReplacementStats(
-                    config, evaluated.profile, client_samples, client_edges,
-                    evaluated.admitted_client_ids,
-                ) if objective == "pareto" and config.pareto_neighbor_top_k > 0
-                else None
-            )
-            _perf_add(perf, "replacement_stats_build_sec", time.perf_counter() - stats_started_at)
+            replacement_stats = None
+            if objective == "pareto" and config.pareto_neighbor_top_k > 0:
+                use_replacement_cache = (
+                    config.learning_objective == "joint_calibration"
+                )
+                cache_key = None
+
+                if use_replacement_cache:
+                    cache_key = (
+                        tuple(
+                            (
+                                int(cid),
+                                str(candidate.mode),
+                                bool(_candidate_reaches_cloud(candidate)),
+                            )
+                            for cid, candidate in sorted(
+                                evaluated.profile.items()
+                            )
+                        ),
+                        tuple(
+                            sorted(
+                                int(cid)
+                                for cid in evaluated.admitted_client_ids
+                            )
+                        ),
+                    )
+                    replacement_stats = _replacement_stats_cache.get(cache_key)
+
+                if replacement_stats is None:
+                    stats_started_at = time.perf_counter()
+                    replacement_stats = _LearningReplacementStats(
+                        config,
+                        evaluated.profile,
+                        client_samples,
+                        client_edges,
+                        evaluated.admitted_client_ids,
+                    )
+                    _perf_add(
+                        perf,
+                        "replacement_stats_build_sec",
+                        time.perf_counter() - stats_started_at,
+                    )
+
+                    if use_replacement_cache and cache_key is not None:
+                        if cache_key not in _replacement_stats_cache:
+                            if (
+                                len(_replacement_stats_cache)
+                                >= _replacement_stats_cache_maxsize
+                            ):
+                                oldest_key = next(
+                                    iter(_replacement_stats_cache)
+                                )
+                                _replacement_stats_cache.pop(oldest_key)
+                            _replacement_stats_cache[cache_key] = replacement_stats
             profile_neighbors: list[
                 tuple[
                     float,
@@ -2345,8 +2402,31 @@ def choose_global_pareto_profile(
                     float | None,
                 ]
             ] = []
-            for client_id in search_client_ids:
+            # MO-LNS first version: explore a rotating subset of client coordinates
+            # per search iteration. Candidate generation, privacy/resource checks,
+            # exact priority calculation, archive update, and Top-K rules remain
+            # unchanged. This is an approximate restricted-neighborhood backend.
+            if search_method == "mo_lns":
+                _lns_budget = max(
+                    1, int(__import__("os").environ.get("DYNFL_MO_LNS_CLIENT_BUDGET", "20"))
+                )
+                _ordered_clients = sorted(search_client_ids)
+                if len(_ordered_clients) > _lns_budget:
+                    _start = (_iter_idx * _lns_budget) % len(_ordered_clients)
+                    _rotated = _ordered_clients[_start:] + _ordered_clients[:_start]
+                    _expansion_client_ids = _rotated[:_lns_budget]
+                else:
+                    _expansion_client_ids = _ordered_clients
+            else:
+                _expansion_client_ids = search_client_ids
+
+            for client_id in _expansion_client_ids:
                 current = evaluated.profile[client_id]
+                # In this base profile, the unchanged signature segments are
+                # shared by every alternative candidate of this client.
+                position = client_positions[client_id]
+                signature_prefix = evaluated.profile_signature[:position]
+                signature_suffix = evaluated.profile_signature[position + 1:]
 
                 old_cloud_entry = (
                     replacement_stats._cloud_entry(client_id, current)
@@ -2364,12 +2444,7 @@ def choose_global_pareto_profile(
                         continue
                     key_started_at = time.perf_counter()
 
-                    position = client_positions[client_id]
-                    key = (
-                        evaluated.profile_signature[:position]
-                        + (token,)
-                        + evaluated.profile_signature[position + 1:]
-                    )
+                    key = signature_prefix + (token,) + signature_suffix
 
                     already_visited = key in visited_profiles
                     if not already_visited:
@@ -3554,6 +3629,83 @@ def _repair_edge_cloud_coverage(
 
     return result
 
+
+def repair_selected_tier_capacity(
+    config: SelectionConfig,
+    selected: list[tuple[int, Candidate, list[Candidate], float]],
+    *,
+    client_edges: dict[int, int],
+    client_samples: dict[int, float],
+) -> tuple[list[tuple[int, Candidate, list[Candidate], float]], dict[str, Any]]:
+    """Admission-only safeguard; no mode substitution or privacy relaxation.
+
+    The global Pareto optimizer retains its historical objectives. When the
+    optional E/C tier gate is on, retain chosen non-SKIP clients in decreasing
+    represented-sample order, breaking ties by latency and client ID. Any
+    client that would overload E or C is changed to SKIP *before training*.
+    This is a deterministic feasibility repair, not an optimal resource
+    scheduler, and its dropped clients must be reported separately.
+    """
+    from .tier_resources import evaluate_tier_capacities
+
+    if config.tier_capacity_policy not in {"legacy", "enforce"}:
+        raise ValueError("tier_capacity_policy must be 'legacy' or 'enforce'")
+    if config.tier_capacity_policy == "legacy":
+        return selected, {}
+
+    chosen = {cid: candidate for cid, candidate, _pool, _rem in selected}
+    result: dict[int, Candidate] = {
+        cid: skipped_candidate() for cid in chosen
+    }
+    dropped: dict[int, tuple[str, ...]] = {}
+    order = sorted(
+        (cid for cid, candidate in chosen.items() if candidate.mode != "SKIP"),
+        key=lambda cid: (
+            -max(float(client_samples.get(cid, 0.0)), 0.0),
+            float(chosen[cid].time),
+            cid,
+        ),
+    )
+    for cid in order:
+        candidate = chosen[cid]
+        if not candidate.feasible:
+            dropped[cid] = ("L:infeasible",)
+            continue
+        result[cid] = candidate
+        audit = evaluate_tier_capacities(config, result, client_edges, client_samples)
+        if not audit.feasible:
+            result[cid] = skipped_candidate()
+            dropped[cid] = audit.violations
+    final = evaluate_tier_capacities(config, result, client_edges, client_samples)
+    if not final.feasible:
+        raise RuntimeError("three-tier repair failed to obtain a feasible profile")
+    if config.require_cloud_participation and not any(
+        _candidate_reaches_cloud(item) for item in result.values()
+    ):
+        raise ValueError("three-tier capacity gate cannot meet required Cloud participation")
+    if config.require_edge_cloud_coverage and not _profile_satisfies_edge_cloud_coverage(
+        config, result, client_samples, client_edges
+    ):
+        raise ValueError("three-tier capacity gate cannot meet required Edge-to-Cloud coverage")
+    rewritten = [
+        (cid, result[cid], pool, rem)
+        for cid, _candidate, pool, rem in selected
+    ]
+    diagnostics: dict[str, Any] = {
+        "dropped_client_ids": tuple(sorted(dropped)),
+        "dropped_reasons": {str(cid): list(reasons) for cid, reasons in sorted(dropped.items())},
+        "edge_cpu": final.edge_cpu,
+        "edge_memory_mb": final.edge_memory_mb,
+        "cloud_cpu": final.cloud_cpu,
+        "cloud_memory_mb": final.cloud_memory_mb,
+        "edge_cpu_limit": config.edge_cpu_limit,
+        "cloud_cpu_limit": config.cloud_cpu_limit,
+        "edge_memory_limit_mb": config.edge_memory_limit_mb,
+        "cloud_memory_limit_mb": config.cloud_memory_limit_mb,
+        "repair_policy": "descending_samples_then_latency_then_client_id",
+    }
+    return rewritten, diagnostics
+
 def evaluate_global_profile(
     *,
     config: SelectionConfig,
@@ -4141,7 +4293,14 @@ class _JointCalibrationReplacementStats:
         next_cloud_mass = self.cloud_mass
         next_cloud_q_num = self.cloud_q_num.clone()
         next_cloud_var_num = self.cloud_var_num
-        next_full_clean_num = self.full_clean_num.clone()
+        # Under the table e_alg policy, _cost_from_accumulators uses
+        # cloud_q_num and ideal_update only. Keep the base clean numerator
+        # read-only instead of cloning a vector that this objective ignores.
+        next_full_clean_num = (
+            self.full_clean_num
+            if self.config.joint_calibration_e_alg_policy == "table"
+            else self.full_clean_num.clone()
+        )
 
         zero = torch.zeros(self.dimension, dtype=torch.float64)
         old_clean = zero if old_entry is None else old_entry.clean_update_mean
@@ -4153,7 +4312,8 @@ class _JointCalibrationReplacementStats:
 
         # Delta_F,0 changes with the candidate's clean trajectory.  SKIP has
         # the exact zero clean trajectory by definition.
-        next_full_clean_num += mass * (new_clean - old_clean)
+        if self.config.joint_calibration_e_alg_policy != "table":
+            next_full_clean_num += mass * (new_clean - old_clean)
 
         if old_cloud:
             next_cloud_mass -= mass

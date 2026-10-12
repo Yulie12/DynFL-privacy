@@ -49,8 +49,8 @@ MODE_SPECS = {
     "LIEIIC": ModeSpec("LIEIIC", "edge", ["emb", "logits", "grad", "emb_grad"], ["upd"], 0.92, 0.7, 0.45, 0.003, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.74),
     # LIEIIIC (edge→cloud, 2 edge loops): Split with multi-epoch
     "LIEIIIC": ModeSpec("LIEIIIC", "edge", ["emb", "logits", "grad", "emb_grad"], ["upd"], 0.9, 1.1, 0.42, 0.001, E_edge_loops=3, alpha=5, edge_cpu=2, cloud_cpu=2, local_memory=0.78),
-    # LIIEIIIC (edge→cloud upd, 2 edge loops): No-Split with multi-epoch
-    "LIIEIIIC": ModeSpec("LIIEIIIC", "edge", ["upd"], ["upd"], 1.05, 0.9, 0.42, 0.004, E_edge_loops=3, alpha=3, edge_cpu=1, cloud_cpu=1, local_memory=1.24),
+    # LIIEIIIC: full-local as in LIIE/LIIC; its Edge/Cloud aggregation must not inflate L memory.
+    "LIIEIIIC": ModeSpec("LIIEIIIC", "edge", ["upd"], ["upd"], 1.15, 0.9, 0.42, 0.004, E_edge_loops=3, alpha=3, edge_cpu=1, cloud_cpu=1, local_memory=1.20),
 }
 
 
