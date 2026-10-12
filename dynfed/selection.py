@@ -123,6 +123,7 @@ class SelectionConfig:
     dp_delta: float = 1e-5
     dp_accounting_mode: str = "rdp_auto"
     privacy_unit: str = "client"
+    no_dp_ablation: bool = False
     dp_feature_epsilon_budget: float | None = None
     dp_update_epsilon_budget: float | None = None
     dp_feature_noise_multiplier: float | None = None
@@ -909,6 +910,7 @@ def run_selection_experiment(
                 "ours",
                 "fixed_mode_fixed_privacy",
                 "dynamic_mode_fixed_privacy",
+    "random_feasible_mode",
                 "fixed_mode_dynamic_privacy",
                 "full_dynfl",
             }:
@@ -1340,6 +1342,7 @@ def enumerate_candidates(
             _sample_mechanism_assignments(
                 spec,
                 allow_he=config.allow_he,
+                no_dp_ablation=config.no_dp_ablation,
                 mainline_fusion=config.mainline_fusion,
                 trusted_lie_joint_sample_dp=(
                     config.trusted_lie_joint_sample_dp and mode == "LIE"
@@ -7433,6 +7436,7 @@ def _sample_mechanism_assignments(
     allow_he: bool = True,
     mainline_fusion: bool = False,
     trusted_lie_joint_sample_dp: bool = False,
+    no_dp_ablation: bool = False,
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     """Return the fixed protection layout for the sample-level DP path.
 
@@ -7471,7 +7475,7 @@ def _sample_mechanism_assignments(
 
     for link_id, obj, _count, _privacy_eligible in transmissions:
         if obj in {"emb", "grad"}:
-            mechanism = "trusted" if trusted_lie_joint_sample_dp else "dp"
+            mechanism = "none" if no_dp_ablation else ("trusted" if trusted_lie_joint_sample_dp else "dp")
         elif obj == "upd" and link_id.endswith("_C_upd"):
             if not allow_he:
                 return []
@@ -8307,6 +8311,9 @@ def _sample_dp_event_counts(
     one optimizer DP-SGD event per minibatch; split training does so only when
     the split End optimizer is enabled.
     """
+    if config.no_dp_ablation:
+        return (0, 0, 0)
+
     spec = MODE_SPECS[mode]
 
     local_steps = (
@@ -8452,8 +8459,10 @@ _DYNAMIC_MODE_POLICIES = {
     "ours",
     "ours_no_omega",
     "full_dynfl",
+    "full_dynfl_no_dp",
     "full_dynfl_3obj_diag",
     "dynamic_mode_fixed_privacy",
+    "random_feasible_mode",
     "nsga2",
     "individual_optimal",
     "random",
@@ -8773,3 +8782,87 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, ensure_ascii=False)
+def choose_random_feasible_profile(
+    *, config, selected, client_samples, client_edges=None,
+    previous_choices=None, random_seed=42, max_attempts=1000,
+    diagnostics=None,
+):
+    """Uniform random feasible MODE; deterministic privacy candidate."""
+    from .tier_resources import evaluate_tier_capacities
+
+    rng = random.Random(int(random_seed))
+    edges = client_edges or {}
+    previous = previous_choices or {}
+    representatives = {}
+
+    for cid, current, candidates, remaining in selected:
+        pool = [
+            c for c in candidates
+            if c.feasible and c.epsilon_used <= remaining + 1e-12
+        ]
+        if not pool and not config.require_feasible and not config.strict_pair_admission:
+            pool = [
+                c for c in candidates
+                if c.feasible_device and c.epsilon_used <= remaining + 1e-12
+            ]
+        if not pool:
+            pool = [current if current.feasible else skipped_candidate()]
+        pool = _dedupe_candidates(pool)
+        if config.enforce_cloud_dp_stability:
+            pool = _stable_cloud_candidate_pool(config, pool)
+
+        by_mode = {}
+        for c in pool:
+            if c.mode != "SKIP":
+                by_mode.setdefault(c.mode, []).append(c)
+
+        representatives[cid] = {
+            mode: min(items, key=lambda c: (
+                _local_omega_proxy(c, config=config), c.time, c.risk, _candidate_key(c)
+            ))
+            for mode, items in by_mode.items()
+        }
+        if not representatives[cid]:
+            representatives[cid] = {"SKIP": skipped_candidate()}
+
+    for attempt in range(1, max_attempts + 1):
+        profile = {
+            cid: modes[rng.choice(sorted(modes))]
+            for cid, modes in representatives.items()
+        }
+
+        if config.tier_capacity_policy == "enforce":
+            if not evaluate_tier_capacities(config, profile, edges, client_samples).feasible:
+                continue
+        if config.require_cloud_participation:
+            if not any(_candidate_reaches_cloud(c) for c in profile.values()):
+                continue
+        if config.require_edge_cloud_coverage:
+            if not _profile_satisfies_edge_cloud_coverage(
+                config, profile, client_samples, edges
+            ):
+                continue
+
+        result = [
+            (cid, profile[cid], candidates, remaining)
+            for cid, current, candidates, remaining in selected
+        ]
+        evaluation = evaluate_global_profile(
+            config=config, selected=result,
+            client_samples=client_samples, client_edges=edges,
+            previous_choices=previous,
+        )
+        planned = {cid for cid, c in profile.items() if c.mode != "SKIP"}
+        if set(evaluation.admitted_client_ids) != planned:
+            continue
+
+        if diagnostics is not None:
+            diagnostics.update({
+                "chosen": evaluation,
+                "random_attempts": attempt,
+                "random_seed": int(random_seed),
+                "random_feasible": True,
+            })
+        return result, evaluation
+
+    raise RuntimeError("RFMS: no feasible profile within random attempt budget")

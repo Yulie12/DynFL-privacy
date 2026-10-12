@@ -76,6 +76,7 @@ from .selection import (
     candidate_mechanisms_for_object,
     choose_candidate,
     choose_global_pareto_profile,
+    choose_random_feasible_profile,
     choose_cloud_dp_pareto_profile,
     evaluate_global_profile,
     repair_selected_tier_capacity,
@@ -398,9 +399,18 @@ def _observed_privacy_path_audit(
 def _privacy_reporting_scope(
     mainline_fusion: bool,
     *,
+    no_dp_ablation: bool = False,
     mainline_dp_enabled: bool = True,
     mainline_clip_enabled: bool = True,
 ) -> dict[str, str]:
+    if no_dp_ablation:
+        return {
+            "dp_accountant_scope": "no_dp_ablation",
+            "privacy_policy_scope": "full_dynfl_no_dp",
+            "protected_object": "no_dp_protection",
+            "privacy_mechanism_scope": "no_dp_profiled_he3",
+            "privacy_guarantee": "no_dp_guarantee",
+        }
     if mainline_fusion and not mainline_dp_enabled:
         return {
             "dp_accountant_scope": "diagnostic_disabled",
@@ -1763,6 +1773,7 @@ def _run_lenet5_policy(
     # Formal training keeps the historical real-backend availability rule.
     effective_selection = replace(
         selection,
+        no_dp_ablation=(policy == "full_dynfl_no_dp"),
         allow_he=(real_he_available or calibration_profiled_he),
         omega_feature_clip_norm=_feature_clip_norm(train_config),
         omega_update_clip_norm=_update_clip_norm(train_config),
@@ -1808,6 +1819,7 @@ def _run_lenet5_policy(
     )
     privacy_reporting_scope = _privacy_reporting_scope(
         effective_selection.mainline_fusion,
+        no_dp_ablation=effective_selection.no_dp_ablation,
         mainline_dp_enabled=mainline_dp_enabled,
         mainline_clip_enabled=mainline_clip_enabled,
     )
@@ -2381,11 +2393,23 @@ def _run_lenet5_policy(
                 client_by_id,
                 policy=policy,
             )
+        elif policy == "random_feasible_mode" and should_update_policy:
+            client_samples = {c.client_id: float(c.samples) for c in clients}
+            selected, profile_evaluation = choose_random_feasible_profile(
+                config=round_evaluation_config,
+                selected=selected,
+                client_samples=client_samples,
+                client_edges=client_edges,
+                previous_choices=prior_choices,
+                random_seed=int(selection.seed) * 1000003 + round_idx,
+                diagnostics=selection_diagnostics,
+            )
         elif policy in {
             "ours",
             "ours_no_omega",
             "ours_fixed_liieiiic",
             "full_dynfl",
+            "full_dynfl_no_dp",
             "full_dynfl_3obj_diag",
             "fixed_mode_fixed_privacy",
             "dynamic_mode_fixed_privacy",
@@ -2462,6 +2486,7 @@ def _run_lenet5_policy(
             "ours_no_omega",
             "ours_fixed_liieiiic",
             "full_dynfl",
+            "full_dynfl_no_dp",
             "full_dynfl_3obj_diag",
             "fixed_mode_fixed_privacy",
             "dynamic_mode_fixed_privacy",
@@ -2602,6 +2627,13 @@ def _run_lenet5_policy(
             round_comm += candidate.communication_volume
             round_risk = max(round_risk, candidate.risk)
             infeasible += int(not candidate.feasible)
+            if effective_selection.no_dp_ablation:
+                assert candidate.sample_embedding_events == 0
+                assert candidate.sample_label_grad_events == 0
+                assert candidate.sample_optimizer_events == 0
+                assert candidate.feature_dp_events == 0
+                assert candidate.update_dp_events == 0
+                assert not any('dp' in str(m).lower() for m in (candidate.link_mechanisms or {}).values()), 'No-DP candidate contains DP'
             ledger = privacy_ledgers[client_id]
 
             if effective_selection.privacy_unit == "sample":
@@ -3137,7 +3169,7 @@ def _run_lenet5_policy(
         worker_results = _run_client_training_tasks(
             tasks=train_tasks,
             train_config=train_config,
-            selection=selection,
+            selection=effective_selection,
             global_end=global_end,
             global_edge=global_edge,
             client_model_states=client_model_states,
@@ -3560,7 +3592,7 @@ def _run_lenet5_policy(
                     cycle_results = _run_client_training_tasks(
                         tasks=cycle_tasks,
                         train_config=train_config,
-                        selection=selection,
+                        selection=effective_selection,
                         global_end=global_end,
                         global_edge=global_edge,
                         client_model_states=client_model_states,
@@ -5359,6 +5391,8 @@ def _run_lenet5_policy(
         current_round.update(
             training_privacy_diagnostics(current_round)
         )
+        if effective_selection.no_dp_ablation:
+            current_round.update(privacy_reporting_scope)
         max_feature_epsilon = current_round["max_feature_epsilon"]
         max_update_epsilon = current_round["max_update_epsilon"]
         max_sample_epsilon = float(
@@ -5577,7 +5611,7 @@ def _run_lenet5_policy(
             rng=rng,
             np_rng=np_rng,
             train_config=train_config,
-            selection=selection,
+            selection=effective_selection,
             real_he_rounds=real_he_rounds,
             real_he_aggregated_clients=real_he_aggregated_clients,
             global_pareto_selection_rounds=global_pareto_selection_rounds,
@@ -5720,7 +5754,7 @@ def _run_lenet5_policy(
         )
         partial_summary.update(privacy_reporting_scope)
 
-        if effective_selection.privacy_unit == "sample":
+        if effective_selection.privacy_unit == "sample" and not effective_selection.no_dp_ablation:
             if sample_privacy_parameters is None:
                 raise RuntimeError(
                     "Missing Sample privacy parameters "
@@ -6002,6 +6036,8 @@ def _run_lenet5_policy(
         summary["legacy_update_dp_fields_semantics"] = (
             "communication_security_diagnostic_only"
         )
+    if effective_selection.no_dp_ablation:
+        summary.update(privacy_reporting_scope)
     summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
     summary.update(_global_release_summary(release_account, enabled=mainline_dp_enabled))
     if (
@@ -6213,7 +6249,7 @@ def _run_client_training_tasks(
             training_stage=training_stage,
             mainline_fusion=selection.mainline_fusion,
         )
-        return {
+        payload = {
             "client_id": client_id,
             "mode": candidate.mode,
             "global_end_state": _state_dict_to_device(returned_state["end"], worker_device),
@@ -6278,6 +6314,24 @@ def _run_client_training_tasks(
             ),
             "device": str(worker_device),
         }
+
+        if selection.no_dp_ablation:
+            # Use the ordinary optimizer, not Sample-DP with sigma=0.
+            payload["privacy_unit"] = "client"
+            payload["sample_embedding_noise_multiplier"] = None
+            payload["sample_label_grad_noise_multiplier"] = None
+            payload["sample_optimizer_noise_multiplier"] = None
+            payload["dp_update_mode"] = "off"
+
+            # Preserve selected HE update protection.
+            # Split emb/grad must already be "none" in the candidate.
+            for obj in ("emb", "grad", "logits", "emb_grad"):
+                assert payload["mechanisms"].get(obj, "none") == "none", (
+                    "No-DP worker received an unexpected feature mechanism",
+                    obj, payload["mechanisms"]
+                )
+
+        return payload
 
     if executor == "serial":
         results: dict[int, dict[str, Any]] = {}
