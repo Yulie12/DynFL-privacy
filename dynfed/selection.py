@@ -124,6 +124,7 @@ class SelectionConfig:
     dp_accounting_mode: str = "rdp_auto"
     privacy_unit: str = "client"
     no_dp_ablation: bool = False
+    clipping_only_ablation: bool = False
     dp_feature_epsilon_budget: float | None = None
     dp_update_epsilon_budget: float | None = None
     dp_feature_noise_multiplier: float | None = None
@@ -8460,6 +8461,7 @@ _DYNAMIC_MODE_POLICIES = {
     "ours_no_omega",
     "full_dynfl",
     "full_dynfl_no_dp",
+    "full_dynfl_clipping_only",
     "full_dynfl_3obj_diag",
     "dynamic_mode_fixed_privacy",
     "random_feasible_mode",

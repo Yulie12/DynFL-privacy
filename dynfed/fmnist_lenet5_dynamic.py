@@ -1774,6 +1774,7 @@ def _run_lenet5_policy(
     effective_selection = replace(
         selection,
         no_dp_ablation=(policy == "full_dynfl_no_dp"),
+        clipping_only_ablation=(policy == "full_dynfl_clipping_only"),
         allow_he=(real_he_available or calibration_profiled_he),
         omega_feature_clip_norm=_feature_clip_norm(train_config),
         omega_update_clip_norm=_update_clip_norm(train_config),
@@ -2410,6 +2411,7 @@ def _run_lenet5_policy(
             "ours_fixed_liieiiic",
             "full_dynfl",
             "full_dynfl_no_dp",
+            "full_dynfl_clipping_only",
             "full_dynfl_3obj_diag",
             "fixed_mode_fixed_privacy",
             "dynamic_mode_fixed_privacy",
@@ -2487,6 +2489,7 @@ def _run_lenet5_policy(
             "ours_fixed_liieiiic",
             "full_dynfl",
             "full_dynfl_no_dp",
+            "full_dynfl_clipping_only",
             "full_dynfl_3obj_diag",
             "fixed_mode_fixed_privacy",
             "dynamic_mode_fixed_privacy",
@@ -5380,13 +5383,13 @@ def _run_lenet5_policy(
         )
         current_round = round_rows[-1]
 
-        if effective_selection.privacy_unit == "sample":
+        if effective_selection.privacy_unit == "sample" and not effective_selection.no_dp_ablation:
             current_round["privacy_unit"] = "sample"
             current_round["privacy_guarantee"] = (
                 "sample_level_dp_unified_rdp"
             )
         else:
-            current_round["privacy_unit"] = "client"
+            current_round["privacy_unit"] = "none" if effective_selection.no_dp_ablation else "client"
 
         current_round.update(
             training_privacy_diagnostics(current_round)
