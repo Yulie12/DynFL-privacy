@@ -400,9 +400,18 @@ def _privacy_reporting_scope(
     mainline_fusion: bool,
     *,
     no_dp_ablation: bool = False,
+    clipping_only_ablation: bool = False,
     mainline_dp_enabled: bool = True,
     mainline_clip_enabled: bool = True,
 ) -> dict[str, str]:
+    if clipping_only_ablation:
+        return {
+            "dp_accountant_scope": "not_applicable",
+            "privacy_policy_scope": "full_dynfl_clipping_only",
+            "protected_object": "none",
+            "privacy_mechanism_scope": "per_sample_clipping_without_noise",
+            "privacy_guarantee": "no_dp_guarantee",
+        }
     if no_dp_ablation:
         return {
             "dp_accountant_scope": "no_dp_ablation",
@@ -671,6 +680,7 @@ def _client_train_worker(
     training_diagnostics = {}
     state_diff = split_local_train_lenet5(
         training_diagnostics=training_diagnostics,
+        clipping_only_ablation=payload.get("clipping_only_ablation", False),
         privacy_unit=payload.get(
             "privacy_unit",
             "client",
@@ -1780,7 +1790,7 @@ def _run_lenet5_policy(
         omega_update_clip_norm=_update_clip_norm(train_config),
     )
     _validate_mainline_fusion(effective_selection, train_config)
-    update_dp_execution_enabled = train_config.dp_update_mode != "off"
+    update_dp_execution_enabled = (train_config.dp_update_mode != "off" and not effective_selection.clipping_only_ablation)
     diagnostic_update_ablation = os.environ.get(
         "DYNFL_DIAGNOSTIC_UPDATE_ABLATION", ""
     ).strip().lower()
@@ -1790,7 +1800,7 @@ def _run_lenet5_policy(
         )
     diagnostic_clip_only = (
         not update_dp_execution_enabled
-        and diagnostic_update_ablation == "clip_only"
+        and (diagnostic_update_ablation == "clip_only" or effective_selection.clipping_only_ablation)
     )
     update_dp_clipping_enabled = update_dp_execution_enabled or diagnostic_clip_only
     if diagnostic_clip_only:
@@ -1821,6 +1831,7 @@ def _run_lenet5_policy(
     privacy_reporting_scope = _privacy_reporting_scope(
         effective_selection.mainline_fusion,
         no_dp_ablation=effective_selection.no_dp_ablation,
+        clipping_only_ablation=effective_selection.clipping_only_ablation,
         mainline_dp_enabled=mainline_dp_enabled,
         mainline_clip_enabled=mainline_clip_enabled,
     )
@@ -2701,7 +2712,7 @@ def _run_lenet5_policy(
                     ),
                 )
 
-                if not ledger.can_apply(projection):
+                if not effective_selection.clipping_only_ablation and not ledger.can_apply(projection):
                     raise ValueError(
                         "Selected Sample-DP release exceeds "
                         "the unified privacy budget"
@@ -3011,7 +3022,7 @@ def _run_lenet5_policy(
         sample_dispatch_charges = {}
         sample_stage_audits = {}
         sample_dispatch_attempt: SampleDispatchAttempt | None = None
-        if effective_selection.privacy_unit == "sample":
+        if effective_selection.privacy_unit == "sample" and not effective_selection.clipping_only_ablation:
             sample_stage_audits = {
                 int(cid): SampleStageEventAudit(
                     client_id=int(cid), candidate=candidate,
@@ -3189,7 +3200,7 @@ def _run_lenet5_policy(
             progress_event_callback=training_event_callback,
         )
         sample_worker_client_audit_count = 0
-        if effective_selection.privacy_unit == "sample":
+        if effective_selection.privacy_unit == "sample" and not effective_selection.clipping_only_ablation:
             for sample_cid, sample_stage_audit in sample_stage_audits.items():
                 if sample_cid not in worker_results:
                     raise RuntimeError(
@@ -3218,6 +3229,31 @@ def _run_lenet5_policy(
         for row in decision_rows:
             if row.get("round") == round_idx and row.get("client_id") in worker_results:
                 result = worker_results[row["client_id"]]
+                # Diagnostic logging only: no changes to DP-SGD or accounting.
+                # Missing worker fields must not be mistaken for zero clipping.
+                sample_count_raw = result.get("sample_dp_sample_count")
+                clipped_count_raw = result.get("sample_dp_clipped_sample_count")
+                sample_count = (
+                    int(sample_count_raw) if sample_count_raw is not None else None
+                )
+                clipped_count = (
+                    int(clipped_count_raw) if clipped_count_raw is not None else None
+                )
+                row["sample_dp_sample_count"] = sample_count
+                row["sample_dp_clipped_sample_count"] = clipped_count
+                row["sample_dp_clipping_fraction"] = (
+                    clipped_count / sample_count
+                    if sample_count is not None
+                    and clipped_count is not None
+                    and sample_count > 0
+                    else None
+                )
+                row["sample_dp_max_raw_grad_norm"] = result.get(
+                    "sample_dp_max_raw_grad_norm"
+                )
+                row["sample_dp_max_clipped_grad_norm"] = result.get(
+                    "sample_dp_max_clipped_grad_norm"
+                )
                 for field in (
                     "actual_local_batches",
                     "actual_optimizer_steps",
@@ -3392,7 +3428,14 @@ def _run_lenet5_policy(
             row = round_decision_rows_by_client[client_id]
             if (client_id in admitted_client_ids or
                     (effective_selection.privacy_unit == "sample" and client_id in sample_dispatch_charges)):
-                if effective_selection.privacy_unit == "sample":
+                if effective_selection.clipping_only_ablation:
+                    for key in (
+                        "feature_dp_events", "update_dp_events",
+                        "sample_embedding_events", "sample_label_grad_events",
+                        "sample_optimizer_events",
+                    ):
+                        row[key] = 0
+                elif effective_selection.privacy_unit == "sample":
                     if not isinstance(
                         ledger,
                         SamplePrivacyLedger,
@@ -3619,7 +3662,7 @@ def _run_lenet5_policy(
                     )
                     multi_edge_retraining_calls += 1
                     multi_edge_retraining_tasks += len(cycle_tasks)
-                    if effective_selection.privacy_unit == "sample":
+                    if effective_selection.privacy_unit == "sample" and not effective_selection.clipping_only_ablation:
                         # Audits run BEFORE using this stage's private update
                         # in any Edge aggregate or subsequent client state.
                         for cycle_cid in client_ids:
@@ -3647,7 +3690,14 @@ def _run_lenet5_policy(
                         for client_id in client_ids
                         if client_id in cycle_results and cycle_results[client_id]["finite"]
                     ]
-                if effective_selection.privacy_unit == "sample":
+                if effective_selection.clipping_only_ablation:
+                    for key in (
+                        "feature_dp_events", "update_dp_events",
+                        "sample_embedding_events", "sample_label_grad_events",
+                        "sample_optimizer_events",
+                    ):
+                        row[key] = 0
+                elif effective_selection.privacy_unit == "sample" and not effective_selection.clipping_only_ablation:
                     # Stage 0 is audited before the Flow admission decision;
                     # subsequent stages are audited above. No update enters
                     # Edge aggregation without an exact, unused stage receipt.
@@ -3701,7 +3751,7 @@ def _run_lenet5_policy(
                 for client_id in client_ids:
                     overridden_admitted_diffs[client_id] = zero_diff
 
-        if effective_selection.privacy_unit == "sample":
+        if effective_selection.privacy_unit == "sample" and not effective_selection.clipping_only_ablation:
             # The Flow may drop a client AFTER its first private worker pass.
             # Its undispatched later stages have no worker receipts; we audit
             # only the actual prefix, retaining the FULL prepaid RDP charge.
@@ -5383,7 +5433,7 @@ def _run_lenet5_policy(
         )
         current_round = round_rows[-1]
 
-        if effective_selection.privacy_unit == "sample" and not effective_selection.no_dp_ablation:
+        if effective_selection.privacy_unit == "sample" and not (effective_selection.no_dp_ablation or effective_selection.clipping_only_ablation):
             current_round["privacy_unit"] = "sample"
             current_round["privacy_guarantee"] = (
                 "sample_level_dp_unified_rdp"
@@ -5394,7 +5444,7 @@ def _run_lenet5_policy(
         current_round.update(
             training_privacy_diagnostics(current_round)
         )
-        if effective_selection.no_dp_ablation:
+        if effective_selection.no_dp_ablation or effective_selection.clipping_only_ablation:
             current_round.update(privacy_reporting_scope)
         max_feature_epsilon = current_round["max_feature_epsilon"]
         max_update_epsilon = current_round["max_update_epsilon"]
@@ -5757,7 +5807,7 @@ def _run_lenet5_policy(
         )
         partial_summary.update(privacy_reporting_scope)
 
-        if effective_selection.privacy_unit == "sample" and not effective_selection.no_dp_ablation:
+        if effective_selection.privacy_unit == "sample" and not (effective_selection.no_dp_ablation or effective_selection.clipping_only_ablation):
             if sample_privacy_parameters is None:
                 raise RuntimeError(
                     "Missing Sample privacy parameters "
@@ -6019,7 +6069,7 @@ def _run_lenet5_policy(
         privacy_reporting_scope["privacy_guarantee"]
     )
 
-    if effective_selection.privacy_unit == "sample":
+    if effective_selection.privacy_unit == "sample" and not effective_selection.clipping_only_ablation:
         summary["dp_accountant_scope"] = (
             "unified_sample_rdp"
         )
@@ -6039,7 +6089,7 @@ def _run_lenet5_policy(
         summary["legacy_update_dp_fields_semantics"] = (
             "communication_security_diagnostic_only"
         )
-    if effective_selection.no_dp_ablation:
+    if effective_selection.no_dp_ablation or effective_selection.clipping_only_ablation:
         summary.update(privacy_reporting_scope)
     summary["mainline_fusion"] = bool(effective_selection.mainline_fusion)
     summary.update(_global_release_summary(release_account, enabled=mainline_dp_enabled))
@@ -6230,12 +6280,14 @@ def _run_client_training_tasks(
     if executor == "process_pool" and device.type != "cpu":
         raise ValueError("process_pool executor is CPU-only; use --device cpu or --executor serial.")
 
-    if selection.privacy_unit == "sample" and sample_dispatch_attempt is None:
+    if selection.privacy_unit == "sample" and not selection.clipping_only_ablation and sample_dispatch_attempt is None:
         raise RuntimeError("Sample-DP worker dispatch missing persisted attempt identity; fail closed")
     worker_device = device if executor == "serial" else torch.device("cpu")
     privacy_parameters = resolved_privacy_parameters(selection)
 
     def build_payload(client_id: int, candidate: Candidate, idx: np.ndarray) -> dict[str, Any]:
+        if selection.clipping_only_ablation and selection.trusted_lie_joint_sample_dp and candidate.mode == "LIE":
+            raise ValueError("Clipping-only does not support trusted joint Sample-DP")
         _assert_trusted_lie_accounting_plan(
             selection=selection, candidate=candidate,
             model_name=model_name, worker_device=worker_device,
@@ -6317,6 +6369,13 @@ def _run_client_training_tasks(
             ),
             "device": str(worker_device),
         }
+
+        if selection.clipping_only_ablation:
+            payload["clipping_only_ablation"] = True
+            payload["sample_embedding_noise_multiplier"] = 0.0
+            payload["sample_label_grad_noise_multiplier"] = 0.0
+            payload["sample_optimizer_noise_multiplier"] = 0.0
+            payload["dp_update_mode"] = "off"
 
         if selection.no_dp_ablation:
             # Use the ordinary optimizer, not Sample-DP with sigma=0.

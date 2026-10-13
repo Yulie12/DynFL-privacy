@@ -805,6 +805,7 @@ def split_local_train_lenet5(
     sample_label_grad_noise_multiplier: float | None = None,
     sample_optimizer_noise_multiplier: float | None = None,
     sample_optimizer_clip_norm: float = 1.0,
+    clipping_only_ablation: bool = False,
     trusted_split_joint_sample_dp: bool = False,
     trusted_edge: bool = False,
 ) -> dict[str, dict[str, torch.Tensor]]:
@@ -992,7 +993,7 @@ def split_local_train_lenet5(
             ("embedding", sample_embedding_noise_multiplier),
             ("label-gradient", sample_label_grad_noise_multiplier),
         ):
-            if not math.isfinite(float(sigma)) or float(sigma) <= 0.0:
+            if not math.isfinite(float(sigma)) or float(sigma) < 0.0 or (float(sigma) == 0.0 and not clipping_only_ablation):
                 raise ValueError(f"Sample-DP {label} noise multiplier must be finite and positive")
         if not math.isfinite(float(dp_clip_norm)) or float(dp_clip_norm) <= 0.0:
             raise ValueError("Sample-DP split clipping norm must be finite and positive")
