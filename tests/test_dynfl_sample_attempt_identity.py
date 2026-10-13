@@ -128,7 +128,7 @@ def test_nonempty_sample_worker_dispatch_refuses_missing_attempt():
         _run_client_training_tasks(
             tasks=[(1, None, None, 0)],
             train_config=SimpleNamespace(executor="serial"),
-            selection=SimpleNamespace(privacy_unit="sample"),
+            selection=SimpleNamespace(privacy_unit="sample", clipping_only_ablation=False),
             global_end=None, global_edge=None, client_model_states={}, x_train=None, y_train=None,
             device=torch.device("cpu"), model_name="", input_shape=(1, 1, 1), num_classes=1,
             np_rng=None, round_idx=0,

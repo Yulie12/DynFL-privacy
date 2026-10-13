@@ -45,7 +45,8 @@ def load_selection():
     spec.loader.exec_module(m)
     return m
 
-m=load_selection()
+with patch.dict(sys.modules):
+    m = load_selection()
 
 class TestAdmission(unittest.TestCase):
     def setUp(self):
