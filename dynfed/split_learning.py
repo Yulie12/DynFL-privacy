@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .frozen_head_fast import per_sample_grads_frozen_linear_head
 
 from .sample_dp import (
     clip_and_aggregate_per_sample_grads,
@@ -1034,6 +1037,17 @@ def split_local_train_lenet5(
                 and not has_training_batchnorm
             ):
                 sample_full_grad_fn = per_sample_grads_vmap
+
+            # Optional optimization only for the frozen ResNet18 + linear head.
+            # All mode selection, Sample-DP clipping/noise and accounting remain
+            # in their original code paths. The default remains unchanged.
+            if (
+                os.environ.get("DYNFL_FAST_FROZEN_HEAD") == "1"
+                and normalize_model_name(model_name) == "resnet18pretrainedhead"
+                and isinstance(model, TorchvisionResNet18Full)
+                and not has_training_batchnorm
+            ):
+                sample_full_grad_fn = per_sample_grads_frozen_linear_head
 
         for bx, by in _training_batches(loader, epochs, local_steps):
             diagnostics["actual_local_batches"] += 1
