@@ -20,6 +20,7 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
+from collections import Counter
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -90,6 +91,7 @@ from .selection import (
     _local_omega_proxy as selection_local_omega_proxy,
 )
 from .training import MODE_SPECS
+from .console_output import format_round_summary, format_run_header
 from .version import CURRENT_EXECUTION_REVISION, CURRENT_UPDATE_PARAMETER_SCOPE
 
 
@@ -150,6 +152,7 @@ class Lenet5Config:
     he_workers: int = 1
     executor: str = "serial"
     executor_workers: int | None = None
+    console_format: str = "compact"  # compact | verbose | quiet; display only
     # Offline/periodic matched clean/private calibration capture. Disabled by
     # default and never required by online selection. A dedicated calibration
     # run should normally use one policy only.
@@ -1744,6 +1747,17 @@ def _run_lenet5_policy(
         _write_live_status(output_dir / "live_status.json", payload)
         _write_live_status(parent_status_path, payload)
 
+    if train_config.console_format not in {"compact", "verbose", "quiet"}:
+        raise ValueError("console_format must be compact, verbose, or quiet")
+    if train_config.console_format != "quiet":
+        print(format_run_header(
+            policy=policy, dataset=train_config.dataset_name,
+            model=train_config.model_name, clients=selection.num_clients,
+            rounds=selection.rounds, selection_period=train_config.selection_period,
+            local_epochs=train_config.local_epochs, step_limit=_client_step_limit(selection),
+            learning_rate=train_config.learning_rate, device=str(device),
+            privacy_unit=selection.privacy_unit, he_execution=train_config.he_execution,
+        ), flush=True)
     emit_stage_status("Initializing policy runtime", stage="policy_init")
     _set_torch_seed(selection.seed, device)
     rng = random.Random(selection.seed + _policy_offset(policy))
@@ -5689,43 +5703,56 @@ def _run_lenet5_policy(
                 )
             )
         )
-        print(
-            f"  [{policy}] round {round_idx + 1:03d}/{selection.rounds} "
-            f"acc={test_accuracy:.4f} "
-            f"acc_delta={current_round['accuracy_change_from_previous']:+.4f} "
-            f"best={best_accuracy:.4f} "
-            f"logical_time={logical_time:.2f}s "
-            f"wall_time={current_round['cumulative_wall_time_sec']:.2f}s {privacy_progress} "
-            f"dp={num_update_dp_only_clients} he={num_update_he_only_clients} "
-            f"dp_he={num_update_dp_he_clients} "
-            f"he_exec={current_round['he_execution_status']} "
-            f"clients={current_round['num_effective_clients']}",
-            flush=True,
-        )
-        print(
-            f"    health={current_round['training_health']} loss={test_loss:.6g} "
-            f"signal_norm={pre_dp_global_update_norm:.6g} "
-            f"noise_norm={update_dp_noise_norm:.6g} "
-            f"noise/signal={current_round['update_dp_noise_to_signal_ratio']:.6g} "
-            f"clip_fraction={current_round['update_dp_clip_fraction']:.3f} "
-            f"dp_releases={update_dp_release_count} "
-            f"candidate_filter="
-            f"{current_round['selection_pool_candidates_before_stability']}->"
-            f"{current_round['selection_pool_candidates_after_stability']} "
-            f"he_wall={current_round.get('he_wall_time_sec', 0.0):.3f}s "
-            f"packets_without_dp_calibration={current_round['update_packets_without_dp_calibration']} "
-            f"end_to_end_dp=not_established",
-            flush=True,
-        )
-        if effective_selection.mainline_fusion:
+        if train_config.console_format == "compact":
+            selected_modes = Counter(candidate.mode for _client_id, candidate, *_rest in selected)
+            print(format_round_summary(
+                policy=policy, round_number=round_idx + 1, total_rounds=selection.rounds,
+                accuracy=test_accuracy, train_loss=train_loss, test_loss=test_loss,
+                optimizer_steps=current_round["actual_optimizer_steps"],
+                skipped_clients=current_round["skipped_clients"],
+                modes=selected_modes,
+                round_wall_time_sec=current_round["round_wall_time_sec"],
+                privacy_unit=effective_selection.privacy_unit,
+                he_execution=train_config.he_execution,
+            ), flush=True)
+        elif train_config.console_format == "verbose":
             print(
-                f"    direction_cos={current_round['direction_mean_client_cosine']:.6g} "
-                f"neg_cos_frac={current_round['direction_negative_cosine_fraction']:.3f} "
-                f"agg/mean_client={current_round['direction_aggregate_to_mean_client_norm_ratio']:.6g} "
-                f"raw_agg_norm={current_round['direction_raw_aggregate_norm']:.6g} "
-                f"mean_client_norm={current_round['direction_mean_client_norm']:.6g}",
+                f"  [{policy}] round {round_idx + 1:03d}/{selection.rounds} "
+                f"acc={test_accuracy:.4f} "
+                f"acc_delta={current_round['accuracy_change_from_previous']:+.4f} "
+                f"best={best_accuracy:.4f} "
+                f"logical_time={logical_time:.2f}s "
+                f"wall_time={current_round['cumulative_wall_time_sec']:.2f}s {privacy_progress} "
+                f"dp={num_update_dp_only_clients} he={num_update_he_only_clients} "
+                f"dp_he={num_update_dp_he_clients} "
+                f"he_exec={current_round['he_execution_status']} "
+                f"clients={current_round['num_effective_clients']}",
                 flush=True,
             )
+            print(
+                f"    health={current_round['training_health']} loss={test_loss:.6g} "
+                f"signal_norm={pre_dp_global_update_norm:.6g} "
+                f"noise_norm={update_dp_noise_norm:.6g} "
+                f"noise/signal={current_round['update_dp_noise_to_signal_ratio']:.6g} "
+                f"clip_fraction={current_round['update_dp_clip_fraction']:.3f} "
+                f"dp_releases={update_dp_release_count} "
+                f"candidate_filter="
+                f"{current_round['selection_pool_candidates_before_stability']}->"
+                f"{current_round['selection_pool_candidates_after_stability']} "
+                f"he_wall={current_round.get('he_wall_time_sec', 0.0):.3f}s "
+                f"packets_without_dp_calibration={current_round['update_packets_without_dp_calibration']} "
+                f"end_to_end_dp=not_established",
+                flush=True,
+            )
+            if effective_selection.mainline_fusion:
+                print(
+                    f"    direction_cos={current_round['direction_mean_client_cosine']:.6g} "
+                    f"neg_cos_frac={current_round['direction_negative_cosine_fraction']:.3f} "
+                    f"agg/mean_client={current_round['direction_aggregate_to_mean_client_norm_ratio']:.6g} "
+                    f"raw_agg_norm={current_round['direction_raw_aggregate_norm']:.6g} "
+                    f"mean_client_norm={current_round['direction_mean_client_norm']:.6g}",
+                    flush=True,
+                )
         if policy == "full_dynfl_3obj_diag":
             previous_client_updates = round_client_updates
         else:

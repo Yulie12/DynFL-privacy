@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dynfed.fmnist_lenet5_dynamic import Lenet5Config, run_fmnist_lenet5_training
+from dynfed.console_output import managed_training_console
 from dynfed.selection import SelectionConfig
 from dynfed.version import CURRENT_EXECUTION_REVISION
 from dynfed.utils import timestamped_dir
@@ -90,6 +91,10 @@ def parse_args() -> argparse.Namespace:
         ],
     )
     parser.add_argument("--lr", type=float, default=0.15)
+    parser.add_argument(
+        "--console-format", choices=("compact", "verbose", "quiet"), default="compact",
+        help="Display only: compact round summary (default), old verbose diagnostics, or quiet.",
+    )
     parser.add_argument("--server-step", type=float, default=1.0,
                         help="Scale the final cloud model update after DP/HE/SecAgg aggregation")
     parser.add_argument("--seed", type=int, default=42)
@@ -583,7 +588,8 @@ def main() -> None:
         selection = enable_static_pair_admission(selection, args.static_pair_admission_manifest)
         if not selection.strict_pair_admission:
             raise RuntimeError("V370 static pair admission did not activate")
-        print("V370 static pair admission: ENABLED; manifest=", args.static_pair_admission_manifest, flush=True)
+        if args.console_format == "verbose":
+            print("V370 static pair admission: ENABLED; manifest=", args.static_pair_admission_manifest, flush=True)
     train_config = Lenet5Config(
         execution_revision=args.execution_revision,
         dataset_name=args.dataset,
@@ -612,6 +618,7 @@ def main() -> None:
         he_workers=max(1, args.he_workers),
         executor=args.executor,
         executor_workers=args.executor_workers,
+        console_format=args.console_format,
         joint_calibration_capture_path=args.joint_calibration_capture_path,
         joint_calibration_capture_trials=args.joint_calibration_capture_trials,
         joint_calibration_capture_period=args.joint_calibration_capture_period,
@@ -626,17 +633,28 @@ def main() -> None:
         joint_calibration_capture_scope=args.joint_calibration_capture_scope,
     )
 
-    result = run_fmnist_lenet5_training(
-        selection=selection,
-        train_config=train_config,
-        data_root=args.data_root,
-        train_limit=args.train_limit,
-        test_limit=args.test_limit,
-        resume_from_run=args.resume_from_run,
-        max_new_rounds=args.max_new_rounds,
-        policies=policies,
-    )
-    print(f"[{result['status'].upper()}] summary table: {result['summary_table']}")
+    detail_path = output_root / "console_details.log"
+    # All historical Python print() diagnostics are captured in the run folder.
+    # Compact/quiet modes display only the selected training information.
+    try:
+        with managed_training_console(args.console_format, detail_path):
+            result = run_fmnist_lenet5_training(
+                selection=selection,
+                train_config=train_config,
+                data_root=args.data_root,
+                train_limit=args.train_limit,
+                test_limit=args.test_limit,
+                resume_from_run=args.resume_from_run,
+                max_new_rounds=args.max_new_rounds,
+                policies=policies,
+            )
+    except Exception:
+        if args.console_format != "verbose":
+            print(f"[ERROR] Run failed. Diagnostic stdout log: {detail_path}", file=sys.stderr)
+        raise
+    print(f"[{result['status'].upper()}] results: {result['summary_table']}")
+    if args.console_format != "verbose":
+        print(f"[LOG] details: {detail_path}")
 
 
 if __name__ == "__main__":
