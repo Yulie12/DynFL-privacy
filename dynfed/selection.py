@@ -407,6 +407,9 @@ class Candidate:
             and self.feasible_memory
             and self.feasible_privacy
             and (not self.risk_hard_gate or self.feasible_risk)
+            and self.feasible_time
+            and self.feasible_edge
+            and self.feasible_cloud
         )
 
     @property
@@ -2091,13 +2094,16 @@ def choose_global_pareto_profile(
             item for item in candidates
             if item.feasible and item.epsilon_used <= remaining + 1e-12
         ]
-        if not pool and not config.require_feasible and not config.strict_pair_admission:
+        if not pool and not (
+            config.require_feasible or config.strict_pair_admission
+            or any(item.risk_hard_gate for item in candidates)
+        ):
             pool = [
                 item for item in candidates
                 if item.feasible_device and item.epsilon_used <= remaining + 1e-12
             ]
         if not pool:
-            pool = [current if (current.feasible if config.strict_pair_admission else current.feasible_device) else skipped_candidate()]
+            pool = [current if current.feasible else skipped_candidate()]
         pool = _dedupe_candidates(pool)
         pools_before_stability[client_id] = list(pool)
         if config.enforce_cloud_dp_stability:
@@ -8206,7 +8212,7 @@ def _estimate_candidate(
         feasible_resource=feasible_resource,
         feasible_privacy=feasible_privacy,
         feasible_risk=feasible_risk,
-        risk_hard_gate=False,  # heuristic score is diagnostic only
+        risk_hard_gate=True,  # policy requirement: risk is HARD; infeasible -> SKIP
         feasible_time=feasible_time,
         feasible_edge=feasible_edge,
         feasible_cloud=feasible_cloud,
@@ -8802,7 +8808,10 @@ def choose_random_feasible_profile(
             c for c in candidates
             if c.feasible and c.epsilon_used <= remaining + 1e-12
         ]
-        if not pool and not config.require_feasible and not config.strict_pair_admission:
+        if not pool and not (
+            config.require_feasible or config.strict_pair_admission
+            or any(item.risk_hard_gate for item in candidates)
+        ):
             pool = [
                 c for c in candidates
                 if c.feasible_device and c.epsilon_used <= remaining + 1e-12
