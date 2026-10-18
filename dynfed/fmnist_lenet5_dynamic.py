@@ -34,6 +34,7 @@ from .fmnist_dynamic_training import load_fmnist_arrays
 from .flow_executor import EDGE_CLOUD_MODES, EDGE_ONLY_MODES, ClientFlowInput, execute_mixed_round_flow
 from .independent_release import IndependentReleaseAccount
 from .joint_calibration import JointCalibrationCaptureSession, as_update_vector
+from .online_j_runtime import hydrate_online_manifest, liic_shadow_metadata, write_predecision_json
 from .he_backend import (
     CKKS_COEFF_MOD_BIT_SIZES,
     CKKS_POLY_MODULUS_DEGREE,
@@ -127,7 +128,9 @@ class Lenet5Config:
     update_parameter_scope: str = CURRENT_UPDATE_PARAMETER_SCOPE
     execution_revision: str = CURRENT_EXECUTION_REVISION
     local_epochs: int = 1
+    train_batch_size: int | None = None  # Opt-in; None keeps the legacy device/model defaults
     equal_optimizer_work_control: bool = False
+    final_round_diagnostic_extra_epsilon: float = 0.0
     learning_rate: float = 0.15
     server_step: float = 1.0  # Post-aggregation cloud update multiplier.
     l2: float = 0.0001
@@ -162,6 +165,39 @@ class Lenet5Config:
     joint_calibration_capture_max_clients: int | None = 8
     joint_calibration_capture_sample_limit: int | None = 64
     joint_calibration_capture_scope: str = "candidate_modes"
+
+
+def _apply_final_round_diagnostic_sample_budget_extension(
+    *,
+    privacy_ledgers: dict[int, Any],
+    remaining_epsilon: dict[int, float],
+    base_budget: float,
+    extra_epsilon: float,
+    round_idx: int,
+    total_rounds: int,
+) -> bool:
+    """DIAGNOSTIC only: raise the final-round Sample-DP ceiling, NEVER erase RDP.
+
+    This changes the authorized epsilon target for this diagnostic run. It
+    does not assert the original epsilon target or authorize public releases.
+    """
+    if extra_epsilon <= 0 or round_idx != total_rounds - 1:
+        return False
+    if not math.isfinite(extra_epsilon) or not math.isfinite(base_budget) or base_budget <= 0:
+        raise ValueError("Invalid diagnostic epsilon extension")
+    target_budget = base_budget + extra_epsilon
+    for ledger in privacy_ledgers.values():
+        if not isinstance(ledger, SamplePrivacyLedger):
+            raise TypeError("Diagnostic extension supports SamplePrivacyLedger only")
+        if not (
+            math.isclose(ledger.total.budget, base_budget, abs_tol=1e-10, rel_tol=0)
+            or math.isclose(ledger.total.budget, target_budget, abs_tol=1e-10, rel_tol=0)
+        ):
+            raise RuntimeError("Unexpected privacy target during final-round extension")
+    for cid, ledger in privacy_ledgers.items():
+        ledger.total.budget = target_budget
+        remaining_epsilon[cid] = ledger.remaining_budget
+    return True
 
 
 def _snapshot_trainable_parameters(
@@ -643,6 +679,7 @@ def _assert_trusted_lie_accounting_plan(
     candidate: Candidate,
     model_name: str,
     worker_device: torch.device,
+    train_batch_size: int | None = None,
 ) -> None:
     """Reject any known trusted-LIE event-plan mismatch before private work."""
     if not (selection.trusted_lie_joint_sample_dp and candidate.mode == "LIE"):
@@ -656,6 +693,8 @@ def _assert_trusted_lie_accounting_plan(
             "resnet18", "resnet50", "resnet18pretrained", "resnet50pretrained",
         } else 64
     )
+    if train_batch_size is not None:
+        runtime_batch = int(train_batch_size)
     if int(selection.split_batch_size) != runtime_batch:
         raise RuntimeError(
             "Trusted LIE Sample-DP accounting batch size mismatch: "
@@ -705,6 +744,7 @@ def _client_train_worker(
             "trusted_split_joint_sample_dp", False
         ),
         trusted_edge=payload.get("trusted_edge", False),
+        train_batch_size=payload.get("train_batch_size"),
         mode=payload["mode"],
         global_end_state=payload["global_end_state"],
         global_edge_state=payload["global_edge_state"],
@@ -1034,6 +1074,7 @@ def _capture_joint_calibration_round(
             "lr": train_config.learning_rate,
             "l2": train_config.l2,
             "local_steps": _client_step_limit(selection),
+            "train_batch_size": train_config.train_batch_size,
             "model_name": model_name,
             "input_shape": input_shape,
             "num_classes": num_classes,
@@ -1158,6 +1199,11 @@ def run_fmnist_lenet5_training(
 ) -> dict[str, Any]:
     if max_new_rounds is not None and max_new_rounds < 1:
         raise ValueError("max_new_rounds must be positive")
+    extra_epsilon = float(train_config.final_round_diagnostic_extra_epsilon)
+    if not math.isfinite(extra_epsilon) or extra_epsilon < 0:
+        raise ValueError("final_round_diagnostic_extra_epsilon must be finite and non-negative")
+    if extra_epsilon > 0 and selection.privacy_unit != "sample":
+        raise ValueError("Last-round diagnostic extension supports sample-level accounting only")
     independent_eval_path = os.environ.get('DYNFL_INDEPENDENT_EVAL_OUTPUT', '').strip()
     if independent_eval_path and train_config.joint_calibration_capture_path:
         raise ValueError('independent evaluation must not share a calibration capture session')
@@ -1700,6 +1746,9 @@ def _run_lenet5_policy(
     resume_from_policy_dir: Path | None = None,
     max_new_rounds: int | None = None,
 ) -> dict[str, Any]:
+    # The parent entrypoint validates this setting, but every policy must
+    # bind it locally before checking final-round privacy admission.
+    extra_epsilon = float(train_config.final_round_diagnostic_extra_epsilon)
     output_dir.mkdir(parents=True, exist_ok=True)
     parent_status_path = output_dir.parent / "live_status.json"
     policy_started_at = time.perf_counter()
@@ -2043,14 +2092,15 @@ def _run_lenet5_policy(
                 )
 
             for ledger in privacy_ledgers.values():
+                expected_base_budget = float(expected_sample["sample_budget"])
+                expected_diagnostic_budget = (
+                    expected_base_budget + extra_epsilon
+                    if int(checkpoint.get("next_round", 0)) >= selection.rounds - 1
+                    else expected_base_budget
+                )
+                allowed_saved_budgets = (expected_base_budget, expected_diagnostic_budget)
                 if (
-                    abs(
-                        ledger.total.budget
-                        - float(
-                            expected_sample["sample_budget"]
-                        )
-                    )
-                    > 1e-12
+                    not any(abs(ledger.total.budget - val) <= 1e-12 for val in allowed_saved_budgets)
                     or abs(
                         ledger.total.delta
                         - float(expected_sample["delta"])
@@ -2214,6 +2264,26 @@ def _run_lenet5_policy(
         stop_round = min(selection.rounds, start_round + max_new_rounds)
 
     for round_idx in range(start_round, stop_round):
+        diagnostic_extension_active = False
+        if extra_epsilon > 0:
+            if sample_privacy_parameters is None:
+                raise RuntimeError("Missing Sample-DP parameters for diagnostic extension")
+            diagnostic_extension_active = _apply_final_round_diagnostic_sample_budget_extension(
+                privacy_ledgers=privacy_ledgers,
+                remaining_epsilon=remaining_epsilon,
+                base_budget=float(sample_privacy_parameters["sample_budget"]),
+                extra_epsilon=extra_epsilon,
+                round_idx=round_idx,
+                total_rounds=selection.rounds,
+            )
+            if diagnostic_extension_active:
+                print(
+                    f"  [DIAGNOSTIC PRIVACY OVERRIDE] Final round only: "
+                    f"original epsilon target={sample_privacy_parameters['sample_budget']}; "
+                    f"effective epsilon ceiling={float(sample_privacy_parameters['sample_budget']) + extra_epsilon}. "
+                    "All Sample-DP events remain charged; DO NOT claim original epsilon guarantee.",
+                    flush=True,
+                )
         _synchronize_device_for_timing(device)
         round_wall_started_at = time.perf_counter()
         round_he_metrics = HEOperationMetrics(backend=he_status.backend)
@@ -2232,7 +2302,9 @@ def _run_lenet5_policy(
         # configuration sentinel "auto_round". Reuse the resolved config
         # in every subsequent evaluation (including tier-capacity repair).
         round_evaluation_config = (
-            replace(
+            replace(effective_selection, online_bound_round=round_idx)
+            if effective_selection.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"}
+            else replace(
                 effective_selection,
                 joint_calibration_state_key=f"round:{round_idx}",
             )
@@ -2314,6 +2386,77 @@ def _run_lenet5_policy(
                     f"but real HE backend is unavailable: {he_status.detail}"
                 )
             selected.append((client.client_id, candidate, candidates, rem))
+
+        # LIIC runtime facts are captured BEFORE optimizer dispatch, and
+        # BEFORE the Pareto selector examines any candidate J values. The
+        # conditional ideal-gradient and other-mode proofs are NOT inferred.
+        if (effective_selection.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"}
+                or os.environ.get("DYNFL_ONLINE_J_SHADOW_AUDIT", "") == "1"):
+            runtime_inputs = dict(
+                round_index=round_idx,
+                selected=selected,
+                client_sample_counts={c.client_id: int(len(train_client_indices[c.client_id]))
+                                      for c in clients},
+                model_parts=(global_end, global_edge),
+                model_name=model_name,
+                local_epochs=train_config.local_epochs,
+                batch_size=train_config.train_batch_size or 64,
+                learning_rate=train_config.learning_rate,
+                weight_decay=train_config.l2,
+                sample_clip_norm=_sample_optimizer_clip_norm(train_config),
+                privacy_unit=effective_selection.privacy_unit,
+                step_cap=_client_step_limit(effective_selection),
+                ablation_no_dp=effective_selection.no_dp_ablation,
+                ablation_clip_only=effective_selection.clipping_only_ablation,
+            )
+            if os.environ.get("DYNFL_ONLINE_J_SHADOW_AUDIT", "") == "1":
+                # A shadow audit is ONLY metadata (no ideal-gradient proof).
+                shadow = liic_shadow_metadata(**runtime_inputs)
+                write_predecision_json(
+                    output_dir / f"online_j_liic_shadow_round_{round_idx:03d}.json", shadow)
+            if effective_selection.learning_objective == "online_j_oracle_diagnostic":
+                # Explicitly nonprivate central-simulator oracle. The snapshot
+                # is created BEFORE local training and BEFORE Pareto selection.
+                from .online_j_oracle_diagnostic import make_oracle_snapshot
+                from .online_j_runtime import write_predecision_json
+                oracle = make_oracle_snapshot(
+                    round_index=round_idx, selected=selected,
+                    client_train_indices={c.client_id: train_client_indices[c.client_id]
+                                          for c in clients},
+                    x_train=x_train, y_train=y_train,
+                    global_end=global_end, global_edge=global_edge,
+                    model_name=model_name, input_shape=input_shape, device=device,
+                    learning_rate=train_config.learning_rate,
+                    cloud_step=train_config.server_step,
+                    weight_decay=train_config.l2,
+                    local_epochs=train_config.local_epochs,
+                    batch_size=train_config.train_batch_size or 64,
+                    sample_clip_norm=_sample_optimizer_clip_norm(train_config),
+                    privacy_unit=effective_selection.privacy_unit,
+                    step_cap=_client_step_limit(effective_selection),
+                    no_dp_ablation=effective_selection.no_dp_ablation,
+                    clipping_only_ablation=effective_selection.clipping_only_ablation,
+                )
+                oracle_path = write_predecision_json(
+                    output_dir / f"online_j_ORACLE_NONCERTIFIED_round_{round_idx:03d}.json", oracle)
+                round_evaluation_config = replace(
+                    round_evaluation_config,
+                    online_bound_manifest_path=str(oracle_path),
+                )
+            if effective_selection.learning_objective == "online_upper_bound":
+                # Existing v1 legacy certificates stay supported, as do v2
+                # certificates with already complete per-round proofs. Only
+                # v2 uses the optional auto-filled LIIC proof inputs.
+                source_path = Path(effective_selection.online_bound_manifest_path)
+                source_data = json.loads(source_path.read_text(encoding="utf-8"))
+                if source_data.get("schema") == "dynfl.online_j.v2":
+                    hydrated = hydrate_online_manifest(
+                        source=source_path, **runtime_inputs,
+                    )
+                    hydrated_path = write_predecision_json(
+                        output_dir / f"online_j_predecision_round_{round_idx:03d}.json", hydrated)
+                    round_evaluation_config = replace(
+                        round_evaluation_config, online_bound_manifest_path=str(hydrated_path))
 
         for client_id, initial_candidate, candidate_pool, remaining in selected:
             for candidate_index, audit_candidate in enumerate(candidate_pool):
@@ -4895,6 +5038,16 @@ def _run_lenet5_policy(
             {
                 "policy": policy,
                 "round": round_idx,
+                "final_round_privacy_diagnostic_active": int(diagnostic_extension_active),
+                "privacy_original_epsilon_target": (
+                    float(sample_privacy_parameters["sample_budget"])
+                    if sample_privacy_parameters is not None else ""
+                ),
+                "privacy_effective_epsilon_ceiling": (
+                    float(sample_privacy_parameters["sample_budget"])
+                    + (extra_epsilon if diagnostic_extension_active else 0.0)
+                    if sample_privacy_parameters is not None else ""
+                ),
                 "mode_selection_audit": json.dumps(mode_selection_summary, sort_keys=True),
                 **privacy_path_observations,
                 "sample_worker_client_audit_status": (
@@ -5385,6 +5538,11 @@ def _run_lenet5_policy(
                 "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                 "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                 "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
+                "online_j_center_norm_sq": profile_evaluation.online_j_center_norm_sq if profile_evaluation else "",
+                "online_j_radius": profile_evaluation.online_j_radius if profile_evaluation else "",
+                "online_j_ideal_radius": profile_evaluation.online_j_ideal_radius if profile_evaluation else "",
+                "online_j_noise_second_moment": profile_evaluation.online_j_noise_second_moment if profile_evaluation else "",
+                "online_j_numeric_radius": profile_evaluation.online_j_numeric_radius if profile_evaluation else "",
                 "learning_proxy_source": profile_evaluation.learning_proxy_source if profile_evaluation else "",
                 "joint_mean_error_sq": profile_evaluation.joint_mean_error_sq if profile_evaluation else "",
                 "joint_variance_trace": profile_evaluation.joint_variance_trace if profile_evaluation else "",
@@ -5946,6 +6104,14 @@ def _run_lenet5_policy(
     )
     summary["status"] = "completed"
     summary["target_rounds"] = selection.rounds
+    summary["final_round_privacy_diagnostic_extra_epsilon"] = extra_epsilon
+    summary["privacy_claim_original_target_not_validated_if_override"] = bool(extra_epsilon > 0)
+    if sample_privacy_parameters is not None:
+        summary["privacy_original_epsilon_target"] = float(sample_privacy_parameters["sample_budget"])
+        summary["privacy_effective_epsilon_ceiling"] = float(sample_privacy_parameters["sample_budget"]) + extra_epsilon
+        summary["privacy_realized_max_sample_epsilon"] = max(
+            ledger.current_epsilon() for ledger in privacy_ledgers.values()
+        )
     summary["fixed_mode_assignment"] = {
         str(client_id): mode
         for client_id, mode in sorted(fixed_mode_assignments.items())
@@ -6264,7 +6430,7 @@ def _round_communication_volume(inputs, candidates, fused):
 
 def _client_step_limit(selection):
     # L_block_cycles models logical link cost; it must not truncate FL epochs.
-    return None if selection.mainline_fusion else selection.L_block_cycles
+    return None if (selection.mainline_fusion or selection.uncapped_local_batches) else selection.L_block_cycles
 
 
 def _client_epoch_count(train_config, selection, candidate):
@@ -6318,6 +6484,7 @@ def _run_client_training_tasks(
         _assert_trusted_lie_accounting_plan(
             selection=selection, candidate=candidate,
             model_name=model_name, worker_device=worker_device,
+            train_batch_size=train_config.train_batch_size,
         )
         if _mode_reaches_cloud(candidate.mode) and training_stage == 0:
             client_model_states.pop(client_id, None)
@@ -6342,6 +6509,7 @@ def _run_client_training_tasks(
             "lr": train_config.learning_rate,
             "l2": train_config.l2,
             "local_steps": _client_step_limit(selection),
+            "train_batch_size": train_config.train_batch_size,
             "model_name": model_name,
             "input_shape": input_shape,
             "num_classes": num_classes,
@@ -7428,13 +7596,13 @@ def _global_coordination_score(candidate: Candidate, candidates: list[Candidate]
     time_values = [item.time for item in viable]
     acc_values = [item.accuracy for item in viable]
     eps_values = [item.epsilon_used for item in viable]
-    risk_values = [item.risk for item in viable]
 
     time_norm = _safe_norm(candidate.time, min(time_values), max(time_values))
     acc_norm = _safe_norm(candidate.accuracy, min(acc_values), max(acc_values))
     eps_norm = _safe_norm(candidate.epsilon_used, min(eps_values), max(eps_values))
-    risk_norm = _safe_norm(candidate.risk, min(risk_values), max(risk_values))
-    return 0.58 * acc_norm - 0.22 * time_norm - 0.12 * eps_norm - 0.08 * risk_norm
+    # Historical uncalibrated risk coefficients were deleted; this is not
+    # an estimate of confidentiality, trust or differential privacy.
+    return 0.58 * acc_norm - 0.22 * time_norm - 0.12 * eps_norm
 
 
 def _coordinate_accuracy_oracle_round(
@@ -7526,6 +7694,7 @@ def _coordinate_accuracy_oracle_round(
                 dp_epsilon=max(selection_config.dp_emb_epsilon, 1e-6),
                 l2=train_config.l2,
                 local_steps=_client_step_limit(selection_config),
+                train_batch_size=train_config.train_batch_size,
                 training_seed=_client_training_seed(
                     selection_config.seed,
                     round_idx,
@@ -7959,6 +8128,11 @@ def _pareto_profile_audit_rows(
                 "feature_perturbation_objective": evaluation.feature_perturbation,
                 "fusion_bound_objective": evaluation.fusion_bound,
                 "learning_error_objective": evaluation.system_learning_error,
+                "online_j_center_norm_sq": evaluation.online_j_center_norm_sq,
+                "online_j_radius": evaluation.online_j_radius,
+                "online_j_ideal_radius": evaluation.online_j_ideal_radius,
+                "online_j_noise_second_moment": evaluation.online_j_noise_second_moment,
+                "online_j_numeric_radius": evaluation.online_j_numeric_radius,
                 "learning_proxy_source": evaluation.learning_proxy_source,
                 "joint_mean_error_sq": evaluation.joint_mean_error_sq,
                 "joint_variance_trace": evaluation.joint_variance_trace,
@@ -9207,6 +9381,7 @@ def _summarize_lenet5_policy(
         "mean_global_update_clients": _list_mean(row["num_global_update_clients"] for row in round_rows),
         "mean_effective_edges": _list_mean(row["num_effective_edges"] for row in round_rows),
         "max_privacy_risk": max(row["max_risk"] for row in round_rows),
+        "legacy_risk_metric_status": "disabled_uncalibrated_constant_not_a_privacy_guarantee",
         "min_remaining_epsilon": final["min_remaining_epsilon"],
         "max_feature_epsilon": float(
             final.get("max_feature_epsilon", 0.0)

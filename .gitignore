@@ -1,28 +1,59 @@
+# Python caches and bytecode
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# Local virtual environments and secrets
 .venv/
 venv/
 env/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 
+# IDE / OS machine-local files
 .idea/
 .vscode/
 .claude/
-.he_build/
-.he_deps/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
 
+# Datasets and generated run outputs
+data/
+datasets/
+experiments/data/
 out/
+outputs/
+runs/
+logs/
+wandb/
+checkpoints/
 plot/
 notebooks/.ipynb_checkpoints/
-experiments/data/
-data/
+*.log
 
+# Large model binaries (calibration/checkpoints stay in external backup)
+*.pth
+*.ckpt
+*.pt
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# LaTeX build products
 *.aux
 *.bbl
 *.blg
-*.log
 *.out
 *.spl
 *.synctex.gz
@@ -32,63 +63,28 @@ data/
 *.fls
 *.fdb_latexmk
 
-*.zip
-*.tar
-*.tar.gz
-*.7z
-
-
 # Fed3Scale SEAL-python local build artifacts
 third_party/SEAL-python/build/
 third_party/SEAL-python/SEAL/build/
 third_party/SEAL-python/*.so
 third_party/SEAL-python/*.pyd
 third_party/SEAL-python/*.egg-info/
+.he_build/
+.he_deps/
 .he_deps
 
-# Python and local environments
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.pytest_cache/
-
-# Training datasets, outputs and logs
-data/
-datasets/
-out/
-outputs/
-runs/
-logs/
-wandb/
-checkpoints/
-*.log
-
-# Large model files and local archives
-*.pth
-*.ckpt
-*.pt
-*.zip
-*.tar
-*.tar.gz
-
-# Credentials and machine-local files
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-
-# Local source backups
+# Local source backups and patch leftovers
+*.bak
+*.bak_*
+*.modebak
 *.before_*
-
-# Historical patch snapshots
+*.orig
+*.rej
 dynfl_v369*.patch
 v370_selection_admission.patch
 
-# Credentials
-.env
-.env.*
-!.env.example
-*.pem
-*.key
+# Local historical workspaces / backups
+_v370_*_workspace/
+.console_backup_*/
+.dashboard_backup_*/
+DynFL-privacy_backup_*/

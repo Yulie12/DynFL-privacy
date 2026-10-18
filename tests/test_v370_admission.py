@@ -174,4 +174,32 @@ class TestAdmission(unittest.TestCase):
         self.assertIn('LIIC',modes)
         self.assertNotIn('LIE',modes)
 
+    def test_stage11_corrected_gates_fail_closed_for_unsupported_split(self):
+        cfg=self.config(corrected_admission_policy=True,resource_limit=1.0)
+        modes,a=self.run_modes(cfg)
+        self.assertEqual(modes,set())
+        self.assertEqual(a['generation_exclusions']['LIE'],'fast_response_not_required')
+        self.assertEqual(a['generation_exclusions']['LIC'],'client_cloud_split_trust_not_certified')
+        self.assertEqual(a['generation_exclusions']['LIEIIC'],
+                         'trusted_split_no_internal_dp_runtime_not_certified')
+        self.assertFalse(a['local_training_feasible'])
+
+    def test_stage11_corrected_fast_local_gate(self):
+        cfg=self.config(corrected_admission_policy=True)
+        modes,a=self.run_modes(cfg)
+        self.assertEqual(modes,{'LIIC','LIIEIIIC'})
+        self.assertEqual(a['generation_exclusions']['LIE'],'fast_response_not_required')
+        cfg_fast=self.config(corrected_admission_policy=True,
+                             fast_client_deadlines=((1,4.),))
+        modes2,_=self.run_modes(cfg_fast)
+        self.assertIn('LIIE',modes2)
+
+    def test_stage11_deadline_cannot_trigger_split_when_compute_fits(self):
+        cfg=self.config(corrected_admission_policy=True,
+                        fast_client_deadlines=((1,1.2),))
+        modes,a=self.run_modes(cfg)
+        self.assertNotIn('LIE',modes)
+        self.assertNotIn('LIEIIC',modes)
+        self.assertTrue(a['local_training_feasible'])
+
 if __name__=='__main__': unittest.main(verbosity=2)

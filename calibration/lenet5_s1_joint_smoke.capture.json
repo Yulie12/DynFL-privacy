@@ -1,0 +1,18 @@
+{
+  "table": "E:\\YTT\\GROUP\\DynFL-privacy\\calibration\\lenet5_s1_joint_smoke.pt",
+  "entry_count": 4,
+  "pair_count": 4,
+  "calibration_data_privacy_status": "unverified_client_heldout_not_dp_accounted",
+  "calibration_table_release_status": "not_validated_for_untrusted_export",
+  "capture_rows": [
+    {
+      "round": 0,
+      "captured_pairs": 4,
+      "captured_cells": 2,
+      "captured_clients": 1,
+      "state_key": "round:0",
+      "wall_time_sec": 1.597767200000817
+    }
+  ],
+  "note": "Capture is offline/periodic calibration work. Online selector runs only load the saved table."
+}

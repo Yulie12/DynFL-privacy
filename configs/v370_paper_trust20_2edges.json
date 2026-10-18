@@ -1,0 +1,23 @@
+{
+    "fast_client_deadlines":  [
+
+                              ],
+    "trusted_client_edge_pairs":  [
+                                      [
+                                          0,
+                                          0
+                                      ],
+                                      [
+                                          1,
+                                          1
+                                      ],
+                                      [
+                                          10,
+                                          0
+                                      ],
+                                      [
+                                          11,
+                                          1
+                                      ]
+                                  ]
+}

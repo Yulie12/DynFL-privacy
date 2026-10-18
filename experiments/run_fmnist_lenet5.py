@@ -53,6 +53,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--final-round-diagnostic-extra-epsilon",
+        type=float,
+        default=0.0,
+        help="DIAGNOSTIC ONLY: add this many epsilon units to the Sample-DP target on the FINAL round; do not claim the original epsilon guarantee.",
+    )
+    parser.add_argument(
         "--execution-revision",
         default=CURRENT_EXECUTION_REVISION,
     )
@@ -108,6 +114,12 @@ def parse_args() -> argparse.Namespace:
         "--dirichlet-alpha", type=float, default=0.5,
         help="Dirichlet concentration alpha when --partition-mode dirichlet (paper: 0.5 or 0.1).",
     )
+    parser.add_argument("--corrected-admission-policy", action="store_true",
+                        help="Identical corrected hard mode gates for both baseline and online-J runs")
+    parser.add_argument("--uncapped-local-batches", action="store_true",
+                        help="Train all minibatches across local_epochs, without L_block_cycles cap")
+    parser.add_argument("--train-batch-size", type=int, default=None,
+                        help="Actual training minibatch size; None retains historical runtime 64/128 default")
     parser.add_argument("--selection-period", type=int, default=5)
     parser.add_argument(
         "--exclude-modes",
@@ -164,11 +176,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--learning-objective",
         default="legacy_fusion_dp",
-        choices=["legacy_fusion_dp", "joint_calibration"],
+        choices=["legacy_fusion_dp", "joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"],
         help=(
             "Pareto learning objective. joint_calibration uses the latest joint update-space "
             "proxy from an offline paired clean/private calibration table."
         ),
+    )
+    parser.add_argument(
+        "--online-bound-manifest-path", default=None,
+        help="Predecision round-indexed online-J certificates. Required for online_upper_bound; no proxy fallback.",
     )
     parser.add_argument(
         "--joint-calibration-path",
@@ -571,6 +587,9 @@ def main() -> None:
         ),
         mainline_fusion=args.mainline_fusion,
         learning_objective=args.learning_objective,
+        uncapped_local_batches=args.uncapped_local_batches,
+        corrected_admission_policy=args.corrected_admission_policy,
+        online_bound_manifest_path=args.online_bound_manifest_path,
         joint_calibration_path=args.joint_calibration_path,
         joint_calibration_state_key=args.joint_calibration_state_key,
         joint_calibration_e_alg_policy=args.joint_calibration_e_alg_policy,
@@ -595,7 +614,9 @@ def main() -> None:
         dataset_name=args.dataset,
         model_name=args.model,
         local_epochs=args.local_epochs,
+        train_batch_size=args.train_batch_size,
         equal_optimizer_work_control=args.equal_optimizer_work_control,
+        final_round_diagnostic_extra_epsilon=args.final_round_diagnostic_extra_epsilon,
         learning_rate=args.lr,
         server_step=args.server_step,
         iid=args.iid,

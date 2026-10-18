@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Resume one seed from an existing run directory containing policy checkpoints.",
     )
+    parser.add_argument(
+        "--final-round-diagnostic-extra-epsilon",
+        type=float,
+        default=0.0,
+        help="DIAGNOSTIC only; adds an epsilon allowance to final-round Sample-DP ledger (never a formal epsilon guarantee).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--disable-update-dp",
@@ -96,6 +103,7 @@ def build_command(
     exclude_modes: list[str] | None = None,
     liie_edge_dp_plan: str | None = None,
     cloud_dp_plan: str | None = None,
+    final_round_diagnostic_extra_epsilon: float = 0.0,
 ) -> list[str]:
     if config.get("execution_protocol") is not None:
         raise ValueError("Legacy fixed Method2 execution protocols are not part of the current DynFL mainline")
@@ -128,6 +136,7 @@ def build_command(
         "partition_mode": training["partition_mode"],
         "dirichlet_alpha": training.get("dirichlet_alpha", 0.5),
         "local_epochs": training["local_epochs"],
+        "train_batch_size": training.get("batch_size"),
         "lr": training["learning_rate"],
         "server_step": (
             server_step if server_step is not None else training.get("server_step", 1.0)
@@ -198,6 +207,7 @@ def build_command(
         "cloud_fusion_xi": optimization["cloud_fusion_xi"],
         "cloud_fusion_eps": optimization["cloud_fusion_eps"],
         "learning_objective": learning.get("objective", "legacy_fusion_dp"),
+        "online_bound_manifest_path": learning.get("online_bound_manifest_path"),
         "joint_calibration_path": learning.get("calibration_path"),
         "joint_calibration_state_key": learning.get("state_key", "default"),
         "joint_calibration_e_alg_policy": learning.get("e_alg_policy", "table"),
@@ -214,6 +224,12 @@ def build_command(
     for name, value in values.items():
         if value is not None:
             _append_value(command, name, value)
+    if final_round_diagnostic_extra_epsilon > 0:
+        _append_value(command, "final_round_diagnostic_extra_epsilon", final_round_diagnostic_extra_epsilon)
+    if training.get("uncapped_local_batches", False):
+        command.append("--uncapped-local-batches")
+    if system.get("corrected_admission_policy", False):
+        command.append("--corrected-admission-policy")
     if disable_update_dp:
         command.extend(["--dp-update-mode", "off"])
     if exclude_modes:
@@ -279,6 +295,8 @@ def main() -> None:
         raise ValueError("--resume-from-run requires exactly one seed")
     if args.max_new_rounds is not None and args.max_new_rounds < 1:
         raise ValueError("--max-new-rounds must be positive")
+    if not math.isfinite(args.final_round_diagnostic_extra_epsilon) or args.final_round_diagnostic_extra_epsilon < 0:
+        raise ValueError("--final-round-diagnostic-extra-epsilon must be finite and nonnegative")
     effective_server_step = (
         args.server_step if args.server_step is not None
         else config["training"].get("server_step", 1.0)
@@ -298,6 +316,7 @@ def main() -> None:
             server_step=args.server_step,
             liie_edge_dp_plan=args.liie_edge_dp_plan,
             cloud_dp_plan=args.cloud_dp_plan,
+            final_round_diagnostic_extra_epsilon=args.final_round_diagnostic_extra_epsilon,
             disable_update_dp=args.disable_update_dp,
             exclude_modes=args.exclude_modes,
         )

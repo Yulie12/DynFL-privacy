@@ -811,6 +811,7 @@ def split_local_train_lenet5(
     clipping_only_ablation: bool = False,
     trusted_split_joint_sample_dp: bool = False,
     trusted_edge: bool = False,
+    train_batch_size: int | None = None,
 ) -> dict[str, dict[str, torch.Tensor]]:
     """Split learning with labels retained at the client.
 
@@ -850,6 +851,10 @@ def split_local_train_lenet5(
         "resnet18pretrained",
         "resnet50pretrained",
     } else 64
+    if train_batch_size is not None:
+        if int(train_batch_size) <= 0:
+            raise ValueError("train_batch_size must be positive")
+        batch_size = int(train_batch_size)
     if local_steps is not None and len(x) > 0:
         max_local_samples = max(1, int(local_steps)) * batch_size
         if len(x) > max_local_samples:

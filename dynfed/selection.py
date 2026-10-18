@@ -15,6 +15,8 @@ from typing import Any, Callable
 
 from .nodes import build_profiles
 from .joint_calibration import JointUpdateCalibrationTable
+from .online_j_bound import evaluate_online_bound
+from .online_j_oracle_diagnostic import evaluate_oracle_diagnostic
 from .flow_executor import (
     CLOUD_DIRECT_MODES,
     EDGE_CLOUD_MODES,
@@ -47,30 +49,10 @@ MECHANISMS_BY_OBJECT = {
     "pseudo_label": ("none",),
 }
 
-OBJECT_RISK = {
-    "grad": 0.82,
-    "emb": 0.72,
-    "strongemb": 0.68,
-    "upd": 0.58,
-    "weakemb": 0.5,
-    "pseudo_label": 0.46,
-}
-
-MECHANISM_RISK = {
-    "none": 1.0,
-    "trusted": 0.35,
-    "dp": 0.42,
-    "he2": 0.18,
-    "he3": 0.12,
-    "dp_he3": 0.08,
-}
-
-# Only objects with an available privacy mechanism belong to the privacy-risk
-# model. Logits and returned embedding gradients are post-processing payloads.
-PRIVACY_RISK_OBJECTS = frozenset(
-    obj for obj, mechanisms in MECHANISMS_BY_OBJECT.items()
-    if mechanisms != ("none",)
-)
+# No arbitrary per-object/per-mechanism numeric privacy "risk" score.
+# Privacy/transmission safety is enforced by explicit link requirements,
+# trusted-domain admission, mechanism selection, and the DP accountant.
+# Historical risk_limit config/CSV fields remain for compatibility only.
 
 
 def _perf_add(profiler: dict[str, Any] | None, key: str, value: float = 1.0) -> None:
@@ -157,7 +139,7 @@ class SelectionConfig:
     # When enabled, only clients carrying an explicit fast-response deadline
     # may terminate at Edge. Ordinary clients must use a Cloud-reaching mode.
     edge_only_requires_fast_deadline: bool = False
-    risk_limit: float = 0.5
+    risk_limit: float = 0.5  # deprecated compatibility field; no numeric risk gate
     aggregation_fraction: float = 1.0
     output_dir: str = "out/selection"
     require_feasible: bool = False
@@ -252,6 +234,13 @@ class SelectionConfig:
     # New fields are appended to preserve existing positional construction.
     strict_pair_admission: bool = False
     trusted_client_edge_pairs: tuple[tuple[int, int], ...] = ()
+    # Opt-in strict PREDECISION online bound. No historical proxy fallback.
+    online_bound_manifest_path: str | None = None
+    online_bound_round: int = 0
+    # Opt-in locked experiments: do not cap each local training run at L_block_cycles.
+    uncapped_local_batches: bool = False
+    # Matched old/new 5-round baselines use identical corrected mode gates.
+    corrected_admission_policy: bool = False
 
     def __post_init__(self) -> None:
         if self.trusted_lie_joint_sample_dp:
@@ -286,10 +275,14 @@ class SelectionConfig:
             seen_fast_clients.add(int(client_id))
         if self.mainline_fusion:
             raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
-        if self.learning_objective not in {"legacy_fusion_dp", "joint_calibration"}:
+        if self.learning_objective not in {"legacy_fusion_dp", "joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"}:
             raise ValueError(
-                "learning_objective must be 'legacy_fusion_dp' or 'joint_calibration'"
+                "learning_objective must be legacy_fusion_dp, joint_calibration, online_upper_bound or online_j_oracle_diagnostic"
             )
+        if self.learning_objective == "online_upper_bound" and not self.online_bound_manifest_path:
+            raise ValueError("online_upper_bound requires online_bound_manifest_path; no fallback")
+        if self.online_bound_round < 0:
+            raise ValueError("online_bound_round must be nonnegative")
         if self.joint_calibration_e_alg_policy not in {"table", "zero"}:
             raise ValueError(
                 "joint_calibration_e_alg_policy must be 'table' or 'zero'"
@@ -647,6 +640,52 @@ def resolved_sample_privacy_parameters(
         "optimizer_noise_multiplier": optimizer_sigma,
     }
 
+# Stage21: reserve a microscopic epsilon headroom in lifetime-aware Sample-DP
+# calibration. The exact-boundary bisection may yield a candidate epsilon
+# increment ~1e-12 larger than the remaining epsilon due to floating point
+# subtraction, causing the entire final round to SKIP despite an RDP-feasible
+# candidate. This does NOT relax the privacy budget or feasibility checks.
+_SAMPLE_RDP_AUTO_EPSILON_HEADROOM = 1e-6
+
+
+def _sample_rdp_auto_noise_with_headroom(
+    ledger: SamplePrivacyLedger,
+    planned_events: int,
+) -> float:
+    """Find noise for the remaining horizon with explicit RDP epsilon slack.
+
+    Start with the exact RDP calibration, then enforce a strict epsilon
+    headroom on the *complete remaining event horizon*. Never mutate the
+    ledger, and never grant extra budget. This also guards against tiny
+    numeric drift between the RDP accountant and candidate epsilon checks.
+    """
+    if not isinstance(ledger, SamplePrivacyLedger):
+        raise TypeError("Sample-DP headroom calibration requires SamplePrivacyLedger")
+    count = int(planned_events)
+    if count != planned_events or count <= 0:
+        raise ValueError("planned_events must be a positive integer")
+
+    epsilon_before = ledger.current_epsilon()
+    budget = ledger.total.budget
+    available = budget - epsilon_before
+    if not math.isfinite(available) or available <= 0.0:
+        raise ValueError("No remaining Sample-DP epsilon for the planned horizon")
+
+    # Never reserve more than 10% of what is actually left, so a tiny but
+    # valid remaining budget can still be used with sufficiently high noise.
+    reserve = min(_SAMPLE_RDP_AUTO_EPSILON_HEADROOM, available * 0.1)
+    target = budget - reserve
+    sigma = ledger.minimum_feasible_shared_noise(count) * (1.0 + 1e-6)
+
+    for _ in range(128):
+        if math.isfinite(sigma) and ledger.total.epsilon_after(sigma, count) <= target:
+            return sigma
+        sigma *= 1.125
+        if not math.isfinite(sigma) or sigma > 1e9:
+            break
+    raise ValueError("Cannot reserve RDP numerical headroom for the planned horizon")
+
+
 def mode_aware_feature_noise_multiplier(
     config: SelectionConfig,
     feature_events: int,
@@ -741,6 +780,17 @@ class ProfileEvaluation:
     joint_e_agg_norm_sq: float = 0.0
     joint_bias_norm_sq: float = 0.0
     learning_proxy_source: str = "legacy_fusion_dp"
+    # Online-J-only decomposition. Never reuse joint_calibration diagnostic names.
+    online_j_center_norm_sq: float = 0.0
+    online_j_radius: float = 0.0
+    online_j_ideal_radius: float = 0.0
+    online_j_noise_second_moment: float = 0.0
+    online_j_proved_noise_floor: float = 0.0
+    online_j_numeric_radius: float = 0.0
+    online_j_lower_bound: float = 0.0
+    online_j_reference_radius: float = 0.0
+    online_j_mode_radius: float = 0.0
+    online_j_mode_variance_second_moment: float = 0.0
 
     @property
     def system_dp(self) -> float:
@@ -951,6 +1001,16 @@ def run_selection_experiment(
                             "feature_perturbation_objective": evaluation.feature_perturbation,
                             "fusion_bound_objective": evaluation.fusion_bound,
                             "learning_error_objective": evaluation.system_learning_error,
+                            "online_j_center_norm_sq": evaluation.online_j_center_norm_sq,
+                            "online_j_radius": evaluation.online_j_radius,
+                            "online_j_ideal_radius": evaluation.online_j_ideal_radius,
+                            "online_j_noise_second_moment": evaluation.online_j_noise_second_moment,
+                            "online_j_proved_noise_floor": evaluation.online_j_proved_noise_floor,
+                            "online_j_numeric_radius": evaluation.online_j_numeric_radius,
+                            "online_j_lower_bound": evaluation.online_j_lower_bound,
+                            "online_j_reference_radius": evaluation.online_j_reference_radius,
+                            "online_j_mode_radius": evaluation.online_j_mode_radius,
+                            "online_j_mode_variance_second_moment": evaluation.online_j_mode_variance_second_moment,
                             "learning_proxy_source": evaluation.learning_proxy_source,
                             "joint_mean_error_sq": evaluation.joint_mean_error_sq,
                             "joint_variance_trace": evaluation.joint_variance_trace,
@@ -1083,6 +1143,16 @@ def run_selection_experiment(
                     "feature_perturbation_objective": profile_evaluation.feature_perturbation if profile_evaluation else "",
                     "fusion_bound_objective": profile_evaluation.fusion_bound if profile_evaluation else "",
                     "learning_error_objective": profile_evaluation.system_learning_error if profile_evaluation else "",
+                    "online_j_center_norm_sq": profile_evaluation.online_j_center_norm_sq if profile_evaluation else "",
+                    "online_j_radius": profile_evaluation.online_j_radius if profile_evaluation else "",
+                    "online_j_ideal_radius": profile_evaluation.online_j_ideal_radius if profile_evaluation else "",
+                    "online_j_noise_second_moment": profile_evaluation.online_j_noise_second_moment if profile_evaluation else "",
+                    "online_j_proved_noise_floor": profile_evaluation.online_j_proved_noise_floor if profile_evaluation else "",
+                    "online_j_numeric_radius": profile_evaluation.online_j_numeric_radius if profile_evaluation else "",
+                    "online_j_lower_bound": profile_evaluation.online_j_lower_bound if profile_evaluation else "",
+                    "online_j_reference_radius": profile_evaluation.online_j_reference_radius if profile_evaluation else "",
+                    "online_j_mode_radius": profile_evaluation.online_j_mode_radius if profile_evaluation else "",
+                    "online_j_mode_variance_second_moment": profile_evaluation.online_j_mode_variance_second_moment if profile_evaluation else "",
                     "learning_proxy_source": profile_evaluation.learning_proxy_source if profile_evaluation else "",
                     "joint_mean_error_sq": profile_evaluation.joint_mean_error_sq if profile_evaluation else "",
                     "joint_variance_trace": profile_evaluation.joint_variance_trace if profile_evaluation else "",
@@ -1205,6 +1275,8 @@ def enumerate_candidates(
     # happen only after this mode-level pruning.
     # ------------------------------------------------------------
     admitted_mode_specs = []
+    if config.corrected_admission_policy and not config.strict_pair_admission:
+        raise ValueError("corrected admission policy requires explicit strict Client-Edge pair manifest")
 
     for mode, spec in MODE_SPECS.items():
         if mode in config.excluded_modes:
@@ -1219,8 +1291,23 @@ def enumerate_candidates(
             audit_exclusions[mode] = "cloud_participation_required"
             continue
 
+        if config.strict_pair_admission and config.corrected_admission_policy:
+            # Corrected strict policy only for the new experimental objective.
+            # Edge-only requires explicitly predeclared fast response (both modes).
+            if mode in {"LIE", "LIIE"} and fast_response_deadline is None:
+                audit_exclusions[mode] = "fast_response_not_required"
+                continue
+            # Client->Edge trust does not authorize Client->Cloud Split (LIC).
+            if mode == "LIC":
+                audit_exclusions[mode] = "client_cloud_split_trust_not_certified"
+                continue
+            # Do not pretend that the existing Sample-DP trusted Split route
+            # already implements no-internal-DP trusted Client--Edge Split.
+            if config.privacy_unit == "sample" and mode in {"LIE", "LIEIIC", "LIEIIIC"}:
+                audit_exclusions[mode] = "trusted_split_no_internal_dp_runtime_not_certified"
+                continue
         if config.strict_pair_admission:
-            # LIE is a Split Edge-only mode and has NO fast-client gate.
+            # Legacy V370 keeps its prior gates; online objective uses added guards.
             # LIIE is No-Split Edge-only and requires a predeclared fast
             # client with a deadline. Neither gains trust/DP by this gate.
             if mode == "LIIE" and fast_response_deadline is None:
@@ -1448,23 +1535,23 @@ def enumerate_candidates(
                             privacy_ledger,
                             SamplePrivacyLedger,
                         ):
-                            shared_sigma = (
-                                privacy_ledger
-                                .minimum_feasible_shared_noise(
-                                    planned_sample_events
-                                )
+                            shared_sigma = _sample_rdp_auto_noise_with_headroom(
+                                privacy_ledger,
+                                planned_sample_events,
                             )
                         else:
-                            sample_parameters = (
-                                resolved_sample_privacy_parameters(
-                                    config,
-                                    planned_sample_events,
-                                )
+                            # Stateless selector callers must use the same
+                            # conservative horizon rule as runtime ledgers.
+                            sample_parameters = resolved_sample_privacy_parameters(
+                                config, 0,
                             )
-                            shared_sigma = float(
-                                sample_parameters[
-                                    "optimizer_noise_multiplier"
-                                ]
+                            transient_ledger = SamplePrivacyLedger(
+                                budget=float(sample_parameters["sample_budget"]),
+                                delta=float(sample_parameters["delta"]),
+                            )
+                            shared_sigma = _sample_rdp_auto_noise_with_headroom(
+                                transient_ledger,
+                                planned_sample_events,
                             )
 
                         embedding_sigma = float(shared_sigma)
@@ -1614,8 +1701,10 @@ def enumerate_candidates(
             candidate.mode in full_local_modes
             and candidate.feasible_resource
             and candidate.feasible_memory
-            and candidate.feasible_time
-            and candidate.feasible_privacy
+            and (
+                config.corrected_admission_policy
+                or (candidate.feasible_time and candidate.feasible_privacy)
+            )
             for candidate in candidates
         )
         filtered = []
@@ -2348,7 +2437,7 @@ def choose_global_pareto_profile(
                 flow_inputs_by_candidate,
             )
             replacement_stats = None
-            if objective == "pareto" and config.pareto_neighbor_top_k > 0:
+            if objective == "pareto" and config.pareto_neighbor_top_k > 0 and config.learning_objective not in {"online_upper_bound", "online_j_oracle_diagnostic"}:
                 use_replacement_cache = (
                     config.learning_objective == "joint_calibration"
                 )
@@ -2444,7 +2533,7 @@ def choose_global_pareto_profile(
                         replacement_stats is not None
                         and objective != "latency"
                         and config.pareto_neighbor_top_k > 0
-                        and config.learning_objective != "joint_calibration"
+                        and config.learning_objective not in {"joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"}
                     )
                     else None
                 )
@@ -2714,7 +2803,7 @@ def choose_global_pareto_profile(
     # diagnostics use the same complete ProfileEvaluation objects.  Do not
     # touch the large neighbor loop: this costs at most archive_size full
     # evaluations per selection round.
-    if config.learning_objective == "joint_calibration":
+    if config.learning_objective in {"joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"}:
         archive = [
             evaluate(item.profile, profile_signature=item.profile_signature)
             for item in archive
@@ -3810,6 +3899,41 @@ def _cloud_coverage_anchor_profiles(
     return _unique_profiles(anchors)
 
 
+def _online_bound_for_profile(
+    config: SelectionConfig,
+    profile: dict[int, Candidate],
+    client_samples: dict[int, float],
+    admitted_client_ids: tuple[int, ...],
+):
+    if not config.online_bound_manifest_path:
+        raise ValueError("online-J certificate path is not configured")
+    return evaluate_online_bound(
+        manifest_path=config.online_bound_manifest_path,
+        round_index=config.online_bound_round,
+        profile=profile,
+        client_samples=client_samples,
+        admitted_client_ids=admitted_client_ids,
+        reaches_cloud=_candidate_reaches_cloud,
+    )
+
+
+def _oracle_bound_for_profile(
+    config: SelectionConfig,
+    profile: dict[int, Candidate],
+    client_samples: dict[int, float],
+    admitted_client_ids: tuple[int, ...],
+):
+    if not config.online_bound_manifest_path:
+        raise ValueError("simulator oracle J requires the current predecision snapshot")
+    return evaluate_oracle_diagnostic(
+        snapshot_path=config.online_bound_manifest_path,
+        round_index=config.online_bound_round,
+        profile=profile, client_samples=client_samples,
+        admitted_client_ids=admitted_client_ids,
+        reaches_cloud=_candidate_reaches_cloud,
+    )
+
+
 def _selection_learning_cost(
     config: SelectionConfig,
     profile: dict[int, Candidate],
@@ -3822,6 +3946,10 @@ def _selection_learning_cost(
     Fixed-admission lookahead is used for cheap seed/neighbor comparisons;
     selected neighbors are subsequently evaluated using their actual flow.
     """
+    if config.learning_objective == "online_upper_bound":
+        return _online_bound_for_profile(config, profile, client_samples, admitted_client_ids).upper
+    if config.learning_objective == "online_j_oracle_diagnostic":
+        return _oracle_bound_for_profile(config, profile, client_samples, admitted_client_ids).upper
     joint_components = _joint_calibration_learning_components(
         config,
         profile,
@@ -5488,13 +5616,26 @@ def _evaluate_profile(
     # *single* joint update-space second moment estimated from offline paired
     # clean/private calibration.  The legacy fusion+DP expression remains only
     # as an opt-in backward-compatible path and as a diagnostic fallback.
-    joint_components = _joint_calibration_learning_components(
-        config,
-        profile,
-        client_samples,
-        admitted_client_ids,
-    )
-    if joint_components is None:
+    if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"}:
+        if config.learning_objective == "online_upper_bound":
+            online = _online_bound_for_profile(config, profile, client_samples, tuple(admitted_client_ids))
+        else:
+            online = _oracle_bound_for_profile(config, profile, client_samples, tuple(admitted_client_ids))
+        system_learning_error = online.upper
+        learning_proxy_source = online.source
+        joint_mean_error_sq = 0.0
+        joint_variance_trace = 0.0
+        joint_e_alg_norm_sq = 0.0
+        joint_e_agg_norm_sq = 0.0
+        joint_bias_norm_sq = 0.0
+        joint_components = None
+    else:
+        joint_components = _joint_calibration_learning_components(
+            config, profile, client_samples, admitted_client_ids,
+        )
+    if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"}:
+        pass  # calculated from new-J; never fall back to old Fusion
+    elif joint_components is None:
         system_learning_error = fusion_bound + system_dp
         learning_proxy_source = "legacy_fusion_dp"
         joint_mean_error_sq = 0.0
@@ -5540,6 +5681,16 @@ def _evaluate_profile(
         joint_e_agg_norm_sq=joint_e_agg_norm_sq,
         joint_bias_norm_sq=joint_bias_norm_sq,
         learning_proxy_source=learning_proxy_source,
+        online_j_center_norm_sq=online.central_norm ** 2 if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_radius=online.radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_ideal_radius=online.ideal_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_noise_second_moment=online.q_aggregate if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_proved_noise_floor=online.q_aggregate_proved_floor if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_numeric_radius=online.numeric_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_lower_bound=online.lower if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_reference_radius=online.reference_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_mode_radius=online.mode_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_mode_variance_second_moment=online.mode_variance_second_moment if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
     )
 
 
@@ -8136,17 +8287,11 @@ def _estimate_candidate(
             )
             feasible_privacy = epsilon_used <= remaining_epsilon + 1e-12
 
-    risk = max(
-        (
-            OBJECT_RISK[obj] * MECHANISM_RISK[mech]
-            for link_id, mech in actual_link_mechanisms.items()
-            for obj in [_link_object(link_id, link_events)]
-            if obj in PRIVACY_RISK_OBJECTS
-            and mech != "trusted"
-        ),
-        default=0.0,
-    )
-    feasible_risk = risk <= config.risk_limit
+    # A constant 0.58 for an unprotected update is not a calibrated risk
+    # measure and must neither block valid modes nor affect ranking.  This
+    # neutral legacy field is NOT a claim of zero real privacy/security risk.
+    risk = 0.0
+    feasible_risk = True
     feasible_time = (
         True
         if fast_response_deadline is None
@@ -8212,7 +8357,7 @@ def _estimate_candidate(
         feasible_resource=feasible_resource,
         feasible_privacy=feasible_privacy,
         feasible_risk=feasible_risk,
-        risk_hard_gate=True,  # policy requirement: risk is HARD; infeasible -> SKIP
+        risk_hard_gate=False,  # no unvalidated numeric risk admission gate
         feasible_time=feasible_time,
         feasible_edge=feasible_edge,
         feasible_cloud=feasible_cloud,
