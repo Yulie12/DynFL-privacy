@@ -1,5 +1,5 @@
 {
-  "name": "paper_v31_cifar10_resnet18",
+  "name": "paper_v30_cifar10_resnet18",
   "execution_revision": "paper_flow_v31_mode_specific_privacy",
   "output_root": "out/paper_v31_cifar10_resnet18_head",
   "seeds": [
@@ -95,5 +95,9 @@
     "pareto_neighbor_top_k": 16,
     "cloud_fusion_xi": 0.2,
     "cloud_fusion_eps": 0.05
+  },
+  "learning": {
+    "objective": "online_upper_bound",
+    "online_bound_manifest_path": "certificates/REAL_cifar10_resnet18_predecision_required.json"
   }
 }

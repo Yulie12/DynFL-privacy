@@ -1,6 +1,8 @@
 # 第十一阶段：真实 DynFL 代码接入在线 J 上界（可审计中间版本）
 
 > **结论先行**：新的 `online_upper_bound` 选模目标已经接入完整 Profile/Pareto/Tchebycheff 链条，在线上界代数和候选身份检查有自动测试；**但当前还不能称为七模式正式实验**，不能拿合成证书充当真实模型证书。缺少每轮、每种实际执行 Mode 的预决策误差证书时，程序应中止。
+>
+> **版本说明**：本文件记录 v1 加性证书的接入阶段。当前正式默认是 v2 coupled 证书，公式与字段见 `docs/ONLINE_J_COUPLED_V2_ZH.md`；v1 仅作为兼容 schema 保留，二者共用 `online_upper_bound` 目标与失败关闭规则。
 
 ## 1. 新目标与数学假设
 
@@ -52,7 +54,7 @@ B_t(h)=\left|\eta_t^*-\gamma\sum_i a_iS_i(h)\right|\|g_{\rm ref}\|
 
 ## 3. 新的实验参数（来自已锁定约束）
 
-四份 `configs/stage11_*_5r_STAGING.json`：FashionMNIST / LeNet-5 全模型；CIFAR-10 / ResNet-18 Layer4+分类器，均设 5 轮、batch=256、local epochs=3、不截断 batch 数、逐样本梯度裁剪 C=3、最终更新裁剪 C=3、RDP 自动会计、HE 仅 profile 耗时。旧目标组和新目标组使用**相同的纠正准入开关**，避免混淆 Mode 准入与学习目标的影响。
+两份当前模板：`configs/stage11_fmnist_lenet5_online_5r_STAGING.json`（Fashion-MNIST / LeNet-5 全模型）与 `configs/stage11_cifar10_resnet18_layer4_online_5r_STAGING.json`（CIFAR-10 / ResNet-18 Layer4+分类器），均设 5 轮、local epochs=3、不截断 batch 数、RDP 自动会计；CIFAR 模板使用逐样本梯度裁剪 C=3，Fashion-MNIST 模板按各自配置执行。旧目标基线配置已移除。
 
 ⚠️ **本阶段只锁了配置和 batch/step 数执行接口，尚不能宣称 DP 路径符合最终正式要求。** 原训练器的 Sample-DP-SGD 仍在本地 minibatch 事件处执行噪声和会计，而你指定的是“全部本地 batch 完成后、上传之前一次生成高斯更新噪声，按真实上传次数计 RDP”。两者不等价。还需修改实际噪声放置与隐私会计，并单独审计。
 
@@ -75,21 +77,17 @@ python experiments/run_paper_config.py --config configs/stage11_cifar10_resnet18
 
 `certificates/REAL_fmnist_lenet5_5r_predecision_required.json`
 
-现在**没有替你编造这些文件**。缺失时在线目标会报错，不会退回旧的 Fusion 代理或 `joint_calibration`。
+现在**没有替你编造这些文件**。缺失时在线目标会报错。旧的 Fusion 代理、`joint_calibration` 和 oracle 诊断已移除，不存在回退路径。
 
-对照实验配置：
+在线方法：必须先提供当前真实状态的有效预决策证书，否则终止：
 
 ```powershell
-# 先做原方法基线（运行要具备真实数据集/依赖/设备）
-python experiments/run_paper_config.py --config configs/stage11_fmnist_lenet5_legacy_5r_STAGING.json
-
-# 在线方法：必须先提供当前真实状态的有效预决策证书，否则终止
 python experiments/run_paper_config.py --config configs/stage11_fmnist_lenet5_online_5r_STAGING.json
 ```
 
 **不要在补齐下面的依赖之前把此对照写成“正式实验成功”**：训练器与证书的 Mode 等效分解、参考梯度误差半径、各 Mode Momentum/多阶段/DP-SGD 预测残差、实际 SecAgg 份额协方差、以及与真实发布次数一致的 RDP 隐私会计。
 
-## 5. 证书 JSON 格式（教学演示，不是生产证书）
+## 5. 证书 JSON 格式（v1 兼容 schema；教学演示，不是生产证书）
 
 ```json
 {

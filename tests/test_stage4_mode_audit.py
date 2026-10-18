@@ -60,11 +60,13 @@ def test_search_pool_reports_clients_separately_from_candidate_count():
     assert audit["LIIC"] == {"candidates": 0, "clients": 0}
 
 
-def test_cloud_both_branches_preserve_audit_and_final_counts():
+def test_cloud_both_branches_preserve_audit_and_final_counts(synthetic_online_bound):
     config = SelectionConfig(
         cloud_dp_plan="pareto", num_clients=2, num_edges=2,
         omega_update_dimension=4., omega_update_clip_norm=.25,
         pareto_max_iters=1, pareto_archive_size=8,
+        learning_objective="online_upper_bound",
+        online_bound_manifest_path="certificates/test_synthetic_online.json",
     )
     base = c("LIIEIIIC", "dp_he3")
     selected = [(i, base, [base], 8.) for i in (0, 1)]

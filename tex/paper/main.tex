@@ -89,27 +89,39 @@
 
 \title{Dynamic Cloud-Edge-End Collaboration Reconfiguration for Federated Learning under Resource and Privacy Constraints}
 
-\author[bupt]{Tingting Yang}
-\author[bupt]{Wenbo Zhang}
-\author[bupt]{Shaohua Liu}
-\author[bupt]{Lihua Zhang}
-\author[bupt]{Xinyuan Lin}
-\author[bupt]{Qian Liu}
+\author[bupt1,bupt2,bupt3]{Tingting Yang}
+\author[bupt1,bupt2,bupt3]{Wenbo Zhang}
+\author[bupt1,bupt2,bupt3]{Shaohua Liu}
+\author[bupt1,bupt2,bupt3]{Lihua Zhang}
+\author[bupt1,bupt2,bupt3]{Xinyuan Lin}
+\author[bupt1,bupt2,bupt3]{Qian Liu}
 
-\affiliation[bupt]{organization={Beijing University of Posts and Telecommunications},
-            city={Beijing},
-            country={China}}
+\affiliation[bupt1]{
+    organization={School of Mathematical Sciences, Beijing University of Posts and Telecommunications},
+    city={Beijing},
+    country={China}
+}
+
+\affiliation[bupt2]{
+    organization={State Key Laboratory of Information Photonics and Optical Communications (Beijing University of Posts and Telecommunications)},
+    city={Beijing},
+    country={China}
+}
+
+\affiliation[bupt3]{
+    organization={Key Laboratory of Mathematics and Information Networks (Beijing University of Posts and Telecommunications), Ministry of Education},
+    city={Beijing},
+    country={China}
+}
 
 \begin{abstract}
-Hierarchical federated learning reduces direct cloud communication, but a fixed training workflow cannot accommodate heterogeneous devices or changing cloud-edge-end conditions.
- This paper studies dynamic collaboration reconfiguration for federated learning. 
- The execution and aggregation path is selected from seven cloud-edge-end collaboration modes according to the current system state.
- A mode first determines the objects to transmit and their communication paths. Privacy protection is then assigned according to the resulting risk.
-The noise multiplier is calibrated per client according to its accumulated privacy loss and the number of remaining training rounds, so that the privacy budget is consumed appropriately across the whole training process.
-Feasible global profiles are evaluated based on system latency and DP
-perturbation cost. They are then filtered by Pareto dominance and selected
-using the Chebyshev ideal point criterion. 
-Experiments on CIFAR-10 with ResNet-18 and on Fashion-MNIST with LeNet-5 examine the effects of dynamic collaboration and dynamic privacy calibration under heterogeneous resource and data conditions.
+Hierarchical federated learning enables cloud-edge-end collaborative training, but fixed execution and aggregation schemes are insufficient to adapt to heterogeneous and dynamic conditions.
+To address this challenge, a dynamic collaboration reconfiguration framework is proposed.
+The framework selects collaboration modes according to the current system state and considers execution paths and aggregation strategies.
+Moreover, a pre-decision online certificate bound on the joint learning error is composed from client- and mode-specific certificates, accounting for incomplete global fusion and update perturbation.
+The certified upper bound and system latency are jointly considered as optimization objectives; if a valid pre-decision certificate is unavailable, the formal decision fails closed.
+Feasible collaboration profiles are filtered by Pareto dominance and selected using the Chebyshev ideal point criterion.
+An evaluation protocol on CIFAR-10 with ResNet-18 and Fashion-MNIST with LeNet-5 is specified under heterogeneous resource and data conditions; formal runs require valid pre-decision certificates.
 \end{abstract}
 
 \begin{keyword} 
@@ -119,144 +131,112 @@ Internet of Things \sep hierarchical federated learning \sep cloud-edge-end coll
 \end{frontmatter}
 \section{Introduction}
 \label{sec:introduction}
-Federated learning (FL) enables multiple end devices to train a shared model
-without transferring their raw data to a central server~\cite{fedavg}. In AIoT
-systems, however, participating devices differ substantially in computation,
-memory, communication quality, and local data distribution. Cloud-edge-end
-hierarchical federated learning (HFL) introduces edge servers between end devices
-and the cloud, reducing communication over long distances and providing additional computation and aggregation capacity~\cite{hfl}.
+Federated learning (FL) enables multiple end devices to collaboratively train a shared model without transferring raw data to a central server~\cite{fedavg,ZHAO2026108518}. In AIoT systems, however, participating devices differ substantially in computational capability, memory capacity, communication quality, and local data distribution. Cloud-edge-end hierarchical federated learning (HFL) introduces edge servers between end devices and the cloud, providing intermediate aggregation and computation capabilities while reducing direct communication with the cloud~\cite{hfl,FLaTEC2026,yang2026hierarchical}.
 
-Two forms of heterogeneity make a fixed cloud-edge-end collaboration procedure
-difficult to use across all clients and rounds. First, non-IID data can cause
+Data and system heterogeneity can limit the effectiveness of fixed cloud-edge-end collaboration schemes across clients and training rounds. First, non-IID data can cause
 local updates to drift in different directions and can degrade simple weighted
-aggregation~\cite{fedavgm,fedprox}.
+aggregation~\cite{fedavgm,fedprox,scaffold,khan2026accelerating,11214447}.
 Second, system capabilities are heterogeneous. A weak end device may be unable
 to handle the same workload or meet the same deadline as a stronger device,
-whereas an edge or cloud server can undertake more computation~\cite{wang2019adaptivefl}.
+whereas an edge or cloud server can undertake more computation~\cite{wang2019adaptivefl,FAN2026108249}.
 A mode that suits one client in one round may be inefficient or infeasible
 for the same client in another round, or for another client.
 
 Existing work on HFL and cloud-edge-end collaboration has covered personalization,
 resource allocation, wireless scheduling, heterogeneous models, and split
-training~\cite{Personalizedhfl,JSJX202502007,dinh2021wirelessfl,BSBODP,mazloomi2025multiserver,SFETEC}.
-However, most of these methods optimize a training workflow under a fixed
-hierarchy~\cite{wang2019adaptivefl}. In a cloud-edge-end system, a fixed hierarchy
-mismatches the actual condition of each round. A weak device may be assigned a
-task it cannot finish, while a strong edge server may sit idle.
+training~\cite{Personalizedhfl,JSJX202502007,dinh2021wirelessfl,BSBODP,mazloomi2025multiserver,SFETEC,11185336,YAO2026108495}.
+These studies address different aspects of collaborative training. However, dynamically selecting execution and aggregation configurations according to individual client capabilities and changing system conditions remains an important problem.
 
-The collaboration mode determines what privacy protection is needed. Some updates are visible to the cloud and may reveal client information. Others are aggregated in encrypted form and must stay hidden from the aggregator. No single privacy mechanism fits all modes. We therefore use differential privacy (DP)~\textcolor{red}{[ref needed]}
-for updates visible to the cloud, homomorphic encryption (HE)~\textcolor{red}{[ref needed]}
-for encrypted aggregation, and keep raw training samples on end devices.
+Different collaboration modes may expose different intermediate information, which affects the choice of protection mechanisms. In this work, differential privacy (DP)~\cite{dwork2006calibrating,mironov2017rdp,11267456} is considered for visible updates, while homomorphic encryption (HE)~\cite{cheon2017ckks,11372457} is considered for encrypted aggregation.
 
-This coupling creates a problem that involves system efficiency, learning
-quality, and privacy. Changing the collaboration mode affects where computation is executed, how updates travel, when aggregation happens, and which updates are visible to which party. These choices interact. DP noise directly affects the perturbation cost of protected model
-updates, while the remaining privacy budget limits future protected
-releases. Figure~\ref{fig:balance} illustrates this interaction.
-\begin{figure}[!t]
-\centering
-\includegraphics[width=0.78\columnwidth]{balance.png}
-\caption{Tradeoff among privacy, utility, and efficiency.}
-\label{fig:balance}
-\end{figure}
+Changing a collaboration mode affects computation placement, communication paths, aggregation, and the resulting global update. These changes influence system latency and learning behavior. To evaluate their effects, system latency and a pre-decision upper bound on the joint learning error are considered. The bound accounts for reference-update deviation, aggregation deviation, and privacy perturbation, and is evaluated from certificates available before training. Resource and protection requirements are treated as feasibility constraints.
 
 This paper studies reconfiguration of cloud-edge-end federated learning at each
-selection round under heterogeneous resources and evolving privacy state. For
+selection round under heterogeneous resources and changing system conditions. For
 each client, the system evaluates feasible collaboration and protection profiles
 under current conditions rather than using one fixed workflow for all clients.
 The main contributions are as follows.
 \begin{itemize}
-    \item We define an execution space with seven cloud-edge-end collaboration modes,
-    including edge only, direct cloud, and edge to cloud training and aggregation
-    paths. Each client selects its own mode in each round, and the mode determines
-    its actual communication and aggregation topology.
-    \item We cast the selection as a multiobjective optimization that balances system latency and a theoretically derived learning error objective under resource and privacy constraints. The learning error objective jointly captures incomplete global fusion and DP-induced update perturbation.
+    \item A dynamic collaboration configuration space for cloud-edge-end federated learning is formulated, which enables execution and aggregation configurations to be selected according to current system conditions.
+
+    \item A pre-decision online certificate bound on the joint learning error is formulated for each collaboration profile. The bound composes certified ideal-reference and mode radii with aggregate-noise second moments, requires no offline paired clean/private calibration, and is fail-closed when the required evidence is missing. Together with system latency, it forms an optimization problem with two objectives under resource and protection constraints. Feasible configurations are compared using Pareto dominance, and the final configuration is selected using the Chebyshev ideal point criterion.
 \end{itemize}
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:related_work} reviews related studies
+on hierarchical federated learning and cloud-edge-end
+collaboration.
+Section~\ref{sec:model} introduces the system model
+and formulates the latency and learning error objectives
+under resource and privacy constraints.
+Section~\ref{sec:algorithm} presents the proposed
+dynamic collaboration selection algorithm.
+Section~\ref{sec:experiment} evaluates its performance
+through experiments.
+Finally, Section~\ref{sec:conclusion} concludes the paper.
 
 \section{Related Work}
 \label{sec:related_work}
 \subsection{HFL Under Heterogeneous Environments}
-HFL introduces edge servers between end devices and the cloud to reduce direct cloud communication pressure through edge pre aggregation~\cite{hfl}.
-Resource aware FL studies reduce stragglers and communication overhead by adjusting client selection, local update frequency, pruning, and model compression under limited computation, energy, and bandwidth resources~\cite{phfl,xu2022adaptive,wang2019adaptivefl,dinh2021wirelessfl}.
-Personalized HFL further mitigates performance degradation under non-IID data through edge side personalized models, similarity aggregation, and model decoupling~\cite{Personalizedhfl,JSJX202502007}.
-These methods show that HFL can improve training from resource scheduling, communication control, and data heterogeneity adaptation.
-However, when end device resources differ across computation, memory, and communication capabilities, using the same training flow for all clients can still cause straggler blocking in conventional synchronous aggregation and prevent weak devices from participating effectively.
-This paper jointly considers end device computation constraints, memory constraints, communication overhead, and model split positions during collaboration reconfiguration.
-Dynamic selection improves flexibility, but reevaluating every round may incur
-excessive switching cost. Recent FL studies reduce this cost by keeping the
-selected client set unchanged over several rounds~\cite{CHEN2026112204,10757319}.
-Our framework introduces a strategy selection period parameter to control
-switching cost.
+Existing HFL studies use edge servers for intermediate aggregation between end devices and the cloud~\cite{hfl}. Research on resource management in FL has investigated model pruning under bandwidth and device constraints~\cite{phfl}, adaptive local update frequency and model compression~\cite{xu2022adaptive,wang2019adaptivefl}, and wireless resource allocation~\cite{dinh2021wirelessfl}. Personalized FL and HFL studies have addressed data heterogeneity through client clustering, shared representations, and personalized model components~\cite{sattler2020clustered,collins2021exploiting,Personalizedhfl}. These studies address different aspects of heterogeneous federated training, including resource management, communication efficiency, and model personalization.
+
+Beyond these aspects, heterogeneous device capabilities and changing system conditions can also affect how computation and aggregation are organized across the cloud, edge, and end layers. In this work, a collaboration configuration specifies where model computation is performed, how updates are transmitted, and where aggregation takes place. Different clients may use different configurations, and their configurations may be reconsidered as system conditions change. Since frequent reevaluation incurs computational overhead, we use a configurable selection period to determine when configurations are reevaluated. Related studies have also considered the cost of frequent changes in FL
+scheduling decisions and reduced such overhead by maintaining selected client
+sets over multiple rounds~\cite{CHEN2026112204,10757319}.
 
 \subsection{Cloud-Edge-End Collaborative Federated Learning}
 
-HFL is a representative form of cloud-edge-end collaborative FL, in which end
-devices, edge nodes, and the cloud jointly execute computation, aggregation, and
-communication tasks.
-As model size and system heterogeneity increase, a fixed scheme where end
-devices train the full model and the edge aggregates the updates becomes less
-suitable for IoT devices with limited resources.
-FedAgg~\cite{BSBODP} uses bridge samples and online distillation to enable
-models of different scales at the end, edge, and cloud layers to collaborate.
-SFETEC~\cite{SFETEC} introduces split federated learning into Thing Edge Cloud
-environments and partitions model computation across layers to reduce the
-computation load of end devices.
-Cloud-edge-end task offloading studies also combine FL, privacy protection, and
-task efficiency~\cite{dong2026privacyoffloading}.
-These studies show the value of collaboration among the three layers, but they
-usually assume a fixed collaboration structure.
-In contrast, this paper studies how each device should select a collaborative
-mode under given resource and privacy conditions.
+Cloud-edge-end collaborative FL distributes computation, communication, and aggregation tasks across end devices, edge servers, and the cloud. Different studies have explored how these tasks can be organized. FedAgg~\cite{BSBODP} employs bridge samples and online distillation to support collaboration among models of different sizes across the three layers. SFETEC~\cite{SFETEC} investigates split federated learning in Thing Edge Cloud environments, allowing model computation to be distributed across layers. Related task offloading research has also considered federated learning, privacy protection, and task efficiency in cloud-edge-end systems~\cite{dong2026privacyoffloading}. While these studies investigate different collaborative mechanisms, this work focuses on selecting feasible execution and aggregation configurations for individual clients under changing system conditions.
 
-The need to balance reconfiguration gain and reconfiguration cost is also
-consistent with edge computing task migration studies. In mobile edge computing,
-migration can reduce service delay when users move away from the original edge
-server, but it also consumes backhaul transmission and reconfiguration
-resources~\cite{ZHANG2019111}. Task migration that accounts for load further
-models migration cost as a combination of communication, queuing, and
-computation costs, and notes that migration cost can be related to the physical
-distance between edge nodes~\cite{ZHU2024303}. These studies suggest that
-dynamic cloud-edge-end collaboration should account for both the benefit of
-changing execution paths and the overhead caused by such changes.
+Task migration in mobile edge computing provides a related perspective on adapting execution placement to changing system conditions. Zhang and Zheng~\cite{ZHANG2019111} investigate task migration decisions under user mobility, while Zhu et al.~\cite{ZHU2024303} study load aware task migration for balancing workloads across edge nodes. Although task migration differs from federated learning collaboration reconfiguration, these studies illustrate the importance of adapting execution placement to system conditions.
+
 
 \subsection{Privacy Preserving HFL}
 Model parameters, gradients, and intermediate representations in federated
-training may leak information about private data.
-Differential privacy (DP), homomorphic encryption (HE), and secure aggregation
-are therefore widely used in FL.
+training may leak information about private data~\cite{zhu2019dlg}.
+Differential privacy (DP) and homomorphic encryption (HE) are widely used
+privacy protection techniques in FL~\cite{dwork2006calibrating,cheon2017ckks}.
 For HFL, group local DP provides personalized privacy through sampling,
 randomized response, and shuffling~\cite{GLDP}.
-Adaptive DP FL improves convergence and model utility through dynamic privacy
-budget allocation, adaptive clipping, and client selection~\cite{xu2025adpfl}.
-Other HFL studies with privacy protection combine per client differential
-privacy, secure aggregation, and HE based on CKKS for data sharing
-scenarios~\cite{PPHFL}.
+Adaptive DP FL studies have explored dynamic privacy budget allocation,
+adaptive clipping, and client selection for adjusting privacy protection
+during training~\cite{xu2025adpfl}.
+Other HFL studies combine DP based protection and CKKS based HE for privacy
+preserved data sharing scenarios~\cite{PPHFL}.
 Related fog FL studies combine hierarchical aggregation, personalization, and DP
 for IoT intrusion detection~\cite{islam2025pphffl}.
 These studies mainly focus on the security guarantee, budget allocation, or
 accuracy degradation of a particular privacy mechanism.
-The joint modeling of privacy-induced communication overhead, computation
-latency, DP perturbation, and cloud-edge-end collaboration reconfiguration
-has not been sufficiently studied.
+These studies mainly focus on the design, analysis, or adaptation of individual
+privacy mechanisms. In this work, privacy requirements are considered jointly
+with execution and aggregation configuration selection in cloud-edge-end
+federated learning.
 
-This paper jointly reconfigures the complete federated learning workflow.
+This paper jointly considers execution, aggregation, and protection
+configuration in federated learning.
 Existing categories optimize selected resources, training steps, or privacy
-parameters within a prescribed collaboration structure. The proposed
-collaboration space makes complete workflows with different execution
-locations, aggregation paths, transmitted objects, and privacy mechanisms
-comparable under one feasible decision model.
+parameters within a prescribed collaboration structure. The proposed collaboration space enables different execution locations,
+aggregation paths, transmitted objects, and privacy mechanisms to be compared
+within one feasible decision model.
 \section{Model Construction}
 \label{sec:model}
 \subsection{Collaborative Mode and Transmission Modeling}
 \label{sec:link_model}
 
-The proposed system is a cloud-edge-end collaborative federated learning architecture with end devices, edge nodes, and one cloud node. Let \(N\) be the number of end devices. Each admitted client \(i\) can execute its own mode \(h_i^t\) in communication round \(t\). This mode specifies the execution, communication, and aggregation path within the cloud-edge-end federated learning process.
+We consider a three-tier federated learning system
+consisting of \(N\) clients, a set of edge servers,
+and a central cloud server. Each client \(i\) is
+associated with an edge server \(e(i)\). At round
+\(t\), the system assigns a collaboration mode
+\(h_i^t\in\mathcal H\) to each participating client,
+allowing training and aggregation to be organized
+across different tiers.
 
 \textbf{Collaboration interfaces.}
-As shown in Fig.~\ref{fig:collaboration_graph}, we define three collaboration
-interfaces based on where communication occurs across tiers in the training process. Interface I supports split training, where the Local tier exchanges
+As shown in Fig.~\ref{fig:collaboration_graph}, based on the information of where communication occurs across tiers in training process, three collaboration interfaces are defined. Interface I supports split training, where the Local tier exchanges
 intermediate information with the Edge or Cloud tier during training.
 Interface II submits a model update to the Edge or Cloud for aggregation
-after a training stage. Interface III submits an aggregated Edge update to
+after local training. Interface III submits an aggregated Edge update to
 the Cloud after Edge aggregation.
 \begin{figure}[t]
     \centering
@@ -361,86 +341,121 @@ the Cloud after Edge aggregation.
     cloud-edge-end architecture.}
     \label{fig:collaboration_graph}
 \end{figure}
-Following these interfaces, we define seven client level collaboration modes:
+Let L, E and C denote the Local, Edge and Cloud, respectively. Let I, II and III indicate three interfaces. Seven client-level collaboration models are considered in this study and they are collected in the set \(\mathcal H\):
 \begin{equation}
 \mathcal H=
 \{\mathrm{LIE},\mathrm{LIIE},\mathrm{LIC},\mathrm{LIIC},
 \mathrm{LIEIIC},\mathrm{LIEIIIC},\mathrm{LIIEIIIC}\}.
 \label{eq:seven_modes}
 \end{equation}
-For example, LIE (\(L\)-I-\(E\)) splits the model between the Local and
-Edge tiers for split training. LIEIIC further submits the resulting Edge update to the Cloud through Interface II.
-LIEIIIC (\(L\)-I-\(E\)-III-\(C\)) extends LIE with repeated Edge
-aggregation stages before forwarding the Edge update to the Cloud.
+For instance, LIE (\(L\)-I-\(E\)) enables split
+training between the Local and Edge tiers,
+whereas LIEIIC (\(L\)-I-\(E\)-II-\(C\)) additionally forwards the resulting
+update from the Edge to the Cloud through
+Interface II. In LIEIIIC
+(\(L\)-I-\(E\)-III-\(C\)), split training and
+Edge aggregation are repeated before the
+aggregated Edge update is transmitted to the
+Cloud through Interface III.
 
-Given the current model state \(M^t\), split modes execute the corresponding
-model blocks across tiers, denoted by \(M_L^{h_i}\), \(M_E^{h_i}\), and
-\(M_C^{h_i}\) when present. Local update modes instead complete the training
-stage at the end device before submitting a model update to the next
-aggregation tier. Raw training samples remain on the end device in every mode.
+
+Under split training modes, the model is partitioned
+across the participating tiers, with
+\(M_L^{h_i^t}\), \(M_E^{h_i^t}\), and
+\(M_C^{h_i^t}\) denoting the sets of model
+parameters assigned to the Local, Edge, and Cloud
+tiers, respectively.
+Here, \(|M_k^{h_i^t}|\) represents the number
+of model parameters deployed at tier
+\(k\in\{L,E,C\}\).
+The relative parameter counts characterize the
+model placement distribution, whose variation
+across consecutive rounds is used to approximate
+the redistribution overhead caused by
+collaboration mode switching.
+
+In contrast, local training modes
+perform model training on the client before
+transmitting the resulting update for aggregation.
+Split execution is admitted only when
+the participating remote training tier
+is trusted and satisfies the required
+resource constraints. Under this trust
+assumption, intermediate activations
+and backward gradients exchanged with
+that tier do not require additional
+DP perturbation.
+In all seven modes, raw training data remain
+on the client.
 
 \subsubsection{Collaborative Link Blocks and Mode Flows}
-A collaborative link block represents the basic training unit performed by a
-client within one collaboration stage. We consider two types of blocks.
-For client \(i\) in round \(t\), let
-\begin{equation}
-N_i^t
-=
-E_i^t
-\left\lceil
-\frac{|\mathcal D_i^t|}{B_i^t}
-\right\rceil,
-\label{eq:split_interaction_count}
-\end{equation}
-where \(E_i^t\) is the number of local epochs, \(|\mathcal D_i^t|\) is the
-number of local training samples, and \(B_i^t\) is the minibatch size. Thus
-\(N_i^t\) is the workload-derived number of optimizer steps and, for a split
-mode, the number of interactive split exchanges in one collaboration stage.
-A split training block \(S_{Lr}(N_i^t)\), \(r\in\{E,C\}\), performs these
-steps jointly between the Local tier and tier \(r\) through split interaction.
-A local training block \(T_L(N_i^t)\) performs the same local workload entirely
-at the Local tier and produces one model update for subsequent aggregation.
-The optimizer workload and the number of network releases are therefore kept
-conceptually separate: split modes communicate once per split step, whereas
-update-submission modes communicate the resulting update after the local
-training block.
+We characterize each collaboration mode using
+two basic training blocks. Let \(L_B\) be the number of training steps in each block. The split training
+block \(S_{Lr}(L_B)\), where \(r\in\{E,C\}\),
+represents \(L_B\) training steps performed
+jointly by the Local tier and the Edge or
+Cloud tier through split learning. The local
+training block \(T_L(L_B)\) represents
+\(L_B\) training steps performed entirely
+at the Local tier, followed by the generation
+of a model update for aggregation.
 
-A collaborative link flow describes how the training blocks, update
-transmissions, and aggregation stages are connected under a collaboration
-mode. Let \(A_E\) and \(A_C\) denote aggregation at the Edge and Cloud,
-respectively. For hierarchical modes, \(E_B\) denotes the number of repeated
-Edge stages before the Edge update is submitted to the Cloud.
+The collaboration flow of each mode specifies
+the sequence of training, update transmission,
+and aggregation. Let \(A_E\) and \(A_C\)
+denote Edge and Cloud aggregation, respectively.
+For hierarchical modes, \(E_B\) denotes the
+number of Edge-level training and aggregation
+stages performed before the aggregated update
+is forwarded to the Cloud.
 
-With these definitions, the seven mode flows are
+With these definitions, seven mode flows can be represented by the following procedures, where "\(\to\)" is used to denote direction of data transmition, "upd" means the data updating process is involved in data transmition:
 \begin{equation}
 \begin{aligned}
 \mathrm{LIE}:~~&
-S_{LE}(N_i^t) \rightarrow A_E,\\
+S_{LE}(L_B) \rightarrow A_E,\\
 \mathrm{LIIE}:~~&
-T_L(N_i^t) \xrightarrow{L\to E:\mathrm{upd}} A_E,\\
+T_L(L_B) \xrightarrow{\mathrm{upd}} A_E,\\
 \mathrm{LIC}:~~&
-S_{LC}(N_i^t) \rightarrow A_C,\\
+S_{LC}(L_B) \rightarrow A_C,\\
 \mathrm{LIIC}:~~&
-T_L(N_i^t) \xrightarrow{L\to C:\mathrm{upd}} A_C,\\
+T_L(L_B) \xrightarrow{\mathrm{upd}} A_C,\\
 \mathrm{LIEIIC}:~~&
-S_{LE}(N_i^t)
-\xrightarrow{E\to C:\mathrm{upd}} A_C,\\
+S_{LE}(L_B)
+\xrightarrow{\mathrm{upd}} A_C,\\
 \mathrm{LIEIIIC}:~~&
-\bigl[S_{LE}(N_i^t)\rightarrow A_E\bigr]^{E_B}
-\xrightarrow{E\to C:\mathrm{upd}} A_C,\\
+\bigl[S_{LE}(L_B)\rightarrow A_E\bigr]^{E_B}
+\xrightarrow{\mathrm{upd}} A_C,\\
 \mathrm{LIIEIIIC}:~~&
 \bigl[
-T_L(N_i^t)
-\xrightarrow{L\to E:\mathrm{upd}} A_E
+T_L(L_B)
+\xrightarrow{\mathrm{upd}} A_E
 \bigr]^{E_B}
-\xrightarrow{E\to C:\mathrm{upd}} A_C .
+\xrightarrow{\mathrm{upd}} A_C .
 \end{aligned}
 \label{eq:mode_flows}
 \end{equation}
-Figure~\ref{fig:eecblockflow} illustrates the execution structure of the seven collaboration modes, with each subfigure showing one mode.
-Orange links represent collaborative link block execution, with each block containing the workload-derived \(N_i^t\) training steps.
-Green links represent execution at the Edge stage in hierarchical modes. This execution is repeated \(E_B\) times before the resulting Edge update is forwarded to the Cloud.
-Black self loops represent the final aggregation at the corresponding aggregation node. Black arrows represent update forwarding and model return paths among end devices, Edge nodes, and the Cloud. These flows determine the structure of the directed payload transmissions \(\mathcal X_i^t(h)\) presented below.
+
+Figure~\ref{fig:eecblockflow} illustrates
+the training and aggregation processes of
+the seven collaboration modes.
+Filled circles, hollow circles, and hollow
+diamonds represent the Local, Edge, and Cloud
+tiers, respectively.
+Solid arrows and hatched regions indicate
+training interactions under split training
+modes, while dashed arrows represent the
+transmission of model updates and the return
+of model parameters.
+Circular arrows represent aggregation operations.
+The notation \(L_B\) denotes the number
+of training steps in each training block,
+while \(E_B\) denotes the number of repeated
+training and aggregation stages at the Edge
+in LIEIIIC and LIIEIIIC.
+These processes are used to define the
+transmission set \(\mathcal X_i^t(h)\)
+introduced below.
 
 \begin{figure*}[t]
 \centering
@@ -449,86 +464,29 @@ Black self loops represent the final aggregation at the corresponding aggregatio
 \label{fig:eecblockflow}
 \end{figure*}
 
-\subsubsection{Mode Induced Transmission and Protection}
-\begin{definition}[Transmission set induced by a mode]
-For device \(i\), round \(t\), and collaboration mode \(h\), define
-\begin{equation}
-\mathcal X_i^t(h)
-=
-\left\{
-(u,v,b,n)
-\;\middle|\;
-(u,v,b)\text{ occurs }n\text{ times under }h
-\right\}.
-\label{eq:transmission_set}
-\end{equation}
-Here \(u,v\in\{L,E,C\}\), \(b\in\mathcal B\), and \(n\) is the multiplicity of the directed transmission in one complete mode flow.
-The payload set is
-\begin{equation*}
-\mathcal B=
-\{\mathrm{emb},\mathrm{logits},\mathrm{grad},
-\mathrm{emb\_grad},\mathrm{upd}\}.
-\end{equation*}
-The five payload types have the following meanings.
-\(\mathrm{emb}\) is the intermediate representation produced by the local model block.
-\(\mathrm{logits}\) is the prediction output returned by the remote model block.
-\(\mathrm{grad}\) is the loss gradient with respect to the returned logits.
-\(\mathrm{emb\_grad}\) is the gradient with respect to the transmitted embedding.
-\(\mathrm{upd}\) is a model update used for aggregation or model state synchronization.
-Thus \(\mathcal X_i^t(h)\) describes the physical communication events induced by mode \(h\).
-\end{definition}
-The transmission set \(\mathcal X_i^t(h)\) identifies the directed payload transmissions to which the protection requirements are applied. For each such transmission, define the protection map
-\[
-\pi_i^{t,h}(u,v,b)
-\in
-\{\mathrm{none},\mathrm{HE},\mathrm{DP},\mathrm{HE{+}DP}\},
-\]
-where \(\mathrm{none}\) denotes plaintext transmission, while \(\mathrm{HE}\), \(\mathrm{DP}\), and \(\mathrm{HE{+}DP}\) denote homomorphic encryption, differential privacy, and their combination, respectively. The value of \(\pi_i^{t,h}(u,v,b)\) is determined by the protection requirement associated with the corresponding transmission. Thus \(\pi_i^{t,h}\) is induced by the candidate mode \(h\) and its transmission requirements rather than being an independent decision variable.
-
-Among these transmissions, those assigned a mechanism that uses DP generate formal privacy accounting events. These events are defined in the next subsection.
 
 \subsection{Lifetime Privacy Accounting}
 \label{sec:privacy_model}
 
-The privacy cost of a collaboration mode depends on the update
-transmissions that use DP protection. For candidate mode \(h_i\), we define
-\begin{equation}
-\begin{aligned}
-\mathcal D_i^t(h)
-=
-\bigl\{
-&(u,v,b,n)\in\mathcal X_i^t(h)
-\;\bigm|\;
-b=\mathrm{upd},\\
-&\pi_i^{t,h}(u,v,b)
-\in\{\mathrm{DP},\mathrm{HE{+}DP}\}
-\bigr\}.
-\end{aligned}
-\label{eq:dp_exposures}
-\end{equation}
-Thus, \(\mathcal D_i^t(h)\) contains the DP protected update
-transmissions of device \(i\) under mode \(h\).
+Sample-level differential privacy~\cite{dwork2014the}
+is enforced through Gaussian mechanisms~\cite{abadi2016deep}
+during private training and on protected
+cross-tier releases, as required by the
+selected collaboration mode. For each client,
+R\'enyi differential privacy (RDP)~\cite{mironov2017renyi}
+is used to accumulate privacy loss across
+training rounds. Let \(\mathcal A\) denote
+the set of R\'enyi orders~\cite{vanerven2014renyi}. For a Gaussian
+mechanism with noise multiplier \(\sigma\),
+the RDP cost at order \(\alpha\in\mathcal A\)
+is \(\rho(\alpha,\sigma)=\alpha/(2\sigma^2)\).
 
-For each client, we use R\'enyi differential privacy (RDP)
-accounting~\cite{mironov2017renyi,wang2019subsampled} to accumulate the
-privacy cost of these events across training rounds. Let
-\(\mathcal A\) denote the set of R\'enyi orders used by the accountant.
-For a Gaussian DP event with noise multiplier \(\sigma\), its RDP cost at
-order \(\alpha\in\mathcal A\) is
-\begin{equation}
-\rho(\alpha,\sigma)
-=
-\frac{\alpha}{2\sigma^2}.
-\label{eq:rdp_event_cost}
-\end{equation}
-A larger noise multiplier therefore results in a smaller RDP cost for the
-released update.
 
-Let \(\Phi_i^t(\alpha)\) denote the accumulated RDP cost of device \(i\)
-at the beginning of round \(t\). If \(m_i^t\) DP events are released in
-round \(t\), with noise multipliers
-\(\sigma_{i,1}^t,\ldots,\sigma_{i,m_i^t}^t\), the privacy state is updated
-by
+Let \(m_i^t\) denote the number of Gaussian
+mechanisms applied to client \(i\) in round
+\(t\), with corresponding noise multipliers
+\(\sigma_{i,k}^t\).
+The accumulated RDP cost can be calculated as
 \begin{equation}
 \Phi_i^{t+1}(\alpha)
 =
@@ -538,11 +496,8 @@ by
 \rho(\alpha,\sigma_{i,k}^t).
 \label{eq:rdp_update}
 \end{equation}
-Hence, privacy loss is accumulated only from DP events that are actually
-released.
-
-For a given \(\delta\), the accumulated RDP state is converted to the
-corresponding privacy loss as
+For a given privacy parameter \(\delta\),
+the corresponding privacy loss is
 \begin{equation}
 \epsilon_i^t
 =
@@ -554,152 +509,175 @@ corresponding privacy loss as
 \right].
 \label{eq:rdp_to_dp}
 \end{equation}
-The privacy requirement over the complete training process is
+Let \(\bar{\epsilon}\) denote the lifetime
+privacy budget of each client. The accumulated
+privacy loss must satisfy
+\(\epsilon_i^t\leq\bar{\epsilon}\)
+throughout training process.
+
+For client \(i\) and candidate mode \(h\),
+let \(N_i^t(h)\) denote the approximate
+number of Gaussian mechanisms over the
+remaining training rounds, based on the selected mode flow and
+the planned Gaussian operations in
+its minibatch training schedule.
+Let \(R\) denote the total number of
+training rounds. For example, in LIIEIIIC mode,
+with one DP-SGD mechanism per training step.
+
+For \(N_i^t(h)>0\), the noise multiplier
+\(\sigma_i^t(h)\) is calibrated to satisfy
 \begin{equation}
-\epsilon_i^t
-\le
-\bar{\epsilon}.
-\label{eq:lifetime_privacy_constraint}
+\min_{\alpha\in\mathcal A}
+\left[
+\Phi_i^t(\alpha)
++
+\frac{N_i^t(h)\alpha}
+{2[\sigma_i^t(h)]^2}
++
+\frac{\log(1/\delta)}{\alpha-1}
+\right]
+\leq\bar{\epsilon}.
+\label{eq:noise_calibration}
+\end{equation}
+The smallest feasible multiplier is selected.
+If calibration is infeasible, the candidate
+mode is excluded. No calibration is required
+when \(N_i^t(h)=0\).
+
+For Edge group \(g\), the noise multiplier
+is defined as
+\begin{equation}
+\sigma_g^t=\max_{i\in\mathcal G_g}\sigma_i^t(h_i^t)
 \end{equation}
 
-The required noise level depends on how many DP events a candidate mode
-may generate during the remaining training rounds. For candidate mode
-\(h\), the number of DP events generated in one round is
-\begin{equation}
-n_{i,h}^{t,\mathrm{DP}}
-=
-\sum_{(u,v,b,n)\in\mathcal D_i^t(h)} n.
-\label{eq:dp_events_per_round}
-\end{equation}
-There are \(R-t+1\) rounds remaining, including the current round.
-Using the current candidate mode to determine the number of DP events per
-round, the number considered for the remaining training process is
-\begin{equation}
-N_{i,h}^{t,\mathrm{plan}}
-=
-n_{i,h}^{t,\mathrm{DP}}(R-t+1).
-\label{eq:planned_update_events}
-\end{equation}
-
-When \(n_{i,h}^{t,\mathrm{DP}}>0\), the noise multiplier
-\(\sigma_{i,h_i}^t\) is numerically selected using the current RDP state
-\(\{\Phi_i^t(\alpha)\}_{\alpha\in\mathcal A}\), the planned number of DP
-events \(N_{i,h}^{t,\mathrm{plan}}\), and the privacy target
-\((\bar{\epsilon},\delta)\). The selected value must keep the accumulated
-privacy loss in \eqref{eq:rdp_to_dp} within
-\(\bar{\epsilon}\) after accounting for the planned DP events. If no such
-value can be found, the candidate mode does not satisfy the privacy
-constraint. When \(n_{i,h}^{t,\mathrm{DP}}=0\), the mode generates no DP
-event and requires no noise calibration.
-
-For a hierarchical Edge group \(g\), the Edge update is released to the Cloud as a single packet with DP protection. The noise
-multiplier used for this packet is derived from the calibrated client
-multipliers of the participating devices as
-\begin{equation}
-\sigma_g^t
-=
-\max_{i\in\mathcal G_g}
-\sigma_{i,h_i}^t .
-\label{eq:edge_group_noise_multiplier}
-\end{equation}
-Thus \(\sigma_g^t\) is derived from the client multipliers in the group.
-
-After a mode is selected and executed, only the DP events generated in
-that round are added to \(\Phi_i^t(\alpha)\) according to
-\eqref{eq:rdp_update}. The updated privacy state is then used to evaluate
-the candidate modes in the next round.
+Before execution, the planned privacy cost
+is checked against the remaining budget.
+The privacy ledger is updated using the
+executed Gaussian mechanisms, and the resulting
+RDP state is used for mode selection in
+the next round.
 \subsection{Joint Cost and Utility Modeling}
 \label{sec:cost_utility_model}
-Given the link topology, each mode induces its transmissions and the corresponding protection. Its privacy feasibility is determined by the lifetime accounting in Sec.~\ref{sec:privacy_model}. Each mode is then evaluated by resource feasibility, path latency, and learning error objective.
+Each collaboration mode is evaluated in terms
+of resource feasibility, round latency, and
+learning error, subject to the lifetime
+privacy budget in Sec.~\ref{sec:privacy_model}.
 \subsubsection{End Side Resource Feasibility}
+\label{sec:end_resource}
 
-Each collaboration mode must satisfy the computation and memory capacities
-of the end device. Let \(W_{i,L}^{\mathrm{comp}}(h_i)\) and
-\(M_{i,L}^{\mathrm{mem}}(h_i)\) denote the profiled computation and memory
-requirements of device \(i\) under mode \(h_i\), respectively, and let
-\(Q_{\mathrm{comp},i}\) and \(Q_{\mathrm{mem},i}\) denote the corresponding
-available resource capacities. The resource-feasible mode set is
+Let \(W_{i,L}^{\mathrm{comp}}(h_i)\) and
+\(M_{i,L}^{\mathrm{mem}}(h_i)\) denote the
+computation and memory requirements of
+device \(i\) under mode \(h_i\), and let
+\(Q_{\mathrm{comp},i}\) and \(Q_{\mathrm{mem},i}\)
+denote its available capacities.
+The resource feasible mode set is
 \begin{equation}
-\mathcal{H}_i^{\mathrm{res}}
+\mathcal H_i^{\mathrm{res}}
 =
 \left\{
-h_i\in\mathcal{H}
-\;\middle|\;
+h_i\in\mathcal H
+\mid
 W_{i,L}^{\mathrm{comp}}(h_i)\le Q_{\mathrm{comp},i},
 \;
 M_{i,L}^{\mathrm{mem}}(h_i)\le Q_{\mathrm{mem},i}
 \right\}.
 \label{eq:resource_feasible}
 \end{equation}
-We further distinguish the full-local/update family
-\(\mathcal H^{\mathrm{FL}}=\{\mathrm{LIIE},\mathrm{LIIC},\mathrm{LIIEIIIC}\}\)
-and the split/offloading family
-\(\mathcal H^{\mathrm{SP}}=\{\mathrm{LIE},\mathrm{LIC},\mathrm{LIEIIC},\mathrm{LIEIIIC}\}\).
-DynFL follows an FL-first, split-on-demand admissibility rule. If at least
-one full-local mode is resource feasible, dynamic mode selection is restricted
-to the feasible full-local family. Split modes are activated when no full-local
-mode satisfies the end-side computation and memory constraints. Fixed baselines
-are evaluated independently of this dynamic admissibility rule. Accordingly,
-the dynamic admissible set is
-\begin{equation}
-\mathcal H_i^{\mathrm{adm}}
-=
-\begin{cases}
-\mathcal H_i^{\mathrm{res}}\cap\mathcal H^{\mathrm{FL}},
-&\text{if }\mathcal H_i^{\mathrm{res}}\cap\mathcal H^{\mathrm{FL}}\neq\varnothing,\\
-\mathcal H_i^{\mathrm{res}},&\text{otherwise.}
-\end{cases}
-\label{eq:fl_first_admissible}
-\end{equation}
+
+
+If any full local update mode is feasible
+under the resource constraints, the
+candidate set is restricted to such modes.
+Otherwise, split modes are considered
+only when the participating remote
+training tier is trusted and has sufficient
+resources. All candidate modes must also
+satisfy the lifetime privacy constraint.
 
 \subsubsection{Path and Round Latency on a Common Timeline}
 
-We construct a common timeline for the selected collaboration modes to determine their aggregation arrivals and the resulting round latency.
+As in Fig \ref{fig:time},
+the execution, transmission, and
+aggregation events of the selected collaboration
+modes on a common timeline are used to determine their
+arrival times and the resulting round latency.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{common_timeline.png}
+\caption{Illustrative common timeline
+for hierarchical and direct-cloud
+collaboration paths. The Cloud round
+latency includes Cloud aggregation
+and its required return transmissions.}
+\label{fig:time}
+\end{figure*}
 
 \textbf{Transmission latency.}
-For a transmission of payload \(b\) from tier \(u\) to tier \(v\), let \(S_{u,v,b}^t(h_i)\) denote its raw payload size. Let \(B_{i,u,v}^t\) denote the transmission rate of device \(i\) over \(u\!\to\!v\) in round \(t\), and let \(D_{u,v}^{0}\) denote the fixed base delay. Under the protection mechanism \(\pi_i^{t,h_i}(u,v,b)\) defined above, the transmission latency is
+For a payload \(b\) transmitted from tier \(u\)
+to tier \(v\), let \(S_{u,v,b}^t(h_i)\) denote
+the original payload size under collaboration
+mode \(h_i\). Let \(B_{i,u,v}^t\) denote
+the transmission rate of the link between
+tiers \(u\) and \(v\) for client \(i\) in
+round \(t\), and let \(D_{u,v}^{0}\) denote
+the fixed transmission delay of this link.
 \begin{equation}
 T_{u,v,b}^{\mathrm{link},t}(h_i)
 =
 \frac{
-\alpha\!\left(\pi_i^{t,h_i}(u,v,b)\right)
+\kappa\!\left(\pi_i^{t,h_i}(u,v,b)\right)
 S_{u,v,b}^t(h_i)}
 {B_{i,u,v}^t}
 +
 D_{u,v}^{0}
 +
 T_{u,v,b}^{\mathrm{priv},t}
-\!\left(\pi_i^{t,h_i}(u,v,b)\right),
+\!\left(\pi_i^{t,h_i}(u,v,b)\right).
 \label{eq:comm_latency}
 \end{equation}
-where \(\alpha(\cdot)\) is the payload expansion factor caused by the protection mechanism and \(T_{u,v,b}^{\mathrm{priv},t}(\cdot)\) is the corresponding protection processing latency. For an unprotected transmission, \(\alpha(\mathrm{none})=1\) and \(T_{u,v,b}^{\mathrm{priv},t}(\mathrm{none})=0\).
+Here, \(\kappa(\cdot)\) denotes the payload
+expansion factor, and
+\(T_{u,v,b}^{\mathrm{priv},t}(\cdot)\)
+denotes the protection processing time.
+For unprotected transmissions,
+\(\kappa(\mathrm{none})=1\) and
+\(T_{u,v,b}^{\mathrm{priv},t}(\mathrm{none})=0\).
 
 \textbf{Execution latency.}
-Let \(\tau_{i,L}^t(h_i)\) and \(\tau_{i,r}^t(h_i)\), \(r\in\{E,C\}\), denote
-the Local and remote-tier execution times within one training step under mode
-\(h_i\). For split training, the \(N_i^t\) workload-derived steps may be
-pipelined across the two participating tiers, giving
+Let \(\tau_{i,L}^t(h_i)\) and
+\(\tau_{i,E}^t(h_i)\) denote the estimated
+execution times per training step at the
+Local and Edge tiers, respectively.
+For Local--Edge split modes, the latency
+model assumes pipelined execution across
+\(L_B\) training steps, giving
 \begin{equation}
 T_i^{\mathrm{stage},t}(h_i)
 =
-N_i^t\max\!\left\{
-\tau_{i,L}^t(h_i),\tau_{i,r}^t(h_i)
+L_B\max\!\left\{
+\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
 \right\}
 +
 \min\!\left\{
-\tau_{i,L}^t(h_i),\tau_{i,r}^t(h_i)
-\right\},\qquad r\in\{E,C\}.
+\tau_{i,L}^t(h_i),\tau_{i,E}^t(h_i)
+\right\}.
 \label{eq:execution_latency}
 \end{equation}
-This expression is the ideal two-stage pipeline bound; all directed split
-payloads in \(\mathcal X_i^t(h)\) retain multiplicity \(N_i^t\), so base link
-delay and transmission time are incurred at every interactive step. For local
-training, \(T_i^{\mathrm{stage},t}(h_i)=N_i^t\tau_{i,L}^t(h_i)\), while the
-resulting update is submitted once after the local training block. Hierarchical
-modes repeat the corresponding Edge stage \(E_B\) times.
+For full local training,
+\(T_i^{\mathrm{stage},t}(h_i)
+=L_B\tau_{i,L}^t(h_i)\).
+For modes with repeated training stages,
+the corresponding stage duration is
+multiplied by \(E_B\).
 
 \textbf{Reconfiguration latency.}
-Changing the collaboration mode may require model reconfiguration across tiers. The resulting delay is
+Changing the collaboration mode may require
+redistributing model components across the
+Local, Edge, and Cloud tiers.
+We model the resulting reconfiguration delay as
 \begin{equation}
 T_i^{\mathrm{sw},t}
 =
@@ -711,28 +689,51 @@ T_i^{\mathrm{sw},t}
 }{2},
 \label{eq:switching_cost}
 \end{equation}
-where \(\eta_h\) and \(\eta_p\) are the coefficients for the mode change cost and the placement change cost, respectively~\cite{CHEN2026112204,li2026latency}. The normalized model placement is
+where $\eta_h$ and $\eta_p$ are the coefficients
+for the mode change cost and the placement
+change cost, respectively
+~\cite{CHEN2026112204,li2026latency},
+and $\mathbb{I}(\cdot)$ denotes the indicator function. The normalized model placement is
 \begin{equation}
-\mathbf{p}(h_i^t)
+\mathbf{p}(h)
 =
 \frac{
 \left[
-\lvert M_L^{h_i}\rvert,
-\lvert M_E^{h_i}\rvert,
-\lvert M_C^{h_i}\rvert
+\lvert M_L^{h}\rvert,
+\lvert M_E^{h}\rvert,
+\lvert M_C^{h}\rvert
 \right]
 }{
-\lvert M_L^{h_i}\rvert+
-\lvert M_E^{h_i}\rvert+
-\lvert M_C^{h_i}\rvert
+\lvert M_L^{h}\rvert+
+\lvert M_E^{h}\rvert+
+\lvert M_C^{h}\rvert
 }.
 \label{eq:model_placement_vector}
 \end{equation}
 
 \textbf{Path arrival and aggregation.}
-For a given candidate mode \(h_i\), its mode flow specifies the execution stages and payload transmissions leading to the corresponding aggregation point. The execution and transmission latencies defined above, together with the reconfiguration delay \(T_i^{\mathrm{sw},t}\), are advanced in their order of occurrence along the mode flow. We use \(a_{i,E}^t\) and \(a_{i,C}^t\) to denote the arrival times of the update from device \(i\) at the Edge and Cloud, respectively, whenever the corresponding aggregation point is present in the selected mode.
+For each candidate mode \(h_i\), the mode flow
+determines the sequence of execution stages
+and payload transmissions leading to the
+relevant aggregation point.
+We calculate update arrival times by
+following this sequence and accounting for
+execution, transmission, and reconfiguration
+delays in their order of occurrence.
+Let \(a_{i,E}^t\) and \(a_{i,C}^t\) denote
+the arrival times of client \(i\)'s update
+at the Edge and Cloud, respectively,
+when the corresponding aggregation point
+is involved in the selected mode.
 
-Once a candidate mode profile \(\mathbf h^t=(h_1^t,\ldots,h_N^t)\) is specified, these arrivals are placed on the common timeline. For an Edge aggregation group \(g\), let \(\mathcal G_g\) denote the devices participating in this group. Since aggregation waits for all required updates, the Edge aggregation completion time is
+Given a selected mode profile
+$\mathbf h^t=(h_1^t,\ldots,h_N^t)$,
+for an Edge aggregation group $g$,
+let \(\mathcal G_g\) denote its
+participating clients.
+Edge aggregation begins after all required
+client updates have arrived.
+Its completion time is
 \begin{equation}
 f_{g,E}^t
 =
@@ -743,7 +744,19 @@ T_{g,E}^{\mathrm{agg},t},
 \end{equation}
 where \(T_{g,E}^{\mathrm{agg},t}\) is the Edge aggregation duration. Updates arriving earlier remain buffered until aggregation starts.
 
-If the selected mode continues to the Cloud, the Edge aggregation result is transmitted to the Cloud after \(f_{g,E}^t\). Let \(a_{g,C}^t\) denote the arrival time of this aggregated update at the Cloud, computed by adding the Edge to Cloud transmission latency to \(f_{g,E}^t\). Modes that send updates directly to the Cloud independently produce the client arrivals \(a_{i,C}^t\). The Cloud aggregation therefore waits for the required arrivals from both sources, and its completion time is
+For modes that forward an Edge aggregation
+result to the Cloud, transmission begins
+after the Edge aggregation completes at
+time \(f_{g,E}^t\).
+Let \(a_{g,C}^t\) denote the arrival time
+of this result at the Cloud, including
+the Edge to Cloud transmission latency.
+Modes that transmit updates directly
+to the Cloud instead produce client
+arrival times \(a_{i,C}^t\).
+Cloud aggregation waits for all required
+updates from the applicable paths.
+Its completion time is
 \begin{equation}
 f_C^t
 =
@@ -758,123 +771,308 @@ T_C^{\mathrm{agg},t},
 where the two maxima are taken over the direct Cloud clients and the Edge
 groups participating in the current Cloud aggregation, respectively.
 
-Return transmissions, when required by the selected mode, further advance
-the corresponding aggregation completion times. As illustrated in
-Fig.~\ref{fig:time}, the execution, transmission, aggregation, and return
-events of the selected mode profile are placed on the common timeline.
-The latest completion time on this timeline is denoted by
-\(T_{\mathrm{sys}}(\mathbf h^t)\), which represents the system round
-latency.
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\textwidth]{common_timeline.png}
-\caption{Representative common timeline for mixed collaboration modes in cloud-edge-end federated learning.}
-\label{fig:time}
-\end{figure*}
-\subsubsection{Learning Error and DP Perturbation Cost}
-\label{sec:learning_cost}
-
-The selector evaluates a candidate mode profile using quantities available at selection time. When updates are aggregated across distributed tiers, two distinct distortion sources affect global convergence: (i) deterministic global fusion bias induced by partial Cloud coverage, and (ii) stochastic perturbation variance injected for differential privacy.
-
-For a client update released directly to the Cloud, let $C_u$ be the update clipping norm. Under replacement adjacency, the sensitivity bound is $\Delta_u=2C_u$, where the factor two accounts for the maximum change between two clipped updates. For an update vector of dimension $d_{\mathrm{upd}}$, the Gaussian perturbation associated with client $i$ under mode $h_i^t$ has expected squared magnitude $d_{\mathrm{upd}}(\sigma_{i,h_i}^t\Delta_u)^2$, where $\sigma_{i,h_i}^t$ is the noise multiplier calibrated from the lifetime privacy state.
-
-For a hierarchical Edge group $g$, the participating client updates are first clipped and aggregated at the Edge. The aggregation weight of client $i$ within Edge group $g$ is $w_{i\mid g}=n_i/(\sum_{j\in\mathcal G_g}n_j)$. The sensitivity of the resulting Edge update is bounded by the largest client contribution in the group, $\Delta_g^t=2C_u\max_{i\in\mathcal G_g}w_{i\mid g}$. This Edge update is then released to the Cloud as a single packet with DP protection, and its noise multiplier is $\sigma_g^t$, as defined in \eqref{eq:edge_group_noise_multiplier}.
-
-For a complete mode profile $\mathbf h^t=(h_1^t,\ldots,h_N^t)$, let $N_C^t(\mathbf h^t)$ denote the total number of represented training samples participating in the current Cloud aggregation. The Cloud aggregation weight of a directly released client update is $n_i/N_C^t(\mathbf h^t)$, and the corresponding weight of an Edge update from group $g$ is $\sum_{i\in\mathcal G_g}n_i/N_C^t(\mathbf h^t)$. The DP perturbation cost of a complete mode profile is then
+As illustrated in Fig.~\ref{fig:time},
+the system round latency is measured
+with respect to the Cloud aggregation round.
+Edge-only paths do not introduce Cloud
+synchronization dependencies.
+When required, return transmissions begin
+after Cloud aggregation completes.
+The system round latency is therefore
 \begin{equation}
 \begin{aligned}
-J_{\mathrm{DP}}(\mathbf h^t)
-=
-d_{\mathrm{upd}}
-\Bigg[
-&
-\sum_{\text{direct }i\to C}
-\left(
-\frac{n_i}
-{N_C^t(\mathbf h^t)}
-\sigma_{i,h_i}^t
-\Delta_u
-\right)^2
-\\
-&+
-\sum_{\text{Edge group }g\to C}
-\left(
-\frac{\sum_{i\in\mathcal G_g} n_i}
-{N_C^t(\mathbf h^t)}
-\sigma_g^t
-\Delta_g^t
-\right)^2
-\Bigg].
+T_{\mathrm{sys}}(\mathbf h^t)
+={}&f_C^t+\max\Bigg\{
+\max_{i\in\mathcal H^t}
+\Big(
+T_{C,E,b_i}^{\mathrm{link},t}(h_i^t)
++
+T_{E,L,b_i}^{\mathrm{link},t}(h_i^t)
+\Big),\\
+&\qquad
+\max_{i\in\mathcal D^t}
+T_{C,L,b_i}^{\mathrm{link},t}(h_i^t)
+\Bigg\}.
 \end{aligned}
-\label{eq:dp_perturbation_cost}
+\label{eq:system_round_latency}
+\end{equation}
+Here, $\mathcal H^t$ and $\mathcal D^t$
+denote the hierarchical and direct-cloud
+client sets participating in Cloud
+aggregation, respectively.
+Return delays are evaluated using
+(\ref{eq:comm_latency}), with absent
+return paths excluded from the maximum.
+
+\subsubsection{Joint Learning Error Modeling}
+\label{sec:learning_cost}
+
+The learning objective measures the deviation
+of the actual Cloud update from an ideal
+gradient step update, accounting for errors arising
+from training, aggregation, and privacy
+mechanisms.
+
+\textbf{The mean and covariance of training perturbation.}\ 
+For client $i$ under mode $h_i^t$,
+let $u_{i,0}^t$ and $u_{i,s}^t$
+denote the updates obtained without
+and with privacy protection, respectively,
+under the same training configuration.
+The difference between these updates is
+\begin{equation}
+D_i^t=u_{i,s}^t-u_{i,0}^t.
+\end{equation}
+By using $D_i$, the perturbation mean and covariance are
+calculated by
+\begin{equation}
+b_i^t=\mathbb E_t[D_i^t]
+\end{equation}
+and
+\begin{equation}
+V_{ij}^t=\operatorname{Cov}_t(D_i^t,D_j^t).
 \end{equation}
 
-In addition to privacy noise, candidate modes that terminate at the Edge without Cloud forwarding omit client contributions from the global Cloud state, introducing fusion bias. Let $N_{\mathrm{total}} = \sum_{i=1}^N n_i$ denote the total training sample mass across all clients. The sample mass ratio represented at the Cloud under profile $\mathbf h^t$ is
+\textbf{The mean and covariance of aggregation perturbation.}\ 
+Let $n_i$ denote the number of training
+samples at client $i$. The reference
+aggregation weight is defined by
 \begin{equation}
-r_C^t(\mathbf h^t) = \frac{N_C^t(\mathbf h^t)}{N_{\mathrm{total}}}.
-\label{eq:cloud_mass_ratio}
+p_i=\frac{n_i}{\sum_{j=1}^{N}n_j}.
 \end{equation}
-When $r_C^t(\mathbf h^t) < 1$, the global descent trajectory deviates from full-participation federated aggregation. As formally bounded in Proposition~\ref{prop:learning_bound} (with detailed proof in Appendix), under $\beta$-smooth global loss and step size $\eta \le 1/\beta$, the one-round expected optimization loss increment is upper-bounded by an affine combination of the worst-case fusion deviation and DP variance. By leveraging the step-size condition $\beta \le 1/\eta$, both terms can be bounded with a common coefficient $\frac{1}{2\eta}$. Dropping this shared scaling factor and terms independent of $\mathbf h^t$, we define the formal learning objective evaluated at selection time as
+For a mode profile
+\(\mathbf h^t=\left(h_1^t,\ldots,h_N^t\right)\),
+let \(\mathcal C^t\)
+denote the clients contributing to the
+Cloud update.
+In case that \(\mathcal C^t\) is nonempty,
+their effective aggregation weights can be defined by
+\[
+a_i^t=
+\begin{cases}
+\displaystyle
+\frac{n_i}{\sum_{j\in\mathcal C^t}n_j},
+& i\in\mathcal C^t,\\
+0, & \text{otherwise}.
+\end{cases}
+\]
+In case that \(\mathcal C^t\) is empty, \(a_i^t=0\).
+
+Let \(\Delta_{F,0}^t=\sum_i p_i u_{i,0}^t\)
+and
+\(\Delta_{P,0}^t=\sum_i a_i^t u_{i,0}^t\) respectively be 
+full-participation reference and 
+profile-specific update
+without privacy protection.
+The aggregation error can be defined by
 \begin{equation}
-\widehat J_{\mathrm{learn}}^t(\mathbf h^t)
+e_{\mathrm{agg}}^t
 =
-4C_u^2\left(1 - r_C^t(\mathbf h^t)\right)^2 + J_{\mathrm{DP}}(\mathbf h^t).
-\label{eq:j_learn_objective}
+\sum_i(a_i^t-p_i)u_{i,0}^t.
+\label{eq:aggregation_error}
 \end{equation}
-For the boundary case of Edge-only mode profiles where $r_C^t(\mathbf h^t) = 0$, no Cloud aggregation occurs. To prevent division by zero in \eqref{eq:dp_perturbation_cost}, we explicitly define $J_{\mathrm{DP}}(\mathbf h^t) = 0$ for such profiles, yielding a maximum fusion penalty of $\widehat J_{\mathrm{learn}}^t(\mathbf h^t) = 4C_u^2$. This explicitly ensures that abandoning global fusion is never evaluated as a zero-cost solution.
-Here, the weighting constants $\frac{4C_u^2}{\eta}$ and $\beta$ emerge intrinsically from the optimization descent lemma rather than empirical tuning, naturally capturing the fundamental trade-off between global information coverage and privacy distortion.
+
+%The full-participation clean reference
+%and the profile-specific clean update are
+%\(\Delta_{F,0}^t=\sum_i p_i u_{i,0}^t\)
+%and
+%\(\Delta_{P,0}^t=\sum_i a_i^t u_{i,0}^t\),
+%respectively. Their difference defines
+%the aggregation error:
+%\begin{equation}
+%e_{\mathrm{agg}}^t
+%=
+%\sum_i(a_i^t-p_i)u_{i,0}^t.
+%\label{eq:aggregation_error}
+%\end{equation}
+
+Let \(\Delta_*^t=-\eta_t\nabla F(w^t)\)
+be the ideal gradient step.
+The clean algorithmic error is
+\(e_{\mathrm{alg}}^t
+=\Delta_{F,0}^t-\Delta_*^t\).
+The actual Cloud update satisfies
+\begin{equation}
+\Delta_s^t
+=
+\sum_i a_i^t u_{i,s}^t
+=
+\Delta_*^t
++
+e_{\mathrm{alg}}^t
++
+e_{\mathrm{agg}}^t
++
+\sum_i a_i^tD_i^t.
+\label{eq:actual_cloud_update}
+\end{equation}
+The aggregated perturbation mean and
+covariance are
+\begin{equation}
+    b_s^t=\sum_i a_i^t b_i^t
+\end{equation}
+and
+\begin{equation}
+    V_s^t=\sum_{i,j}a_i^ta_j^tV_{ij}^t.
+\end{equation}
+Therefore,
+the total update error as
+\(e_{\mathrm{upd}}^t=\Delta_s^t-\Delta_*^t\).
+
+\textbf{The mean and covariance of total update.}\ 
+
+The conditional expected squared error is
+\begin{equation}
+J_{\mathrm{learn}}^t(\mathbf h^t)
+=
+\mathbb E_t\|e_{\mathrm{upd}}^t\|_2^2
+=
+\left\|
+e_{\mathrm{alg}}^t+
+e_{\mathrm{agg}}^t+b_s^t
+\right\|_2^2
++
+\operatorname{Tr}(V_s^t).
+\label{eq:j_learn_exact}
+\end{equation}
+
+
+For mode selection, the exact quantity
+in (\ref{eq:j_learn_exact}) is not estimated
+from offline paired clean/private runs.
+Instead, a pre-decision conditional upper bound
+$\overline J^t(\mathbf h^t)\ge
+J_{\mathrm{learn}}^t(\mathbf h^t)$
+is evaluated from certificates that are available
+before any client trains in round $t$.
+Let $\gamma$ be the Cloud step scale and let
+$\hat v_i^t$ be a certified pre-decision reference
+for the ideal client contribution
+$v_i^t=-\eta_*\nabla F_i(w^t)$.
+Each certificate supplies a reference radius
+$r_i^{\mathrm{ref}}$ with
+$\|v_i^t-\hat v_i^t\|_2\le r_i^{\mathrm{ref}}$,
+a mode radius $r_i^{\mathrm{mode}}(h_i)$ with
+$\|u_{i,0}^t(h_i)-v_i^t\|_2\le r_i^{\mathrm{mode}}(h_i)$,
+and an aggregate-share standard deviation
+$\sigma_i^t$. Define
+\begin{align}
+C^t(\mathbf h^t)&=
+\left\|\sum_i(\gamma a_i^t-p_i)\hat v_i^t\right\|_2,
+\label{eq:online_center}\\
+R_{\mathrm{ref}}^t(\mathbf h^t)&=
+\sum_i|\gamma a_i^t-p_i|r_i^{\mathrm{ref}},
+\label{eq:online_ref_radius}\\
+R_{\mathrm{mode}}^t(\mathbf h^t)&=
+\gamma\sum_{i\in\mathcal C^t}
+a_i^tr_i^{\mathrm{mode}}(h_i),
+\label{eq:online_mode_radius}\\
+R^t(\mathbf h^t)&=
+R_{\mathrm{ref}}^t(\mathbf h^t)
++R_{\mathrm{mode}}^t(\mathbf h^t),
+\label{eq:online_radius}\\
+Q^t(\mathbf h^t)&=
+d\sum_{i\in\mathcal C^t}
+\bigl(\gamma a_i^t\sigma_i^t\bigr)^2,
+\label{eq:online_q}
+\end{align}
+where $d$ is the parameter dimension and the
+aggregate shares are conditionally zero-mean and
+conditionally uncorrelated before secure aggregation.
+If a numerical RMS error $r_{\mathrm{num}}$ is
+also certified, then
+\begin{equation}
+\boxed{
+J_{\mathrm{learn}}^t(\mathbf h^t)
+\le\overline J^t(\mathbf h^t)
+:=\left(
+\sqrt{\left(C^t+R^t\right)^2+Q^t}
++r_{\mathrm{num}}
+\right)^2.
+}
+\label{eq:online_upper_bound}
+\end{equation}
+
+The bound is conditional on the certificates and on
+the assumptions declared with them. In particular, the
+global objective must be population-sample-weighted,
+the per-client linear decomposition of the Cloud
+update must match the executed path, the reference and
+mode radii must be independently proved, the privacy
+shares must be drawn before secure aggregation with
+fixed weights, and the aggregate second moment must be
+certified. A per-round manifest entry must exist before
+the decision round, carry a nonempty evidence record,
+and match the exact candidate identity, including its
+mode, link mechanisms, and DP execution plan. If any
+required entry, assumption, or bound is missing or
+inconsistent, the formal path stops before client
+training; there is no fallback to offline calibration,
+a legacy fusion surrogate, or a central oracle.
+A lower bound is reported only when the aggregate noise
+variance and its orthogonality to the clean update are
+separately proved; otherwise it is set to zero.
+Candidate selection uses $\overline J^t$, the certified
+upper bound, and not the exact unknown $J_{\mathrm{learn}}^t$.
+Therefore, ranking by $\overline J^t$ is a decision rule;
+it is not a certificate that the selected profile has
+strictly smaller true joint error than every other
+profile.
+
 \subsection{Global Multiobjective Collaborative Optimization}
 \label{sec:global_optimization}
 
-For each client, the decision variable is the collaboration mode
+For each client, the decision variable is
+the collaboration mode
 \(h_i^t\in\mathcal F_i^t\), where
-\(\mathcal F_i^t\subseteq\mathcal H_i^{\mathrm{res}}\subseteq\mathcal H\)
-contains the modes that satisfy the end device resource constraints in
-\eqref{eq:resource_feasible}, the mechanism requirements of each exposure,
-and the lifetime privacy constraint. For each evaluated mode, \(\mathcal X_i^t(h_i)\) is induced first. The exposure requirements then determine the protection map \(\pi_i^{t,h_i}\), and the current privacy ledger determines the noise multiplier \(\sigma_{i,h_i}^t\) when a protected update needs DP. Thus \(\pi_i^{t,h_i}\) and \(\sigma_{i,h_i}^t\) follow from the candidate mode.
+\(\mathcal F_i^t\subseteq
+\mathcal H_i^{\mathrm{res}}\subseteq\mathcal H\)
+contains the modes satisfying the resource
+constraints in \eqref{eq:resource_feasible},
+the activation rule in
+Sec.~\ref{sec:end_resource},
+the exposure protection requirements,
+and the lifetime privacy constraint.
+The protection mechanisms and DP noise
+multipliers are determined by the candidate
+mode and current privacy ledger.
 
-A complete mixed mode profile is \(\mathbf h^t=(h_1^t,\ldots,h_N^t)\). The flow evaluator applies the shared Edge and Cloud aggregation and admission rules to a complete profile, so the system feasible set is a subset of the Cartesian product,
-\begin{equation}
-\mathcal F_{\mathrm{sys}}^t
-\subseteq
-\prod_{i=1}^{N}\mathcal F_i^t.
-\label{eq:global_feasible_set}
-\end{equation}
-An execution that is not admitted is reported as \textsc{skip}.
+A complete mode profile is
+\(\mathbf h^t=(h_1^t,\ldots,h_N^t)\).
+The shared Edge and Cloud aggregation and
+admission rules define the system feasible
+set
+\(\mathcal F_{\mathrm{sys}}^t
+\subseteq\prod_{i=1}^N\mathcal F_i^t\).
+An execution that is not admitted is
+reported as \textsc{skip}.
 
-For every feasible profile, the flow model produces the round duration $T_{\mathrm{sys}}(\mathbf h^t)$, while the formal learning objective $\widehat J_{\mathrm{learn}}^t(\mathbf h^t)$ is evaluated through \eqref{eq:j_learn_objective}. The selector therefore minimizes the following two objective functions:
+For each feasible profile, the flow model
+evaluates the round duration
+\(T_{\mathrm{sys}}(\mathbf h^t)\),
+while the pre-decision online certificate yields
+the upper bound
+\(\overline J^t(\mathbf h^t)\).
+The multiobjective optimization problem is
 \begin{equation}
 \underset{\mathbf h^t\in\mathcal F_{\mathrm{sys}}^t}
 {\operatorname{minimize}}
 \quad
-\mathbf f(\mathbf h^t)
-=
 \begin{bmatrix}
 T_{\mathrm{sys}}(\mathbf h^t)\\
-\widehat J_{\mathrm{learn}}^t(\mathbf h^t)
+\overline J^t(\mathbf h^t)
 \end{bmatrix}.
 \label{eq:global_multiobjective}
 \end{equation}
 
-Latency and the learning error are the two objectives in the current implementation. HE and communication processing contribute to the path latency, while partial Cloud participation and DP calibration jointly determine the expected learning error bound.
-
-The nondominated decision set is
-\begin{equation}
-\mathcal H_{\mathrm P}^t
-=
-\left\{
-\mathbf h^t\in\mathcal F_{\mathrm{sys}}^t
-\;\middle|\;
-\nexists\,\mathbf h^{\prime t}\in\mathcal F_{\mathrm{sys}}^t
-\text{ such that }
-\mathbf h^{\prime t}\prec\mathbf h^t
-\right\},
-\label{eq:pareto_front}
-\end{equation}
-where \(\prec\) denotes Pareto dominance with respect to the two objectives in \eqref{eq:global_multiobjective}. In the bounded solver, the maintained nondominated archive approximates this set.
-
-The Tchebycheff stage normalizes the two objectives over the current nondominated archive. Let $T_{\min}^t,T_{\max}^t$ and $J_{\min}^t,J_{\max}^t$ denote the minimum and maximum values of the latency and learning error objectives observed in that archive. These values define the normalization range within the current archive. The normalized objectives are
+A bounded Pareto search maintains a
+nondominated archive
+\(\widehat{\mathcal H}_{\mathrm P}^t\).
+Let \(T_{\min}^t,T_{\max}^t\) and
+\(\overline J_{\min}^t,\overline J_{\max}^t\)
+denote the minimum and maximum objective values
+within this archive.
+The normalized objectives are
 \begin{equation}
 \bar T(\mathbf h^t)
 =
@@ -887,622 +1085,310 @@ T_{\max}^t-T_{\min}^t+\gamma_n
 \bar J(\mathbf h^t)
 =
 \frac{
-\widehat J_{\mathrm{learn}}^t(\mathbf h^t)-J_{\min}^t
+\overline J^t(\mathbf h^t)-\overline J_{\min}^t
 }{
-J_{\max}^t-J_{\min}^t+\gamma_n
-}.
+\overline J_{\max}^t-\overline J_{\min}^t+\gamma_n
+},
 \label{eq:pareto_normalization}
 \end{equation}
+where \(\gamma_n>0\) is a small
+normalization constant.
 
-The normalized ideal point is the origin. The selected profile minimizes the largest normalized deviation,
+The Tchebycheff criterion selects the
+profile minimizing the largest normalized
+deviation:
 \begin{equation}
 \begin{aligned}
 D_\infty(\mathbf h^t)
 &=
-\max\left\{
-\left|\bar T(\mathbf h^t)\right|,
-\left|\bar J(\mathbf h^t)\right|
-\right\},
-\\
+\max\{
+\bar T(\mathbf h^t),
+\bar J(\mathbf h^t)
+\},\\
 \mathbf h^{t\star}
 &\in
-\arg\min_{\mathbf h^t\in\mathcal H_{\mathrm P}^t}
+\arg\min_{
+\mathbf h^t\in\widehat{\mathcal H}_{\mathrm P}^t
+}
 D_\infty(\mathbf h^t).
 \end{aligned}
 \label{eq:selection}
 \end{equation}
 
-The implementation resolves equal distances deterministically using system latency, then \(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\), followed by a stable profile identity. Real test accuracy is reserved for experimental evaluation.
+Equal distances are resolved using
+system latency, learning error, and
+a stable profile identity, in that order.
+Real test accuracy is used only for
+experimental evaluation.
+
+
+
 \section{Algorithm}
 \label{sec:algorithm}
 
-The proposed selection procedure operates at strategy update points. At
-rounds that are not update points, the previously selected profile is reused
-when \(\mathbf h^{t-1}\in\mathcal F_{\mathrm{sys}}^t\).
+Algorithm~\ref{alg:selection} presents the dynamic collaborative
+mode selection procedure using the feasibility, privacy, and
+multiobjective models developed in the preceding sections.
+
+\begin{table}[t]
+\centering
+\caption{Notation Used in Algorithm~\ref{alg:selection}}
+\label{tab:algorithm_notation}
+\small
+\begin{tabular}{p{0.23\columnwidth}p{0.67\columnwidth}}
+\hline
+\textbf{Symbol} & \textbf{Description} \\
+\hline
+$R$ & Total number of training rounds. \\
+$N$ & Number of clients. \\
+$S_P$ & Strategy update period. \\
+$\Phi_i^t(\alpha)$ & Accumulated RDP cost of client $i$ at order $\alpha$. \\
+$Q_{\mathrm{comp},i}$ & Available computing capacity of client $i$. \\
+$Q_{\mathrm{mem},i}$ & Available memory capacity of client $i$. \\
+$\mathcal H_i^{\mathrm{res}}$ & Modes satisfying the resource constraints of client $i$. \\
+$\mathcal F_i^t$ & Feasible collaboration modes of client $i$. \\
+$\mathcal F_{\mathrm{sys}}^t$ & Feasible system profiles. \\
+$\mathbf h^{t-1,\star}$ & Selected profile from the previous round. \\
+$\mathbf h^{t,\star}$ & Selected profile for the current round. \\
+$\widehat{\mathcal H}_{\mathrm P}^t$ & Pareto archive in round $t$. \\
+$D_\infty$ & Normalized Tchebycheff score. \\
+\hline
+\end{tabular}
+\end{table}
 
 \begin{breakablealgorithm}
-\caption{Bounded Pareto Profile Selection with Exposure Specific Protection}
+\caption{Dynamic Collaborative Mode Selection}
 \label{alg:selection}
 \small
 \begin{algorithmic}[1]
-
 \REQUIRE
-\(N,\{\mathcal H_i^{\mathrm{res}}\}_{i=1}^{N},
-\{\Phi_i^t(\alpha)\}_{i=1}^{N},
-(\bar\epsilon,\delta)\), system state, \(S_P\),
-\(K_{\mathrm P},K_{\mathrm B},I_{\max},\mathbf h^{t-1}\)
-
+$R,N,S_P$,
+$\{Q_{\mathrm{comp},i},Q_{\mathrm{mem},i}\}_{i=1}^{N}$,
+$\{\Phi_i^1(\alpha)\}_{i=1}^{N}$,
+and a pre-decision online-J certificate manifest
 \ENSURE
-\(\mathbf h^{t\star}\), or \textsc{skip}
+$\mathbf h^{t,\star}$ and admission decisions for each round
 
-\STATE \textbf{Reuse}
+\FOR{$t=1,\ldots,R$}
+    
+    \STATE \textbf{Feasible Mode Construction}
+    \STATE Determine $\mathcal H_i^{\mathrm{res}}$
+    using \eqref{eq:resource_feasible}
+    \STATE Calibrate $\sigma_i^t(h_i)$
+    using \eqref{eq:noise_calibration}
+    \STATE Construct $\mathcal F_i^t$
+    using the privacy and activation constraints
+    \STATE Construct $\mathcal F_{\mathrm{sys}}^t$
+    using the system constraints
 
-\IF{\(t\notin S_P\) and \(\mathbf h^{t-1}\in\mathcal F_{\mathrm{sys}}^t\)}
-    \STATE Execute \(\mathbf h^{t-1}\) with its protection mechanisms
-    \STATE Update \(\Phi_i^{t+1}(\alpha)\) using \eqref{eq:rdp_update} for
-    executed and released DP events only
-    \RETURN \(\mathbf h^{t-1}\)
-\ENDIF
+    \STATE \textbf{Reconfiguration Decision}
+    \IF{$\mathcal F_{\mathrm{sys}}^t=\emptyset$}
+        \STATE Assign \textsc{skip} to all clients
+    \ELSIF{$t>1$, $\operatorname{mod}(t-1,S_P)\neq0$,
+    and the previous configuration remains feasible}
+        \STATE $\mathbf h^{t,\star}\leftarrow
+        \mathbf h^{t-1,\star}$
+    \ELSE
+        \STATE \textbf{Objective Evaluation}
+        \STATE Generate initial profiles from previous choices,
+        latency, coverage, and learning cost
+        \STATE Apply required coverage repair
+        \STATE Evaluate $T_{\mathrm{sys}}(\mathbf h^t)$ using
+        \eqref{eq:system_round_latency}
+        \STATE Verify the round-$t$ pre-decision
+        online-J certificate; fail closed if it is
+        missing or inconsistent
+        \STATE Evaluate $\overline J^t(\mathbf h^t)$
+        using \eqref{eq:online_upper_bound}
 
-\STATE \textbf{Candidate Construction}
-
-\FOR{\(i=1,\ldots,N\)}
-    \STATE \(\mathcal F_i^t\leftarrow\emptyset\)
-    \FOR{each \(h_i\in\mathcal H_i^{\mathrm{res}}\)}
-        \STATE Construct \(\mathcal X_i^t(h_i)\) and derive
-        \(\pi_i^{t,h_i}\), \(\mathcal D_i^t(h_i)\) by
-        \eqref{eq:transmission_set}--\eqref{eq:dp_exposures}
-        \STATE Compute \(n_{i,h_i}^{t,\mathrm{DP}}\) and
-        \(N_{i,h_i}^{t,\mathrm{plan}}\) by
-        \eqref{eq:dp_events_per_round}--\eqref{eq:planned_update_events}
-        \IF{\(n_{i,h_i}^{t,\mathrm{DP}}>0\)}
-            \STATE Calibrate \(\sigma_{i,h_i}^t\) under
-            \((\bar\epsilon,\delta)\)
-            \IF{no feasible \(\sigma_{i,h_i}^t\) exists}
-                \STATE \textbf{continue}
-            \ENDIF
-        \ENDIF
-        \STATE Add \(h_i\) to \(\mathcal F_i^t\)
-    \ENDFOR
-\ENDFOR
-
-\STATE \textbf{Pareto Search}
-
-\STATE Construct
-\(\mathcal F_{\mathrm{sys}}^t\subseteq\prod_{i=1}^{N}\mathcal F_i^t\)
-using the shared flow, buffer, aggregation, and admission constraints
-\STATE Generate a bounded initial candidate set from
-\(\mathcal F_{\mathrm{sys}}^t\)
-
-\IF{\(\mathcal F_{\mathrm{sys}}^t=\emptyset\)}
-    \RETURN \textsc{skip}
-\ENDIF
-
-\STATE Evaluate the initial candidate profiles using
-\(T_{\mathrm{sys}}(\mathbf h^t)\) and \(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\) via \eqref{eq:j_learn_objective}
-
-\STATE Initialize archive \(\mathcal A\) with the nondominated initial
-profiles and queue \(\mathcal B\)
-
-\FOR{\(r=1,\ldots,I_{\max}\)}
-    \STATE Generate unvisited single client replacements from
-    \(\mathcal A\cup\mathcal B\)
-    \STATE Retain only profiles in \(\mathcal F_{\mathrm{sys}}^t\)
-    \STATE Evaluate \(T_{\mathrm{sys}}(\mathbf h^t)\) and
-    \(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\) via \eqref{eq:j_learn_objective} for the retained profiles
-    \STATE Update \(\mathcal A\), keeping at most \(K_{\mathrm P}\)
-    nondominated profiles
-    \STATE Update \(\mathcal B\), keeping at most \(K_{\mathrm B}\)
-    exploratory profiles
-    \IF{neither \(\mathcal A\) nor \(\mathcal B\) is updated}
-        \STATE \textbf{break}
+        \STATE \textbf{Multiobjective Selection}
+        \STATE Initialize $\widehat{\mathcal H}_{\mathrm P}^t$
+        from evaluated profiles using \eqref{eq:global_multiobjective}
+        \STATE Explore new profiles by changing one client's
+        mode and protection settings
+        \STATE Evaluate new profiles using
+        \eqref{eq:global_multiobjective} and update
+        $\widehat{\mathcal H}_{\mathrm P}^t$ by Pareto dominance
+        \STATE Select $\mathbf h^{t,\star}$ using
+        \eqref{eq:pareto_normalization} and \eqref{eq:selection}
     \ENDIF
+
+    \STATE \textbf{Training Execution}
+    \STATE Apply admission adjustments according to tier capacity
+    \STATE Reserve authorized Sample DP costs before execution
+    \STATE Execute admitted clients and update the global model
+    \STATE Update $\{\Phi_i^{t+1}(\alpha)\}_{i=1}^{N}$
+    using \eqref{eq:rdp_update}
+    \STATE Refresh the system state
 \ENDFOR
-
-\STATE Set \(\widehat{\mathcal H}_{\mathrm P}^t\leftarrow\mathcal A\)
-
-\STATE \textbf{Profile Selection}
-
-\STATE Normalize the two objectives over
-\(\widehat{\mathcal H}_{\mathrm P}^t\) by
-\eqref{eq:pareto_normalization}
-
-\STATE Select
-\[
-\mathbf h^{t\star}\in
-\arg\min_{\mathbf h^t\in\widehat{\mathcal H}_{\mathrm P}^t}
-D_\infty(\mathbf h^t)
-\]
-with the specified deterministic tie breaking rule
-
-\STATE \textbf{Execution and Accounting}
-
-\STATE Execute \(\mathbf h^{t\star}\) and its protection mechanisms
-
-\STATE Update \(\Phi_i^{t+1}(\alpha)\) using \eqref{eq:rdp_update} for
-executed and released DP events only
-
-\RETURN \(\mathbf h^{t\star}\)
-
 \end{algorithmic}
 \end{breakablealgorithm}
 \section{Experiments}
 \label{sec:experiment}
+
+We specify the evaluation protocol for the accuracy--time trade-off of
+dynamic collaboration under heterogeneous computing resources,
+communication conditions, and privacy budgets. The formal online-J path
+requires real pre-decision certificates for every training round, and
+these certificates are not yet available. Accordingly, this version
+reports the protocol and baseline definitions but no numerical results.
+Results from the removed legacy objectives, offline calibration tables,
+and oracle diagnostics are not reported. Once real certificates are
+supplied, all methods will be run under the same
+\texttt{online\_upper\_bound} objective, certificate manifest, model
+initialization, data split, budgets, and system settings.
+
 \subsection{Experimental Setup}
 \label{sec:exp_setup}
-The formal CIFAR 10 protocol uses real model training together with the system
-simulator. Its current configuration, \texttt{paper\_flow\_v31\_mode\_specific\_privacy},
-contains 100 end devices, 10 edge nodes, and one cloud node and schedules 100
-communication rounds. The model is a pretrained ResNet 18 with only its
-classification head trained. Each private training stage uses three local epochs
-and a learning rate of 0.01. LIEIIIC and LIIEIIIC use three edge stages; the
-other executable modes use one. The configured formal seeds are 40, 42, and 44.
-The 100-round, three-seed configuration specifies the intended formal evaluation;
-numerical tables remain pending until runs under this execution revision are
-complete. Fashion MNIST with LeNet 5 is retained as a secondary evaluation target,
-but legacy outputs produced under earlier execution revisions are not mixed with
-the current formal results. The main parameters are listed in
-\tabref{tab:sim_params}.
 
 \begin{table*}[t]
 \centering
-\caption{Default Simulation Parameters}
-\label{tab:sim_params}
-\scriptsize
-\setlength{\tabcolsep}{3pt}
-\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.20\textwidth}>{\centering\arraybackslash}p{0.27\textwidth}>{\raggedright\arraybackslash}p{0.20\textwidth}>{\centering\arraybackslash}X@{}}
-\hline
-\textbf{Parameter} & \textbf{Value} & \textbf{Parameter} & \textbf{Value} \\
-\hline
-End and edge nodes & 100 end devices and 10 edge nodes & Training rounds & \(T=100\) \\
-Training and test samples & 12000 and 2000 & Random seeds & 40, 42, and 44 \\
-Client computation and memory factors & Independent $\mathcal U(0.5,2.0)$ & Edge computation factor & $\mathcal U(2/3,1.5)$ \\
-Split minibatch size & \(B_i=128\) & Independent stages in multilevel modes & \(E_B=3\) \\
-Lifetime update-DP target & \(\bar\epsilon=8.0\) & DP slack parameter & \(\delta=10^{-5}\) \\
-Base transmission size & \(S_{\mathrm{emb}}=1.6\) MB, \(S_{\mathrm{upd}}=0.02052\) MB & HE expansion factor & \(\alpha_{\mathrm{HE}}=8.04\) \\
-CKKS polynomial degree and scale & \(8192\) and \(2^{40}\) & CKKS coefficient modulus bits & \([50,40]\) \\
-CKKS reference profile for a 4 MB update & 32.14 MB and 0.90 s & HE execution & Real SEAL when selected \\
-Base link rates & end to edge 5, end to cloud 2.2, edge to cloud 8 MB/s & Rate variation & sinusoidal amplitude 0.2 and uniform jitter 0.25 \\
-Aggregation fraction & $\rho_{\mathrm{buf}}=1.0$ & Strategy update period & $S_P=1$ \\
-Update clip norm (CIFAR 10 head) & $C_u=0.25$ & Dynamic DP multiplier & Lifetime-aware $\sigma_{i,h}^t$ \\
-Pareto archive, beam, and expansions & $K_{\mathrm P}=16$, $K_{\mathrm B}=4$, $I_{\max}=50$ & Cloud fusion penalty & $\xi=0.2$, $\varepsilon=0.05$ \\
-Training hardware & Intel i7 11700F, GTX 1660 Ti 6 GB, 31.8 GB RAM & Software & Python 3.10.9, PyTorch 2.5.1, torchvision 0.20.1, SEAL 4.0.0 \\
-\hline
-\end{tabularx}
-\end{table*}
-
-The encrypted aggregator performs ciphertext addition without ciphertext
-multiplication. The coefficient modulus therefore contains one 50 bit data
-prime and one 40 bit special prime. Its total of 90 bits is below the 218 bit
-limit reported by SEAL for polynomial degree 8192 at the 128 bit security
-level.
-
-The fixed link, switching, and aggregation profiles used by the analytical
-latency model are listed in \tabref{tab:additional_profile_params}.
-\begin{table}[t]
-\centering
-\caption{Additional Profiling Parameters}
-\label{tab:additional_profile_params}
-\small
+\caption{Experimental configurations for model training and cloud--edge--end collaboration. A dash denotes a pending Fashion-MNIST / LeNet-5 configuration.}
+\label{tab:experimental_settings}
+\footnotesize
+\renewcommand{\arraystretch}{1.18}
 \setlength{\tabcolsep}{4pt}
-\begin{tabularx}{\columnwidth}{@{}lX@{}}
-\hline
-\textbf{Parameter} & \textbf{Value used in the experiments} \\
-\hline
-Base link delay \(D_{\lambda}^{0}\) & End to edge 0.015 s, end to cloud 0.040 s, and edge to cloud 0.010 s. Reverse links use the corresponding value. \\
-Switching coefficients & \(\eta_h=0.02\) s and \(\eta_p=0.08\) s \\
-Edge aggregation profile & \(\beta_j=0.01\) s/MB and \(T_j^{\mathrm{fix}}=0.02\) s \\
-Cloud aggregation profile & \(\beta_C=0.015\) s/MB and \(T_C^{\mathrm{fix}}=0.04\) s \\
-\hline
-\end{tabularx}
-\end{table}
-
-The configured value \(S_{\mathrm{emb}}=1.6\) MB is the payload assigned to
-one embedding transmission event in the analytical link model. The
-corresponding backward gradient event uses the same payload profile. This value
-is a reproducible simulation input rather than a per sample or per layer tensor
-size.
-The ResNet 18 update payload in the formal configuration contains the 5130
-trainable classifier parameters stored as 32 bit floating point values, giving
-20520 bytes before encryption. The CKKS processing profile uses 4 MB as its
-reference granularity and scales linearly with the actual update payload.
-
-The pretrained model uses \texttt{ResNet18\_Weights.DEFAULT} from torchvision.
-The formal CIFAR 10 configuration is \texttt{resnet18\_pretrained\_head}:
-only the 512-to-10 classifier weight and bias (5130 parameters) are trained.
-The feature extractor and BatchNorm parameters and running statistics remain frozen.
-Client-level clipping and Gaussian noise operate on the complete classifier update;
-frozen backbone parameters are neither perturbed nor included in the encrypted update.
-Thus the unencrypted float32 update contains 20520 bytes. This scope is distinct
-from finetuning layer3 and layer4. The
-split point is placed after \texttt{layer2}, as shown in
-\tabref{tab:resnet_mode_mapping}. The same parameter partition is used by model
-execution, transmitted update construction, and aggregation.
-
-\begin{table*}[t]
-\centering
-\caption{ResNet 18 Execution and Aggregation Mapping}
-\label{tab:resnet_mode_mapping}
-\small
-\setlength{\tabcolsep}{4pt}
-\begin{tabularx}{\textwidth}{@{}lXXX@{}}
-\hline
-\textbf{Mode} & \textbf{End execution} & \textbf{Edge execution} & \textbf{Cloud role} \\
-\hline
-LIE & Frozen stem through layer2 & Downstream split execution and edge-side training & No Cloud update exposure \\
-LIIE & Local classifier training & Receives and aggregates local updates & No Cloud update exposure \\
-LIC & Frozen stem through layer2 & Relay only & Downstream split execution; no model-update upload \\
-LIIC & Local classifier training & Not on the update path & Receives protected client update \\
-LIEIIC & Frozen stem through layer2 & Downstream split execution and classifier training & Receives protected edge update \\
-LIEIIIC & Frozen stem through layer2 & Three split/edge stages followed by edge aggregation & Receives protected edge update \\
-LIIEIIIC & Three local/edge update stages & Aggregates staged local updates & Receives protected edge update \\
-\hline
+\begin{tabularx}{\textwidth}{@{}p{0.255\textwidth}XXX@{}}
+\toprule
+\textbf{Parameter} & \multicolumn{2}{c}{\textbf{CIFAR-10 / ResNet-18}} & \textbf{Fashion-MNIST / LeNet-5} \\
+\cmidrule(lr){2-3}
+ & \textbf{Main / S1 / S2} & \textbf{Mode ablation} & \textbf{Second dataset} \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Learning and privacy configuration}} \\
+Dataset / model & \multicolumn{2}{l}{CIFAR-10 / pretrained ResNet-18} & Fashion-MNIST / LeNet-5 \\
+Trainable parameters & \multicolumn{2}{l}{5,130 (classification head only)} & -- \\
+Train / test subset size & \multicolumn{2}{l}{24,000 / 2,000} & -- \\
+Clients / edge servers & \multicolumn{2}{l}{100 / 10} & -- \\
+Data partition / local validation & \multicolumn{2}{l}{Edge-label skew / 20\% per client} & -- \\
+Local epochs / learning rate & \multicolumn{2}{l}{3 / 0.01} & -- \\
+Split workload batch size & \multicolumn{2}{l}{128} & -- \\
+Privacy budget $(\epsilon,\delta)$ & \multicolumn{2}{l}{$(8,10^{-5})$, sample-level RDP} & -- \\
+HE cost model / seed & \multicolumn{2}{l}{CKKS-profiled / 42} & -- \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Client, edge, and network configuration}} \\
+Clients per edge (current topology) & \multicolumn{2}{l}{10} & -- \\
+Client / edge heterogeneity factors & Main/S2: 2 / 1.5; S1: 4 / 3 & 2 / 1.5 & -- \\
+Resource / memory limits & 1.35 / 1.35 & 100 / 100 & -- \\
+Edge / cloud CPU caps & Main: 100 / 200; S1/S2: 15 / 20 & 10,000 / 20,000 & -- \\
+Link rates (C--E / C--Cloud / E--Cloud) & \multicolumn{2}{l}{5 / 2.2 / 8 MB/s} & -- \\
+Base link delays (same order) & \multicolumn{2}{l}{15 / 40 / 10 ms} & -- \\
+Jitter strength & Main: 0.25; S1: 0.50; S2: 0.45 & 0.25 & -- \\
+Periodic network amp. / period & Main/S1: 0.20 / 3; S2: 0.55 / 12 & 0.20 / 3 & -- \\
+Pareto archive / beam size & 16 / 4 & 8 / 2 & -- \\
+Max search iters / neighbor top-$k$ & 50 / 16 & 20 / 16 & -- \\
+Mode reconfiguration period & $P=1$ (Ours) & $P=1,5,10$; fixed mode & -- \\
+\bottomrule
 \end{tabularx}
 \end{table*}
 
-For each seed, a seeded permutation selects 12000 CIFAR 10 training samples
-and 2000 test samples. Images use channel means
-$(0.4914,0.4822,0.4465)$ and standard deviations
-$(0.2023,0.1994,0.2010)$. Under the main moderate edge label skew, each label
-is shared equally across two adjacent edge domains with cyclic wraparound, and
-each edge therefore contains two neighboring labels. The samples assigned to
-each edge are divided among its ten associated clients. The extreme edge label
-skew variant used for stress testing instead assigns each label to one edge
-domain. Each client then reserves 20\% of its assigned samples for validation.
+The CIFAR-10 experiments adopt a pretrained ResNet-18 and freeze its
+feature-extraction backbone; only the 5,130 parameters in the final
+classification head are updated. We select 24,000 training images and
+2,000 test images. The edge-label-skew partition creates
+non-IID label distributions across edge groups, with 20\% of each
+client's assigned data reserved for local validation. The current
+100-client, 10-edge topology assigns ten clients to each edge.
 
-Client computation and memory factors are independently drawn from
-$\mathcal U(0.5,2.0)$, and edge computation factors are drawn from
-$\mathcal U(2/3,1.5)$. Lower computation factors indicate faster execution.
-For direction $u\rightarrow v$, the simulated rate in round $t$ is
-\begin{equation}
-R_{i,u,v}^{t}=\bar R_{u,v}[1+0.2\sin(t/3)]\zeta_{i,u,v}^{t},
-\qquad \zeta_{i,u,v}^{t}\sim\mathcal U(0.75,1.25).
-\label{eq:experiment_link_rate}
-\end{equation}
-The base rates are 5 MB/s for end to edge links, 2.2 MB/s for end to cloud
-links, and 8 MB/s for edge to cloud links. Reverse links use the same base
-rate. These values define a reproducible synthetic network scenario rather
-than a physical network measurement.
+\textbf{Heterogeneous resources and links.}
+Each client has an individual compute factor and memory-capacity
+factor, and each edge server has its own compute factor. The
+heterogeneity parameters in Table~\ref{tab:experimental_settings}
+control the dispersion of these capacities. S1 increases both client-
+and edge-level heterogeneity; S2 introduces more pronounced temporal
+variation in network connectivity. Client--edge, client--cloud, and
+edge--cloud links have distinct throughput and propagation delays;
+network jitter and a periodic variation component change their
+communication conditions across training rounds.
 
-Privacy execution follows the mode-specific exposure contract in
-Section~\ref{sec:privacy_model}. A mode first determines its transmitted objects
-and links. Under the current paper profile, a Cloud-facing model-update exposure
-requires both client-level DP calibration and HE-protected aggregation, whereas
-edge-only execution does not acquire an artificial Cloud release. For a dynamic
-privacy candidate, the update multiplier is the minimum value feasible under the
-client's current ledger and the protected update events planned over the remaining
-training horizon. Consequently there is no single noise multiplier shared by all
-modes and rounds. The CIFAR 10 classifier update is clipped at $C_u=0.25$ before
-the applicable DP mechanism. When a selected candidate uses HE, the formal
-configuration requires real SEAL execution; DP and HE retain their distinct
-privacy-loss and confidentiality roles. Only DP events that are actually executed
-and released are charged to the corresponding client ledger.
+\textbf{Evaluation criteria and baselines.}
+Our primary measure is \emph{test accuracy as a function of cumulative
+logical time}, reflecting the accuracy--time trade-off under resource
+and privacy constraints. We additionally report final accuracy,
+late-stage mean accuracy, total logical time, participation rate,
+and selection cost.
 
-All four formal policies use the same data partition, optimizer, training work,
-resource process, and flow model. The configured main-comparison seeds are 40,
-42, and 44. Controlled studies should use the same seeds unless a study explicitly
-states otherwise, and results from older execution revisions are not combined
-with the current formal comparison.
+The baselines include Fixed FedAvg, Fixed SplitFed, Fixed HFL,
+Random, Individual Optimal, and NSGA-II. Individual Optimal selects
+client modes independently, while NSGA-II uses a multiobjective
+population search. Within each scenario, all methods use matched
+model initialization, data splits, budgets, and system settings.
+The mode ablation changes only the reconfiguration policy.
 
-Every run stores the complete configuration, runtime environment, exact client
-partition, generated system profiles, model parameter partition, raw client
-decisions, link events, and round metrics in its output directory.
+\subsection{Search Space Reduction and Selection Cost}
+\label{sec:exp_search_cost}
 
-The system time used for efficiency comparisons is the modeled cloud-edge-end
-execution time plus the measured mode selection time. It includes the decision
-cost while excluding the sequential host overhead caused by emulating many
-clients on one machine. Host wall time is recorded separately as an
-implementation measurement and is not used as deployment latency.
+\textbf{Objective.}
+This experiment measures the reduction in candidate collaboration
+profiles and the computation required to select one profile under
+the coupled client, edge, and cloud constraints.
 
-\subsection{CKKS Profile Validation}
-\label{sec:ckks_validation}
+\textbf{Procedure.}
+For a scenario, we compare the combinatorial profile count with the
+feasible-mode search space and the number of complete profiles
+evaluated by bounded Pareto search. With seven supported collaboration
+modes and $N$ clients, the unconstrained mode space contains $7^N$
+profiles. Client-level filtering removes modes that violate resource,
+memory, activation, or privacy constraints. The Cartesian product of
+the remaining per-client modes is further restricted by shared
+edge/cloud admission, coverage, and secure-aggregation rules. The
+bounded search then evaluates a limited set of complete profiles and
+updates a nondominated archive.
 
-The CKKS profile uses polynomial modulus degree 8192, coefficient modulus bits
-\([50,40]\), scale \(2^{40}\), and chunks of at most 4096 values. A complete
-historical one round ResNet 18 validation selected HE for 40 clients and encrypted 21.13 GB
-of generated ciphertext. Encryption, ciphertext addition, and decryption took
-335.78 s. The maximum absolute difference from plaintext aggregation was
-\(9.17\times10^{-8}\). The profiled and encrypted executions produced the same
-test accuracy, and their global update norms differed by
-\(1.47\times10^{-9}\). These are historical full-model transport measurements, not validation results
-for the current classifier-only, mode-specific privacy execution. The
-5130-coordinate payload requires a fresh CKKS cost calibration; old costs must
-not be presented as measured classifier-only system performance.
-% The numerical tables and figures below must be regenerated with execution
-% revision paper_flow_v31_mode_specific_privacy before submission.
-\subsection{Compared Policies and Main Results}
-The formal comparison isolates the two adaptive axes of DynFL: collaboration
-mode and privacy calibration. For both fixed-mode baselines, the round-0 global
-selector first constructs a feasible heterogeneous per-client mode assignment
-under the same candidate legality and Edge/Cloud coverage constraints as DynFL;
-that assignment is then frozen for the remaining rounds. \textsc{Fixed Mode +
-Fixed Privacy} additionally reuses each client's round-0 protection profile,
-whereas \textsc{Fixed Mode + Dynamic Privacy} may recalibrate privacy within
-the frozen mode. \textsc{Dynamic Mode + Fixed Privacy} allows modes to adapt
-while holding the initial protection profile fixed, and \textsc{Full DynFL}
-makes both axes state dependent. If a frozen mode later becomes infeasible for
-a client, that client produces \textsc{skip} rather than switching mode;
-\textsc{skip} is an execution/admission outcome and not an additional
-collaboration mode.
-
-All four policies use the same per-client candidate legality checks,
-shared-resource flow model, system-level latency/error objectives, and actual
-execution/accounting path. Thus ``fixed privacy'' does not mean that privacy is
-disabled, and ``dynamic privacy'' does not introduce a separate privacy objective;
-it changes the state-dependent calibration used by otherwise legal exposures.
-The round-0 fixed-mode assignment satisfies the same Edge/Cloud coverage gate as
-the dynamic policies. After freezing, the fixed-mode baselines do not repair a
-coverage loss by changing collaboration mode; realized per-edge Cloud coverage
-and skips are reported as outcomes of the static assignment. Real HE is required
-whenever a selected candidate requires HE.
-
-\tabref{tab:main_comparison} and \figref{fig:accuracy_convergence} are reserved
-for the completed three-seed formal runs. The primary efficiency value is system
-time, which combines modeled workflow execution with measured decision time. The
-privacy column reports the realized update-level client privacy accounting under
-the executed protected events. Results produced by earlier fused/global-release
-execution revisions are not retained in this comparison because their privacy,
-aggregation, feasible-set, and timing semantics differ from the current protocol.
-
-\begin{table*}[t]
-\centering
-\caption{Main comparison on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over three random seeds}
-\label{tab:main_comparison}
-\scriptsize
-\begin{adjustbox}{max width=\textwidth}
-\begin{tabular}{lccccc}
-\hline
-\textbf{Method} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{$\epsilon$} \\
-\hline
-Fixed Mode + Fixed Privacy & -- & -- & -- & -- & -- \\
-Dynamic Mode + Fixed Privacy & -- & -- & -- & -- & -- \\
-Fixed Mode + Dynamic Privacy & -- & -- & -- & -- & -- \\
-Full DynFL & -- & -- & -- & -- & -- \\
-\hline
-\end{tabular}
-\end{adjustbox}
-\end{table*}
-\FloatBarrier
-
-\begin{figure}[t]
-\centering
-\IfFileExists{cifar10_resnet18_100r_wall_time_accuracy_v31.png}{
-\includegraphics[width=\columnwidth]{cifar10_resnet18_100r_wall_time_accuracy_v31.png}
-}{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v31 main experiment figure pending}}
-}
-\caption{Raw test accuracy against system time on CIFAR 10 with ResNet 18. All curves use the common interval determined by the shortest completed run. The curves show the mean over three random seeds, the shaded regions show 95\% confidence intervals, and the inset enlarges the final quarter of the common interval.}
-\label{fig:accuracy_convergence}
-\end{figure}
-
-\subsection{Reconfiguration Behavior}
-\label{sec:reconfiguration_behavior}
-
-The client decision logs expose how the selected workflow changes during
-training. \figref{fig:reconfiguration_behavior} reports the share of clients in
-each executable collaboration mode together with the realized protected-update
-exposure coverage. The mode switch curve records the fraction of clients whose
-selected mode differs from the preceding round. These measurements distinguish
-dynamic workflow reconfiguration from a fixed topology with changing scalar
-parameters.
-
-\begin{figure}[t]
-\centering
-\IfFileExists{cifar10_reconfiguration_trace_v31.png}{
-\includegraphics[width=\columnwidth]{cifar10_reconfiguration_trace_v31.png}
-}{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v31 reconfiguration figure pending}}
-}
-\caption{Raw collaboration mode shares, realized protected-update exposure coverage, and client mode switch rate over communication rounds. The curves report the mean over three random seeds.}
-\label{fig:reconfiguration_behavior}
-\end{figure}
-
-\subsection{Second Dataset and Model}
-\label{sec:second_dataset}
-
-Fashion MNIST with LeNet 5 evaluates the comparison in a different image
-domain and model scale. The experiment uses the same 100 clients, 10 edge
-nodes and a 100-round target. The secondary experiment must be regenerated under
-the current mode-specific privacy protocol before its numerical results are combined
-with the formal comparison; legacy seeds and outputs from the earlier execution
-revision are not treated as current results. The local learning rate is 0.15 and each round uses one
-local epoch. The split is placed between the convolutional encoder and the
-fully connected classifier.
-
-\begin{table}[t]
-\centering
-\caption{Fashion MNIST Results with LeNet 5 over 100 Communication Rounds}
-\label{tab:second_dataset}
-\scriptsize
-\begin{tabular}{lccc}
-\hline
-\textbf{Method} & \textbf{Final Acc.} & \textbf{System Time} & \textbf{Comm.} \\
-\hline
-Ours & -- & -- & -- \\
-Individual Optimal & -- & -- & -- \\
-No Protection & -- & -- & -- \\
-Random & -- & -- & -- \\
-Fixed FedAvg & -- & -- & -- \\
-Fixed SplitFed & -- & -- & -- \\
-Fixed HFL & -- & -- & -- \\
-NSGA II & -- & -- & -- \\
-\hline
-\end{tabular}
-\end{table}
-
-\begin{figure}[t]
-\centering
-\IfFileExists{fmnist_lenet5_100r_wall_time_accuracy_v31.png}{
-\includegraphics[width=\columnwidth]{fmnist_lenet5_100r_wall_time_accuracy_v31.png}
-}{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 second dataset figure pending}}
-}
-\caption{Raw Fashion MNIST test accuracy against system time with LeNet 5. The curves report the mean and 95\% confidence interval over three random seeds.}
-\label{fig:second_dataset}
-\end{figure}
-
-\subsection{Decision Time and Scale}
-\label{sec:decision_scale}
-
-\figref{fig:decision_scale} reports measured decision time and system time with
-20, 50, and 100 clients. Ours and Individual Optimal use the
-same client profiles, candidate sets, privacy targets, and training settings at
-each scale.
-
-\begin{figure}[t]
-\centering
-\IfFileExists{cifar10_decision_scalability_v31.png}{
-\includegraphics[width=\columnwidth]{cifar10_decision_scalability_v31.png}
-}{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 scale experiment figure pending}}
-}
-\caption{Measured decision time and system time under different client scales.}
-\label{fig:decision_scale}
-\end{figure}
-
-\subsection{Small Scale Search Quality}
-\label{sec:pareto_quality}
-
-We compare the bounded search with exact enumeration on 12 instances formed by
-2 to 5 clients and random seeds 40, 42, and 44. Each client retains four
-representative feasible candidates. Both solvers use the same event flow
-evaluation, privacy conditions, and edge coverage constraint. Objective points
-with equal latency and error cost are counted once because different client
-assignments can be objective equivalent.
-
-\begin{table}[t]
-\centering
-\caption{Bounded Search Quality Against Exact Enumeration}
-\label{tab:pareto_quality}
-\small
-\begin{tabular}{lcc}
-\hline
-\textbf{Metric} & \textbf{Mean} & \textbf{Worst} \\
-\hline
-Pareto objective recall & 96.73\% & 75.00\% \\
-Normalized hypervolume gap & 0.0103 & 0.1158 \\
-Tchebycheff regret & 0.0202 & 0.1137 \\
-Objective equivalent decision rate & 83.33\% & \multicolumn{1}{c}{N/A} \\
-Evaluated profile reduction & 34.90\% & 6.25\% \\
-\hline
-\end{tabular}
-\end{table}
-
-The bounded search recovers most unique Pareto objective points and reduces the
-number of evaluated profiles. The nonzero worst case gaps confirm that it is an
-approximate solver rather than an exact optimizer. The deterministic tie rule
-orders equal Tchebycheff values by latency, error cost, and profile identity.
-
-\subsection{Empirical Calibration of the Error Cost Estimate}
-For every Ours run, the value of
-$\widehat J_{\mathrm{learn}}^t$ is recorded before the selected round update.
-It is paired with the test loss after that update, the change in test loss, and
-the change in test accuracy. Spearman and Kendall correlations are computed
-within each seed and after standardizing each trajectory within its seed. This
-experiment evaluates whether the estimate orders observed training outcomes in
-the intended direction. A useful estimate is expected to correlate positively
-with post update loss and loss increase and negatively with accuracy increase.
-
-\begin{table}[t]
-\centering
-\caption{Empirical Calibration of the Estimated Convergence Error Cost}
-\label{tab:error_cost_calibration}
-\small
-\begin{tabular}{lcc}
-\hline
-\textbf{Observed outcome} & \textbf{Spearman} & \textbf{Kendall} \\
-\hline
-Post update test loss & -- & -- \\
-Test loss change & -- & -- \\
-Test accuracy change & -- & -- \\
-\hline
-\end{tabular}
-\end{table}
-
-\subsection{Strategy Update Period}
-\label{sec:strategy_period_result}
-
-\figref{fig:strategy_period} evaluates strategy update periods 1, 5, 10, and
-20 with seeds 40, 42, and 44. The experiment reports final and last 10 round
-accuracy, total decision time, and system time. This comparison tests
-how frequently the collaboration workflow must be reconfigured to retain its
-utility while controlling search overhead.
-
-\begin{figure}[t]
-\centering
-\IfFileExists{cifar10_strategy_period_v31.png}{
-\includegraphics[width=\columnwidth]{cifar10_strategy_period_v31.png}
-}{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 strategy period figure pending}}
-}
-\caption{Effect of the strategy update period on accuracy, decision time, and system time.}
-\label{fig:strategy_period}
-\end{figure}
-
-\subsection{Privacy Budget Sensitivity}
-\label{sec:privacy_sensitivity}
-
-\figref{fig:privacy_budget} evaluates total update privacy targets 1, 2, 4,
-and 8 with seeds 40, 42, and 44. Each run recalibrates the update noise
-multiplier for the same 100 round horizon. The figure reports realized client
-privacy loss, final accuracy, and last 10 round accuracy.
-
-\begin{figure}[t]
-\centering
-\IfFileExists{cifar10_privacy_budget_v31.png}{
-\includegraphics[width=\columnwidth]{cifar10_privacy_budget_v31.png}
-}{
-\fbox{\parbox[c][4.2cm][c]{0.94\columnwidth}{\centering v31 privacy budget figure pending}}
-}
-\caption{Accuracy and realized privacy loss under different total privacy targets.}
-\label{fig:privacy_budget}
-\end{figure}
+\textbf{Results.}
+Results are pending valid pre-decision certificates. No profile
+evaluation count or selection-time measurement from the removed
+objective is reported.
 
 \subsection{Ablation Study}
 \label{sec:ablation_result}
 
-The ablation study compares the complete method with three variants. No Global
-Coordination replaces the global profile search with independent client
-selection. No Error Cost Estimate removes
-\(\widehat J_{\mathrm{learn}}\) from the objectives. Fixed LIIEIIIC
-restricts every feasible client to the LIIEIIIC
-mode while retaining the same training and feasibility checks.
+\subsubsection{Mode Selection and Reconfiguration Period}
+\label{subsec:dynamic_mode_ablation}
 
-The controlled comparison is configured to use seeds 40, 42, and 44. The table
-is reserved for complete 100-round utility, communication, privacy,
-participation, and system-time results generated under the current execution
-revision. The figure shows raw accuracy within the common system time
-interval determined by the shortest completed ablation run.
+We evaluate the effect of periodically reassigning collaboration modes
+under the same dynamic privacy policy. Dynamic Mode updates mode
+assignments every $P$ training rounds; Fixed Mode keeps its initial
+assignments at every $P$. The paired configurations use the settings in
+Table~\ref{tab:experimental_settings} with the same number of active
+updates, optimizer steps, and certificate requirements. Periods $P=1,5,10$
+are compared with fixed assignment. The reported metrics are final
+accuracy, last-ten-active-round mean accuracy, cumulative logical time,
+and active rounds.
 
-\begin{table*}[t]
-\centering
-\caption{Ablation results on CIFAR 10 with ResNet 18 over 100 communication rounds. Values will report the mean and 95\% confidence interval over three random seeds}
-\label{tab:ablation}
-\scriptsize
-\begin{adjustbox}{max width=\textwidth}
-\begin{tabular}{lcccccc}
-\hline
-\textbf{Variant} & \textbf{Final Acc. (\%)} & \textbf{Last 10 Acc. (\%)} & \textbf{System Time (s)} & \textbf{Comm. (GB)} & \textbf{Effective Clients (\%)} & \textbf{$\epsilon$} \\
-\hline
-Ours & -- & -- & -- & -- & -- & -- \\
-No Global Coordination & -- & -- & -- & -- & -- & -- \\
-No Error Cost Estimate & -- & -- & -- & -- & -- & -- \\
-Fixed LIIEIIIC & -- & -- & -- & -- & -- & -- \\
-\hline
-\end{tabular}
-\end{adjustbox}
-\end{table*}
+Results are pending valid pre-decision certificates. No accuracy or
+logical-time comparison from the removed objective is reported.
 
-\begin{figure}[t]
-\centering
-\IfFileExists{cifar10_ablation_wall_time_accuracy_v31.png}{
-\includegraphics[width=\columnwidth]{cifar10_ablation_wall_time_accuracy_v31.png}
-}{
-\fbox{\parbox[c][4.5cm][c]{0.94\columnwidth}{\centering v31 ablation figure pending}}
-}
-\caption{Raw test accuracy against system time for the complete method and three ablation variants. The curves use the common interval determined by the shortest completed run, and the inset enlarges the final quarter of that interval.}
-\label{fig:ablation}
-\end{figure}
+
+\subsection{Comparison with Baselines}
+\label{sec:main_comparison}
+
+We compare Ours with Individual Optimal, Random, Fixed FedAvg,
+Fixed SplitFed, Fixed HFL, and NSGA-II under the same constrained
+experimental profile. The fixed-mode baselines represent the
+corresponding modes in our implementation rather than full external
+reimplementations. All methods must use the same pre-decision
+certificate manifest and the same online upper-bound objective; a method
+that cannot obtain a valid certificate is reported as unavailable rather
+than being run with a legacy objective.
+
+Results are pending valid pre-decision certificates. No baseline
+accuracy, loss, logical-time, or participation comparison from the
+removed objective is reported.
+
+\subsection{Discussion}
+\label{sec:reconfiguration_behavior}
+\label{sec:experiment_limits}
+The constrained baseline comparison and mode-selection ablation are
+designed to examine complementary aspects of system efficiency. They
+cannot be executed under the formal online-J objective until real
+pre-decision certificates are supplied for every round and candidate
+identity. This version therefore does not report numerical comparisons.
+The evaluation protocol instead fixes the common initialization, data
+split, baseline definitions, certificate manifest, and metric set so
+that results can be regenerated without mixing the removed legacy
+objectives. The certification boundary is also part of the evaluation:
+a missing or invalid certificate stops the formal run before training,
+and no diagnostic surrogate is relabeled as certified.
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -1511,9 +1397,13 @@ framework for federated learning under resource and privacy constraints. The
 unified collaboration space represents execution placement, aggregation
 topology, transmitted objects, and return paths as the dynamic decision, while a
 mode-specific exposure contract determines where DP and HE are required. The
-joint model evaluates latency, communication, candidate-specific DP distortion,
-encrypted aggregation overhead, and estimated convergence error cost. The constrained multiobjective formulation is solved by bounded Pareto
-search and ideal point Tchebycheff selection.
+pre-decision certificate model evaluates latency, communication,
+candidate-specific DP distortion, encrypted aggregation overhead, and a
+certified upper bound on the joint learning error. Missing or invalid
+certificates stop the formal decision; there is no fallback to removed legacy
+objectives, offline calibration tables, or oracle diagnostics. The constrained
+multiobjective formulation is solved by bounded Pareto search and ideal point
+Tchebycheff selection.
 
 The current framework uses profiled computation and link rates in its logical
 latency model, while the training process and CKKS aggregation are executed on
@@ -1522,97 +1412,598 @@ cloud-edge-end deployment and will further reduce reconfiguration overhead
 through parallel profile evaluation, distributed search, and warm starts.
 
 \appendix
-\section{Derivation of the Expected Learning Objective Bound}
+\section{Analysis of Joint Learning Error}
 \label{app:convergence_proof}
 
-This appendix provides the formal proof for the learning objective bound formulated in Sec.~\ref{sec:learning_cost}.
+This appendix establishes the relationship
+between the joint learning error in
+Sec.~\ref{sec:learning_cost} and the
+convergence of the global model.
 
-\subsection{System Model and Update Decomposition}
-Let $F(w)$ denote the global objective function. We assume that $F$ is $L$-smooth (denoted by $\beta$ in the main text to prevent notation conflict with the Local tier $L$), satisfying
-\begin{equation}
-F(y) \le F(x) + \langle \nabla F(x), y - x \rangle + \frac{\beta}{2}\|y - x\|_2^2, \quad \forall x, y.
-\label{eq:app_smoothness}
-\end{equation}
+\subsection{Aggregation Error Bound}
 
-In round $t$, let $\Delta_{\mathrm{full}}^t = \sum_{i=1}^N \frac{n_i}{N_{\mathrm{total}}} u_i^t$ denote the ideal, unperturbed full-fusion model update with $\|u_i^t\|_2 \le C_u$. For a given collaboration profile $\mathbf h^t$, let $\mathcal C^t \subseteq \{1,\dots,N\}$ denote the subset of clients whose updates participate in Cloud aggregation (either directly or aggregated via Edge groups). The noise-free profile update received at the Cloud is
-\begin{equation}
-\Delta_{\mathrm{prof}}^t = \sum_{i \in \mathcal C^t} \frac{n_i}{N_C^t(\mathbf h^t)} u_i^t,
-\end{equation}
-where $N_C^t(\mathbf h^t) = \sum_{i \in \mathcal C^t} n_i$.
-The privacy mechanism injects a zero-mean perturbation $z_{\mathrm{DP}}^t(\mathbf h^t)$ with variance $\mathbb E_t[\|z_{\mathrm{DP}}^t(\mathbf h^t)\|_2^2] = J_{\mathrm{DP}}(\mathbf h^t)$, yielding the executed global model update:
-\begin{equation}
-w^{t+1} - w^t = \Delta_{\mathrm{prof}}^t + z_{\mathrm{DP}}^t(\mathbf h^t).
-\end{equation}
+For a fixed mode profile, the aggregation
+error is given by
+\eqref{eq:aggregation_error}.
+The clean updates and aggregation weights
+are treated as fixed when evaluating the
+conditional privacy perturbation moments.
 
-\subsection{Lemma 1: Bounding Fusion Deviation}
 \begin{lemma}
-Let $r_C^t(\mathbf h^t) = N_C^t(\mathbf h^t) / N_{\mathrm{total}} \in (0, 1]$ denote the sample mass ratio represented at the Cloud. The squared norm of the fusion deviation $e_{\mathrm{fus}}^t = \Delta_{\mathrm{prof}}^t - \Delta_{\mathrm{full}}^t$ satisfies
+\label{lem:aggregation_error}
+Suppose that
+\(\|u_{i,0}^t\|_2\le U_i^t\)
+for every client \(i\). Then
 \begin{equation}
-B_{\mathrm{fus}}^t(\mathbf h^t) := \|e_{\mathrm{fus}}^t\|_2^2 \le 4C_u^2\left(1 - r_C^t(\mathbf h^t)\right)^2.
-\label{eq:app_lemma_bound}
+\|e_{\mathrm{agg}}^t\|_2
+\le
+\sum_{i=1}^{N}
+|a_i^t-p_i|U_i^t.
+\label{eq:app_aggregation_bound}
 \end{equation}
+If \(U_i^t\le U^t\) for all clients, then
+\(
+\|e_{\mathrm{agg}}^t\|_2
+\le U^t\|\mathbf a^t-\mathbf p\|_1
+\).
 \end{lemma}
 
 \begin{proof}
-Let $\bar u_C^t = \sum_{i \in \mathcal C^t} \frac{n_i}{N_C^t} u_i^t$ and $\bar u_{\bar C}^t = \sum_{i \notin \mathcal C^t} \frac{n_i}{N_{\mathrm{total}} - N_C^t} u_i^t$ be the convex combinations of updates inside and outside the Cloud-participating set, respectively. Then the full update decomposes as
+From \eqref{eq:aggregation_error}
+and the triangle inequality,
 \begin{equation}
-\Delta_{\mathrm{full}}^t = r_C^t \bar u_C^t + (1 - r_C^t)\bar u_{\bar C}^t.
+\begin{aligned}
+\|e_{\mathrm{agg}}^t\|_2
+&=
+\left\|
+\sum_i(a_i^t-p_i)u_{i,0}^t
+\right\|_2\\
+&\le
+\sum_i |a_i^t-p_i|
+\|u_{i,0}^t\|_2\\
+&\le
+\sum_i |a_i^t-p_i|U_i^t.
+\end{aligned}
 \end{equation}
-Since $\Delta_{\mathrm{prof}}^t = \bar u_C^t$, the discrepancy is
-\begin{equation}
-e_{\mathrm{fus}}^t = \bar u_C^t - \left(r_C^t \bar u_C^t + (1 - r_C^t)\bar u_{\bar C}^t\right) = (1 - r_C^t)(\bar u_C^t - \bar u_{\bar C}^t).
-\end{equation}
-Applying the triangle inequality under the clipping bound $\|u_i^t\|_2 \le C_u$:
-\begin{equation}
-\|e_{\mathrm{fus}}^t\|_2 \le (1 - r_C^t)\left(\|\bar u_C^t\|_2 + \|\bar u_{\bar C}^t\|_2\right) \le 2C_u(1 - r_C^t).
-\end{equation}
-Squaring both sides yields \eqref{eq:app_lemma_bound}.
+Applying the common bound \(U^t\)
+gives the second result.
 \end{proof}
 
-\subsection{Proposition 1: One-Round Expected Loss Bound}
-\begin{proposition}
-\label{prop:learning_bound}
-Assume the unperturbed full-fusion update provides the true gradient direction, such that $g^t = -\frac{1}{\eta}\Delta_{\mathrm{full}}^t = \nabla F(w^t)$. Under step size $\eta \le 1/\beta$, identifying $b_{\mathrm{fus}}^t = -\frac{1}{\eta}e_{\mathrm{fus}}^t$, the conditional expected loss satisfies
+\subsection{Joint Update Error}
+
+Let \(\mathbb E_t\) denote conditional
+expectation given the round information,
+selected mode profile, and common
+training schedule. Under this conditioning,
+the clean reference updates and aggregation
+weights are fixed.
+
+Define the aggregated trajectory difference
+as \(D_s^t=\sum_i a_i^tD_i^t\).
+Using \eqref{eq:actual_cloud_update},
+the total update error satisfies
 \begin{equation}
-\mathbb E_t[F(w^{t+1})] \le F(w^t) - \frac{\eta}{2}\|\nabla F(w^t)\|_2^2 + \frac{1}{2\eta}\left[ B_{\mathrm{fus}}^t(\mathbf h^t) + J_{\mathrm{DP}}(\mathbf h^t) \right].
+e_{\mathrm{upd}}^t
+=
+e_{\mathrm{alg}}^t
++
+e_{\mathrm{agg}}^t
++
+D_s^t.
+\label{eq:app_update_error}
+\end{equation}
+
+\begin{proposition}
+\label{prop:joint_error}
+Let
+\(b_s^t=\mathbb E_t[D_s^t]\)
+and \(V_s^t=\operatorname{Cov}_t(D_s^t)\).
+Then
+\begin{equation}
+\mathbb E_t
+\|e_{\mathrm{upd}}^t\|_2^2
+=
+\left\|
+e_{\mathrm{alg}}^t+
+e_{\mathrm{agg}}^t+b_s^t
+\right\|_2^2
++
+\operatorname{Tr}(V_s^t).
+\label{eq:app_joint_error}
 \end{equation}
 \end{proposition}
 
 \begin{proof}
-Substituting $w^{t+1} - w^t = -\eta(g^t + b_{\mathrm{fus}}^t) + z_{\mathrm{DP}}^t$ into \eqref{eq:app_smoothness}:
+Write
+\(D_s^t=b_s^t+\zeta_s^t\),
+where \(\mathbb E_t[\zeta_s^t]=0\)
+and
+\(\operatorname{Cov}_t(\zeta_s^t)=V_s^t\).
+From \eqref{eq:app_update_error},
 \begin{equation}
-\begin{aligned}
-F(w^{t+1}) \le F(w^t) &+ \langle \nabla F(w^t), -\eta(g^t + b_{\mathrm{fus}}^t) + z_{\mathrm{DP}}^t \rangle \\
-&+ \frac{\beta}{2}\left\|-\eta(g^t + b_{\mathrm{fus}}^t) + z_{\mathrm{DP}}^t\right\|_2^2.
-\end{aligned}
+e_{\mathrm{upd}}^t
+=
+e_{\mathrm{alg}}^t+
+e_{\mathrm{agg}}^t+
+b_s^t+\zeta_s^t.
 \end{equation}
-Taking conditional expectation $\mathbb E_t[\cdot]$ given $w^t$, since the perturbation is zero-mean ($\mathbb E_t[z_{\mathrm{DP}}^t] = 0$) and independent of the current gradients, the inner product with $z_{\mathrm{DP}}^t$ vanishes:
-\begin{equation}
-\begin{aligned}
-\mathbb E_t[F(w^{t+1})] \le F(w^t) &- \eta \langle g^t, g^t + b_{\mathrm{fus}}^t \rangle \\
-&+ \frac{\beta\eta^2}{2}\|g^t + b_{\mathrm{fus}}^t\|_2^2 + \frac{\beta}{2}\mathbb E_t[\|z_{\mathrm{DP}}^t\|_2^2].
-\end{aligned}
-\end{equation}
-Using the condition $\eta \le 1/\beta \implies \frac{\beta\eta^2}{2} \le \frac{\eta}{2}$, we bound the quadratic term:
-\begin{equation}
-\begin{aligned}
-&-\eta \langle g^t, g^t + b_{\mathrm{fus}}^t \rangle + \frac{\beta\eta^2}{2}\|g^t + b_{\mathrm{fus}}^t\|_2^2 \\
-&\le -\eta \|g^t\|_2^2 - \eta \langle g^t, b_{\mathrm{fus}}^t \rangle \\
-&\quad + \frac{\eta}{2}\left(\|g^t\|_2^2 + 2\langle g^t, b_{\mathrm{fus}}^t \rangle + \|b_{\mathrm{fus}}^t\|_2^2\right) \\
-&= - \frac{\eta}{2}\|g^t\|_2^2 + \frac{\eta}{2}\|b_{\mathrm{fus}}^t\|_2^2.
-\end{aligned}
-\end{equation}
-Notice that the cross term $\eta \langle g^t, b_{\mathrm{fus}}^t \rangle$ cancels out identically.
-Substituting $\|b_{\mathrm{fus}}^t\|_2^2 = \frac{1}{\eta^2}\|e_{\mathrm{fus}}^t\|_2^2 = \frac{1}{\eta^2}B_{\mathrm{fus}}^t$ and $\mathbb E_t[\|z_{\mathrm{DP}}^t\|_2^2] = J_{\mathrm{DP}}(\mathbf h^t)$ gives
-\begin{equation}
-\mathbb E_t[F(w^{t+1})] \le F(w^t) - \frac{\eta}{2}\|g^t\|_2^2 + \frac{1}{2\eta}B_{\mathrm{fus}}^t(\mathbf h^t) + \frac{\beta}{2}J_{\mathrm{DP}}(\mathbf h^t).
-\end{equation}
-Using the step-size assumption $\eta \le 1/\beta \implies \beta \le 1/\eta$, we can further upper-bound the DP term coefficient as $\frac{\beta}{2} \le \frac{1}{2\eta}$. Applying Lemma 1 to bound $B_{\mathrm{fus}}^t(\mathbf h^t) \le 4C_u^2(1 - r_C^t(\mathbf h^t))^2$, we obtain
-\begin{equation}
-\mathbb E_t[F(w^{t+1})] \le F(w^t) - \frac{\eta}{2}\|g^t\|_2^2 + \frac{1}{2\eta}\left[ 4C_u^2(1 - r_C^t(\mathbf h^t))^2 + J_{\mathrm{DP}}(\mathbf h^t) \right].
-\end{equation}
-Dropping the terms independent of $\mathbf h^t$ and factoring out the common positive scaling constant $\frac{1}{2\eta}$, we establish the surrogate objective $\widehat J_{\mathrm{learn}}^t(\mathbf h^t)$ in \eqref{eq:j_learn_objective}.
+Expanding its squared norm and taking
+conditional expectation eliminates the
+cross term involving \(\zeta_s^t\).
+Furthermore,
+\(\mathbb E_t\|\zeta_s^t\|_2^2
+=\operatorname{Tr}(V_s^t)\).
+The stated identity follows.
 \end{proof}
+
+The covariance satisfies
+\(
+V_s^t=\sum_{i,j}a_i^ta_j^tV_{ij}^t
+\).
+When the client perturbations are
+conditionally independent,
+\(
+V_s^t=\sum_i(a_i^t)^2V_{ii}^t
+\).
+This exact identity is retained as the definition of
+the learning error. The formal selection objective does
+not estimate the covariance from offline data; it uses
+the certified upper bound derived below.
+
+\subsection{Expected Loss and Convergence}
+
+Assume that the global objective
+\(F\) is \(\beta\)-smooth, so that
+\begin{equation}
+F(y)
+\le
+F(x)+
+\langle\nabla F(x),y-x\rangle
++
+\frac{\beta}{2}\|y-x\|_2^2.
+\label{eq:app_smoothness}
+\end{equation}
+
+\begin{proposition}
+\label{prop:learning_bound}
+Suppose that \(F\) is
+\(\beta\)-smooth and
+\(0<\eta_t\le 1/\beta\).
+For the model update
+\(w^{t+1}=w^t+\Delta_s^t\),
+the conditional expected loss satisfies
+\begin{equation}
+\mathbb E_t[F(w^{t+1})]
+\le
+F(w^t)
+-
+\frac{\eta_t}{2}
+\|\nabla F(w^t)\|_2^2
++
+\frac{
+J_{\mathrm{learn}}^t(\mathbf h^t)
+}{2\eta_t}.
+\label{eq:app_expected_descent}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+By the definition of the total update
+error,
+\begin{equation}
+w^{t+1}
+=
+w^t-\eta_t\nabla F(w^t)
++e_{\mathrm{upd}}^t.
+\end{equation}
+Let \(g^t=\nabla F(w^t)\).
+Applying \eqref{eq:app_smoothness}
+gives
+\begin{equation}
+\begin{aligned}
+F(w^{t+1})
+\le {}&
+F(w^t)
++
+\langle g^t,
+-\eta_tg^t+e_{\mathrm{upd}}^t
+\rangle\\
+&+
+\frac{\beta}{2}
+\|-\eta_tg^t+e_{\mathrm{upd}}^t\|_2^2.
+\end{aligned}
+\end{equation}
+Since \(\beta\le 1/\eta_t\),
+the quadratic term is bounded by
+\begin{equation}
+\begin{aligned}
+\frac{\beta}{2}
+\|-\eta_tg^t+e_{\mathrm{upd}}^t\|_2^2
+\le {}&
+\frac{\eta_t}{2}\|g^t\|_2^2\\
+&-
+\langle g^t,e_{\mathrm{upd}}^t\rangle\\
+&+
+\frac{1}{2\eta_t}
+\|e_{\mathrm{upd}}^t\|_2^2.
+\end{aligned}
+\end{equation}
+Substitution cancels the inner
+products involving
+\(e_{\mathrm{upd}}^t\), yielding
+\begin{equation}
+F(w^{t+1})
+\le
+F(w^t)
+-
+\frac{\eta_t}{2}\|g^t\|_2^2
++
+\frac{1}{2\eta_t}
+\|e_{\mathrm{upd}}^t\|_2^2.
+\end{equation}
+Taking conditional expectation
+and applying
+\eqref{eq:j_learn_exact}
+completes the proof.
+\end{proof}
+
+The bound holds for a biased update
+error and does not require
+\(\mathbb E_t[e_{\mathrm{upd}}^t]=0\).
+
+For the convergence result, assume
+that \(F\) satisfies the
+Polyak--Lojasiewicz (PL) condition
+with parameter \(\mu>0\):
+\begin{equation}
+\|\nabla F(w)\|_2^2
+\ge
+2\mu\bigl(F(w)-F^*\bigr),
+\label{eq:app_pl_condition}
+\end{equation}
+where \(F^*=\inf_w F(w)\).
+
+\begin{corollary}
+\label{cor:joint_pl_convergence}
+Under the assumptions of
+Proposition~\ref{prop:learning_bound}
+and the PL condition,
+\begin{equation}
+\begin{aligned}
+\mathbb E_t
+[F(w^{t+1})-F^*]
+\le {}&
+(1-\mu\eta_t)
+(F(w^t)-F^*)\\
+&+
+\frac{
+J_{\mathrm{learn}}^t(\mathbf h^t)
+}{2\eta_t}.
+\end{aligned}
+\label{eq:app_pl_recursion}
+\end{equation}
+\end{corollary}
+
+\begin{proof}
+Applying \eqref{eq:app_pl_condition}
+to the gradient term in
+\eqref{eq:app_expected_descent}
+gives the stated recursion.
+\end{proof}
+
+For a constant step size
+\(\eta_t=\eta\) satisfying
+\(0<\mu\eta\le 1\), suppose that
+\(J_{\mathrm{learn}}^t(\mathbf h^t)
+\le\overline J\)
+for all rounds. Setting
+\(q=1-\mu\eta\) and taking
+successive expectations yields
+\begin{equation}
+\begin{aligned}
+\mathbb E[F(w^T)-F^*]
+\le {}&
+q^T\bigl(F(w^0)-F^*\bigr)\\
+&+
+\frac{\overline J}{2\eta}
+\sum_{t=0}^{T-1}q^{T-1-t}.
+\end{aligned}
+\label{eq:app_pl_multiround}
+\end{equation}
+Consequently,
+\begin{equation}
+\limsup_{T\to\infty}
+\mathbb E[F(w^T)-F^*]
+\le
+\frac{\overline J}{2\mu\eta^2}.
+\label{eq:app_pl_error_floor}
+\end{equation}
+
+Thus, the joint learning error
+controls the residual term in the
+expected convergence bound.
+The formal selection objective is the certified
+pre-decision upper bound
+\(\overline J^t(\mathbf h^t)\ge
+J_{\mathrm{learn}}^t(\mathbf h^t)\).
+Substituting \(\overline J^t\) for
+\(J_{\mathrm{learn}}^t\) in
+\eqref{eq:app_expected_descent} preserves the descent
+bound, conditional on the certificate assumptions.
+
+\paragraph{Pre-decision online learning-error bound.}
+For a candidate profile $\mathbf h^t$, let
+$a_i^t(\mathbf h^t)$ be the effective Cloud weight determined by
+admission and aggregation topology, and let
+$p_i=n_i/\sum_jn_j$ be the population sample weight.
+Define the ideal full-gradient step and the ideal client
+contribution
+\begin{equation}
+\Delta_*^t=-\eta_*\nabla F(w^t),
+\qquad
+v_i^t=-\eta_*\nabla F_i(w^t),
+\label{eq:app_ideal_steps}
+\end{equation}
+so that $\Delta_*^t=\sum_i p_iv_i^t$ when the global objective is
+population-sample-weighted, $F=\sum_i p_iF_i$.
+The clean Cloud update of the profile is
+\begin{equation}
+\Delta_{\mathrm{clean}}^t(\mathbf h^t)
+=\gamma\sum_{i\in\mathcal C^t}a_i^tu_i^t(h_i),
+\label{eq:app_clean_update}
+\end{equation}
+where $u_i^t(h_i)$ is the noise-free mode update and $\gamma$ is the
+Cloud step scale. The privacy-protected Cloud update is
+$\Delta_s^t=\Delta_{\mathrm{clean}}^t+\xi^t$, with
+$\xi^t=\gamma\sum_{i\in\mathcal C^t}a_i^tz_i^t$ and
+$\mathbb E_t[z_i^t]=0$ for every aggregate share.
+
+\textbf{Exact decomposition.}
+Let $\hat v_i^t$ be a pre-decision reference for $v_i^t$. Adding and
+subtracting $\sum_i(\gamma a_i^t-p_i)\hat v_i^t$ gives, before any norm
+inequality,
+\begin{equation}
+\begin{aligned}
+\Delta_{\mathrm{clean}}^t-\Delta_*^t
+={}&
+\sum_i(\gamma a_i^t-p_i)\hat v_i^t\\
+&+\sum_i(\gamma a_i^t-p_i)(v_i^t-\hat v_i^t)\\
+&+\gamma\sum_{i\in\mathcal C^t}a_i^t
+\bigl(u_i^t(h_i)-v_i^t\bigr).
+\end{aligned}
+\label{eq:app_online_identity}
+\end{equation}
+The first term is the certifiable center; the last two terms are the
+reference and mode radii. The reference may be stored per client, or as
+a shared direction $\hat v_i^t=s_i^td^t$; in the shared form,
+$s_i^td^t$ is a deterministic center and $r_i^{\mathrm{ref}}$ must
+cover both the client heterogeneity and the reference uncertainty.
+
+\textbf{Certified radii and noise.}
+The certificate supplies
+\begin{equation}
+\|v_i^t-\hat v_i^t\|_2\le r_i^{\mathrm{ref}},
+\qquad
+\|u_i^t(h_i)-v_i^t\|_2\le r_i^{\mathrm{mode}}(h_i)
+\label{eq:app_online_radii}
+\end{equation}
+for every participating client, and an aggregate-share standard
+deviation $\sigma_i^t$ with
+$\mathbb E_t\|z_i^t\|_2^2\le d(\sigma_i^t)^2$.
+If the shares are conditionally zero-mean and conditionally
+uncorrelated,
+\begin{equation}
+\mathbb E_t\|\xi^t\|_2^2
+\le Q^t(\mathbf h^t)
+=d\sum_{i\in\mathcal C^t}
+\bigl(\gamma a_i^t\sigma_i^t\bigr)^2.
+\label{eq:app_online_q}
+\end{equation}
+Local DP-SGD noise is already included in
+$r_i^{\mathrm{mode}}(h_i)$; it must not be counted again in $Q^t$.
+Define
+\begin{align}
+C^t&=\left\|\sum_i(\gamma a_i^t-p_i)\hat v_i^t\right\|_2,\\
+R_{\mathrm{ref}}^t&=\sum_i
+|\gamma a_i^t-p_i|r_i^{\mathrm{ref}},\\
+R_{\mathrm{mode}}^t&=\gamma\sum_{i\in\mathcal C^t}
+a_i^tr_i^{\mathrm{mode}}(h_i),\\
+R^t&=R_{\mathrm{ref}}^t+R_{\mathrm{mode}}^t.
+\end{align}
+Then
+\begin{equation}
+\left\|\Delta_{\mathrm{clean}}^t-\Delta_*^t\right\|_2
+\le C^t+R^t.
+\label{eq:app_online_clean_bound}
+\end{equation}
+
+\begin{proposition}[Pre-decision online joint-error upper bound]
+\label{prop:predecision_online_upper}
+Condition on the round state, candidate profile, certificates, and
+common training schedule. Under
+\eqref{eq:app_online_radii} and \eqref{eq:app_online_q}, with the
+declared conditional assumptions and a certified numerical RMS error
+$r_{\mathrm{num}}$,
+\begin{equation}
+J_{\mathrm{learn}}^t(\mathbf h^t)
+\le\left(
+\sqrt{\left(C^t+R^t\right)^2+Q^t}
++r_{\mathrm{num}}
+\right)^2
+=\overline J^t(\mathbf h^t).
+\label{eq:app_online_upper}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Let $b^t=\Delta_{\mathrm{clean}}^t-\Delta_*^t$, which is fixed
+conditional on the pre-decision information. Since
+$\mathbb E_t[\xi^t]=0$, the cross term in
+\begin{equation}
+J_{\mathrm{learn}}^t
+=\mathbb E_t\|b^t+\xi^t\|_2^2
+=\|b^t\|_2^2+\mathbb E_t\|\xi^t\|_2^2
+\end{equation}
+vanishes. By \eqref{eq:app_online_clean_bound},
+$\|b^t\|_2\le C^t+R^t$, and by \eqref{eq:app_online_q},
+$\mathbb E_t\|\xi^t\|_2^2\le Q^t$. Hence
+\begin{equation}
+\sqrt{J_{\mathrm{learn}}^t}
+\le\sqrt{\left(C^t+R^t\right)^2+Q^t}.
+\end{equation}
+Adding the certified numerical RMS error in the RMS metric and
+squaring yields \eqref{eq:app_online_upper}.
+\end{proof}
+
+\paragraph{Bias--variance variant.}
+If each mode certificate separately proves conditional centering
+$\mathbb E_t[u_i^t-v_i^t\mid\mathcal G^t]=b_i^t$ with
+$\|b_i^t\|_2\le\beta_i^t$, conditional second moment
+$\mathbb E_t\|u_i^t-v_i^t-b_i^t\|_2^2\le\nu_i^t$, and cross-client
+orthogonality of the centered fluctuations given all ideal gradients,
+then replace $R_{\mathrm{mode}}^t$ by
+$R_{\mathrm{bias}}^t=\gamma\sum_{i\in\mathcal C^t}a_i^t\beta_i^t$ and
+add $V^t=\gamma^2\sum_{i\in\mathcal C^t}(a_i^t)^2\nu_i^t$ inside the
+square:
+\begin{equation}
+\overline J_{\mathrm{BV}}^t
+=\left(
+\sqrt{\left(C^t+R_{\mathrm{ref}}^t+R_{\mathrm{bias}}^t\right)^2
++V^t+Q^t}
++r_{\mathrm{num}}
+\right)^2.
+\label{eq:app_online_bv}
+\end{equation}
+Conditional independence of training processes does not imply centered
+mode fluctuations or their cross-client orthogonality. The evaluator
+requires both assumptions explicitly; otherwise it uses the RMS form.
+
+\paragraph{Parameter-block variant.}
+When certificates partition the parameter coordinates into disjoint
+contiguous blocks, the evaluator computes per-block centers $C_j$ and
+radii $R_j$ and uses
+\begin{equation}
+\overline J_{\mathrm{block}}^t
+=\left(
+\sqrt{\sum_j\left(C_j+R_j\right)^2+Q^t}
++r_{\mathrm{num}}
+\right)^2.
+\label{eq:app_online_block}
+\end{equation}
+Distinct coordinate blocks are orthogonal as vectors; independence of
+the random training errors across blocks is not assumed. The evaluator
+uses the smaller of the scalar and block bounds. Blocks are supported
+only with the RMS uncertainty model.
+
+\paragraph{Lower bound and certified interval order.}
+Because $Q^t$ is an upper bound on noise energy by default, it cannot be
+used to lower-bound $J$. If the aggregate noise variance is separately
+proved exact and orthogonal to the clean update, set
+$Q_{\mathrm{floor}}^t=Q^t$; otherwise set
+$Q_{\mathrm{floor}}^t=0$. Then
+\begin{equation}
+L^t=
+\left(
+\max\left\{0,\sqrt{\left(s^t\right)^2+Q_{\mathrm{floor}}^t}
+-r_{\mathrm{num}}\right\}
+\right)^2,
+\qquad
+s^t=\max\left\{0,C^t-R^t\right\}.
+\label{eq:app_online_lower}
+\end{equation}
+is a lower bound under the corresponding assumptions.
+The selection objective remains $\overline J^t$. Given two profiles'
+intervals, a strict order is certified only when
+$\overline J_{\mathrm{left}}<L_{\mathrm{right}}$ or
+$\overline J_{\mathrm{right}}<L_{\mathrm{left}}$; otherwise the order
+is undetermined. The implementation exposes this comparison as a
+diagnostic and does not use it to rank candidate profiles.
+
+\paragraph{Manifest and fail-closed requirements.}
+The evaluator accepts manifests declaring schema
+\texttt{dynfl.online\_j.v1} or \texttt{dynfl.online\_j.v2}, with target
+\texttt{ideal\_full\_gradient\_one\_step}. Round $t$ is read from the
+entry \texttt{round:$t$}; its \texttt{round\_index} and
+\texttt{available\_before\_round} must both equal $t$, and the evidence
+string must be nonempty. The v2 evaluator requires explicit true
+assumptions for population-sample weighting, runtime-matching linear
+client contributions, ideal-reference RMS bounds, mode-relative ideal
+bounds, pre-secure-aggregation noise timing with fixed weights,
+conditional zero-mean and uncorrelated shares, aggregate-share second
+moments, and the numerical RMS bound. Each client-mode certificate must
+match the exact candidate identity, including mode, link mechanisms, DP
+execution plan, and noise multipliers and events. Missing, mismatched,
+or unproved entries raise an error before client training. The
+evaluator composes supplied certificates; it does not prove that a
+runtime, privacy accountant, or noise generator satisfies them.
+
+\paragraph{Additive v1 specialization.}
+The v1 schema supplies a reference gradient $g_{\mathrm{ref}}$, an
+ideal step $\eta_*$, a Cloud step $\gamma$, a gradient RMS error $r_g$,
+and per-client values $s_i$, $r_i$, and $\sigma_i$. With
+$a_i=n_i/\sum_{j\in\mathcal C^t}n_j$, the evaluator computes
+\begin{equation}
+\begin{aligned}
+C&=\left|\eta_*-\gamma\sum_{i\in\mathcal C^t}a_i^ts_i\right|
+\|g_{\mathrm{ref}}\|_2,\\
+R_{\mathrm{ref}}&=\eta_*r_g,\qquad
+R_{\mathrm{mode}}=\gamma\sum_{i\in\mathcal C^t}a_i^tr_i,\\
+Q&=\gamma^2d\sum_{i\in\mathcal C^t}(a_i^t)^2(\sigma_i^t)^2,
+\end{aligned}
+\end{equation}
+and applies \eqref{eq:app_online_upper}. Its lower bound uses no noise
+floor and is
+$\bigl(\max\{0,C-R_{\mathrm{ref}}-R_{\mathrm{mode}}-r_{\mathrm{num}}\}\bigr)^2$.
+The coupled v2 form is preferred because it centers each client's own
+ideal contribution instead of relying on a single global reference
+direction.
+
+\paragraph{Optional LIIC optimizer-derived radius.}
+For LIIC with LeNet-5, a mode radius can be derived from the actual
+clipped-gradient optimizer instead of being supplied directly. The
+proof must declare schema \texttt{dynfl.liic.sgd.v1}, LeNet-5, a fresh
+zero-momentum \texttt{torch.optim.SGD}, either sample-DP SGD or clipped
+SGD, the planned batch sizes and optimizer step count, a certified
+ideal reference radius, a matching Gaussian mechanism, and the absence
+or explicit modeling of further update transformations. With $K$ steps,
+learning rate $\eta$, weight decay $\lambda$,
+$\alpha=1-\eta\lambda$, $b_k=\eta\alpha^{K-1-k}$, $S=\sum_kb_k$,
+per-step pathwise residual caps $E_k$, and clipping threshold $C$,
+\begin{equation}
+\begin{aligned}
+r_i^{\mathrm{mode}}
+\le{}&
+\left|\frac{S}{\eta_*}-1\right|\|\hat v_i^t\|_2
++\lambda S\|\theta_0\|_2+\sum_kb_kE_k\\
+&+\sqrt{d\sum_kb_k^2
+\left(\frac{2C\sigma_i}{B_k}\right)^2}
++r_i^{\mathrm{ref}}+r_{\mathrm{proj}},
+\end{aligned}
+\label{eq:app_liic_radius}
+\end{equation}
+where the Gaussian term applies to sample-DP SGD, $B_k$ is the actual
+batch denominator, and $r_{\mathrm{proj}}$ is added only when a release
+update is clipped. This specialization cannot be applied to ResNet-18
+with momentum or weight decay, or to any path whose optimizer, batch
+schedule, noise, or transformations differ from the proof.
+
+\paragraph{Connection with the descent guarantee.}
+Because \eqref{eq:app_online_upper} bounds
+$J_{\mathrm{learn}}^t$ from above, substituting it into
+\eqref{eq:app_expected_descent} gives
+\begin{equation}
+\mathbb E_t[F(w^{t+1})]
+\le F(w^t)-\frac{\eta_t}{2}\|\nabla F(w^t)\|_2^2
++\frac{\overline J^t(\mathbf h^t)}{2\eta_t},
+\end{equation}
+and the PL recursion of Corollary~\ref{cor:joint_pl_convergence} holds
+with $\overline J^t$ in place of $J_{\mathrm{learn}}^t$. This does not
+turn the certificate into a convergence proof: the radii, noise
+moments, and assumptions remain conditional inputs, and the selected
+profile minimizes the certified upper bound rather than the unknown
+exact joint error.
+% ---------- Proposed appendix bridge ----------
+\paragraph{Connection with the descent guarantee.}
 
 \bibliographystyle{elsarticle-num}
 \bibliography{refs}

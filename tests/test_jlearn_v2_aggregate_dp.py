@@ -93,7 +93,7 @@ def test_liieiiic_hierarchical_cost_matches_one_global_exact_target_release() ->
     assert actual == pytest.approx(expected)
 
 
-def test_update_clip_is_diagnostic_only_for_formal_jlearn() -> None:
+def test_update_clip_is_diagnostic_only_and_profile_objective_fails_closed() -> None:
     k = 4
     clip_excess_sq = 0.03
     config = SelectionConfig(
@@ -107,20 +107,17 @@ def test_update_clip_is_diagnostic_only_for_formal_jlearn() -> None:
     edges = {i: 0 for i in profile}
 
     clip_cost = _global_update_clip_perturbation_cost(config, profile, samples, tuple(profile))
-    result = _evaluate_profile(
-        config,
-        profile,
-        samples,
-        edges,
-        previous_choices={},
-        flow_objectives=(tuple(profile), 1.0),
-    )
-
     assert clip_cost == pytest.approx(clip_excess_sq)
-    assert result.update_clip_perturbation == pytest.approx(clip_excess_sq)
-    assert result.system_learning_error == pytest.approx(
-        result.fusion_bound + result.dp_perturbation
-    )
+
+    with pytest.raises(ValueError, match="online_upper_bound"):
+        _evaluate_profile(
+            config,
+            profile,
+            samples,
+            edges,
+            previous_choices={},
+            flow_objectives=(tuple(profile), 1.0),
+        )
 
 
 def test_dp_he3_full_local_cloud_path_keeps_aggregate_boundary_cost() -> None:

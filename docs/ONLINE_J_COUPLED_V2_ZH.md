@@ -4,7 +4,7 @@
 
 - **只修改 `dynfed/online_j_bound.py`、`dynfed/selection.py` 的在线学习误差评分和诊断字段**，增加对应测试与独立数学示例。
 - 不修改训练器、资源/信任准入、DP 采样/噪声、RDP 账本、预算上限、SecAgg、HE、网络时延或现有对照配置。
-- `legacy_fusion_dp`、`joint_calibration` 仍留作对照；`learning_objective=online_upper_bound` 才启用新公式。
+- 当前正式路径只接受 `learning_objective=online_upper_bound`；`legacy_fusion_dp`、`joint_calibration` 与 oracle 诊断均已移除，配置会被直接拒绝。
 - **不会自动生成真实误差证书**。数据不足会报错，不允许回退到旧 Fusion 或离线表。JSON 中的 `assumptions: true` 是外部证明的声明，程序无法仅凭布尔值证明这些假设真实成立。
 - 当前所有“v2”测试只构造可核验的公开合成情形，**不证明真实七模式/DP 机制具备相应证书**。
 
@@ -62,13 +62,13 @@ Q=d\gamma^2\sum_i a_i^2\sigma_i^2.
 \boxed{U_J(h)=\left[\sqrt{(A+R)^2+Q}+r_{\rm num}\right]^2.}
 \]
 
-反向 \(L^2\) 三角不等式还给出一个无需正噪声下界的保守下界：
+反向 \(L^2\) 三角不等式还给出一个保守下界。默认 \(Q\) 只是噪声能量上界，不能用于下界；只有另行证明聚合噪声方差**精确**且与干净更新正交时，才取 \(Q_{\rm floor}=Q\)，否则 \(Q_{\rm floor}=0\)：
 
 \[
-\boxed{L_J(h)=\big[\max(0,A-R-r_{\rm num})\big]^2.}
+\boxed{L_J(h)=\Big[\max\big(0,\sqrt{\max(0,A-R)^2+Q_{\rm floor}}-r_{\rm num}\big)\Big]^2.}
 \]
 
-只有当 \(U_J(h_1)<L_J(h_2)\) 时，才可以**严格认证**第一种模式的真实 \(J\) 更小。否则不能从上界大小推出真实排序。
+只有当 \(U_J(h_1)<L_J(h_2)\) 或 \(U_J(h_2)<L_J(h_1)\) 时，才可以**严格认证**真实 \(J\) 的排序；否则排序为 undetermined。该区间比较仅作诊断，正式选模仍以 \(U_J\) 为目标，不能把“按上界排序”解释为“真实 \(J\) 的认证排序”。
 
 ## 2. 可选“偏差—方差”更紧公式
 
@@ -148,22 +148,23 @@ Q=d\gamma^2\sum_i a_i^2\sigma_i^2.
 
 ## 4. 为什么现在不能直接用 v2 跑正式5轮
 
-**关键缺口不是选模调用，而是每个合法候选的 `relative_ideal_rms` 或 `bias/variance` 的事前真实证书。** 对普通 Momentum 可继续从优化器真实递推推导；可信 Client–Edge Split 不应添加内部 DP，而且必须证明其执行轨迹对应上述 Client 贡献；多阶段 Edge 需要递推传播误差；跨 Cloud `LIC` 还需独立信任边界审计。已存在的示例和测试均不能自动完成这些证明。
+**关键缺口不是选模调用，而是每个合法候选的 `relative_ideal_rms` 或 `bias/variance` 的事前真实证书。** 当前公式推导的 `relative_ideal_rms`（`dynfl.liic.sgd.v1`）只支持 LeNet-5 / LIIC / 零动量 `torch.optim.SGD` 的 `sample_dp_sgd` 或 `clipped_sgd` 路径。ResNet-18 正式配置使用 SGD `momentum=0.9, weight_decay=5e-4`，不能复用该证书；必须另行证明与实际优化器、步数、batch 和噪声机制一致的事前半径。可信 Client–Edge Split 不应添加内部 DP，而且必须证明其执行轨迹对应上述 Client 贡献；多阶段 Edge 需要递推传播误差；跨 Cloud `LIC` 还需独立信任边界审计。已存在的示例和测试均不能自动完成这些证明。
 
 目前 v2 在候选预筛选和最终 Pareto 中均使用同一个 `U_J`；新增 `L_J` 只作为诊断，不会篡改目标，也不能保证真实排序。
 
-## 5. 本地安装和验证（不触碰隐私预算）
-
-将本次 `.patch` 放在 `E:\YTT\GROUP`：
+## 5. 本地验证（不触碰隐私预算）
 
 ```powershell
 cd E:\YTT\GROUP\DynFL-privacy
 
-git apply --check --ignore-space-change "E:\YTT\GROUP\DynFL_clean_J_coupled_v2.patch"
-git apply --ignore-space-change "E:\YTT\GROUP\DynFL_clean_J_coupled_v2.patch"
-
-& "D:\soft\Python310\python.exe" -m pytest -q tests/test_online_upper_bound_integration.py
-& "D:\soft\Python310\python.exe" examples/online_j_coupled_v2_demo.py
+& "D:\soft\Python310\python.exe" -m pytest -q `
+  tests/test_online_upper_bound_integration.py `
+  tests/test_jlearn_v2_aggregate_dp.py `
+  tests/test_online_j_blockwise.py `
+  tests/test_online_j_exact_noise_and_ranking.py `
+  tests/test_online_j_liic_envelope.py `
+  tests/test_online_j_runtime_integration.py `
+  tests/test_liic_online_certificate.py
 ```
 
-如需同时保留真实训练器最近的“诊断预算”补丁，本次补丁可以直接叠加；文件内容和实现范围均与预算补丁独立。
+这些测试使用公开合成证书验证公式与失败关闭行为，**不会**生成可用于正式训练的真实证书。

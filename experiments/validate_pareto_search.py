@@ -51,6 +51,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidates-per-client", type=int, default=4)
     parser.add_argument("--archive-size", type=int, default=16)
     parser.add_argument("--max-iters", type=int, default=50)
+    parser.add_argument(
+        "--online-bound-manifest-path",
+        default=None,
+        help=(
+            "Predecision online-J certificate manifest used to score the "
+            "synthetic-search validation; required for a formal run."
+        ),
+    )
     parser.add_argument("--output-dir", default="out/pareto_validation_v27")
     return parser.parse_args()
 
@@ -187,7 +195,13 @@ def run_instance(
     candidates_per_client: int,
     archive_size: int,
     max_iters: int,
+    online_bound_manifest_path: str | None = None,
 ) -> dict[str, Any]:
+    if online_bound_manifest_path is None:
+        raise ValueError(
+            "search validation requires an online-bound manifest; no "
+            "legacy or proxy objective fallback is permitted"
+        )
     num_edges = min(2, num_clients)
     config = SelectionConfig(
         rounds=200,
@@ -202,6 +216,8 @@ def run_instance(
         enforce_cloud_dp_stability=True,
         pareto_archive_size=archive_size,
         pareto_max_iters=max_iters,
+        learning_objective="online_upper_bound",
+        online_bound_manifest_path=online_bound_manifest_path,
     )
     clients, edges = build_profiles(
         num_clients=num_clients,
@@ -385,6 +401,7 @@ def main() -> None:
             candidates_per_client=max(2, args.candidates_per_client),
             archive_size=max(2, args.archive_size),
             max_iters=max(0, args.max_iters),
+            online_bound_manifest_path=args.online_bound_manifest_path,
         )
         for num_clients in _parse_ints(args.client_sizes)
         for seed in _parse_ints(args.seeds)

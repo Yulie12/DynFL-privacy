@@ -27,7 +27,6 @@ def load_selection():
         sys.modules[m.__name__] = m
         return m
     nodes = stub('nodes', build_profiles=lambda **kwargs: ([], []))
-    stub('joint_calibration', JointUpdateCalibrationTable=object)
     stub('flow_executor', CLOUD_DIRECT_MODES=set(), EDGE_CLOUD_MODES=set(), EDGE_ONLY_MODES=set(), ClientFlowInput=object, summarize_mixed_round_flow=lambda *a, **k: None)
     class ClientPrivacyLedger: pass
     class SamplePrivacyLedger: pass
@@ -161,12 +160,11 @@ class TestAdmission(unittest.TestCase):
         self.assertEqual(modes, {'LIIC','LIIEIIIC'})
         self.assertFalse(a['client_edge_trusted'])
 
-    def test_trusted_lie_privacy_calibration_gate_is_preserved(self):
-        with self.assertRaisesRegex(ValueError, 'new learning-proxy calibration'):
+    def test_trusted_lie_rejects_removed_learning_objectives(self):
+        with self.assertRaisesRegex(ValueError, 'online_upper_bound'):
             self.config(trusted_edge_split_execution=True,
                 trusted_lie_joint_sample_dp=True,
-                learning_objective='joint_calibration',
-                joint_calibration_path='calibration/unused.pt')
+                learning_objective='joint_calibration')
 
     def test_opt_out_preserves_legacy_admission(self):
         cfg=self.config(strict_pair_admission=False)

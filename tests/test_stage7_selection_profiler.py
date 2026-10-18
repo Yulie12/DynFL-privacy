@@ -24,7 +24,9 @@ def _candidate(mode: str, link: str, mechanism: str, *, time_value: float) -> Ca
     )
 
 
-def test_stage7_profiler_reports_both_cloud_branches_without_changing_choice():
+def test_stage7_profiler_reports_both_cloud_branches_without_changing_choice(
+    synthetic_online_bound,
+):
     config = SelectionConfig(
         cloud_dp_plan="pareto",
         num_clients=4,
@@ -35,6 +37,8 @@ def test_stage7_profiler_reports_both_cloud_branches_without_changing_choice():
         pareto_archive_size=8,
         pareto_beam_size=2,
         pareto_neighbor_top_k=3,
+        learning_objective="online_upper_bound",
+        online_bound_manifest_path="certificates/test_synthetic_online.json",
     )
     hierarchical = _candidate("LIIEIIIC", "E_C_upd", "dp_he3", time_value=2.0)
     local_edge = _candidate("LIIE", "L_E_upd", "none", time_value=1.0)
@@ -68,7 +72,9 @@ def test_stage7_profiler_reports_both_cloud_branches_without_changing_choice():
         assert profile["neighbor_candidates_generated"] >= profile["neighbor_candidates_retained"]
 
 
-def test_stage7_profiler_is_diagnostic_only_for_fixed_inputs():
+def test_stage7_profiler_is_diagnostic_only_for_fixed_inputs(
+    synthetic_online_bound,
+):
     config = SelectionConfig(
         cloud_dp_plan="aggregate",
         num_clients=3,
@@ -78,6 +84,8 @@ def test_stage7_profiler_is_diagnostic_only_for_fixed_inputs():
         pareto_max_iters=1,
         pareto_archive_size=4,
         pareto_neighbor_top_k=2,
+        learning_objective="online_upper_bound",
+        online_bound_manifest_path="certificates/test_synthetic_online.json",
     )
     hierarchical = _candidate("LIIEIIIC", "E_C_upd", "dp_he3", time_value=2.0)
     local_edge = _candidate("LIIE", "L_E_upd", "none", time_value=1.0)

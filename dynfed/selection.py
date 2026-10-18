@@ -14,9 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .nodes import build_profiles
-from .joint_calibration import JointUpdateCalibrationTable
 from .online_j_bound import evaluate_online_bound
-from .online_j_oracle_diagnostic import evaluate_oracle_diagnostic
 from .flow_executor import (
     CLOUD_DIRECT_MODES,
     EDGE_CLOUD_MODES,
@@ -213,22 +211,10 @@ class SelectionConfig:
     update_payload_mb: float = 4.0
     mainline_fusion: bool = False
 
-    # Learning objective used by the complete-profile Pareto selector.
-    # ``legacy_fusion_dp`` preserves the historical analytical proxy.
-    # ``joint_calibration`` implements the latest Sample-DP theory path:
-    # paired clean/private executions are performed offline, while online
-    # selection only reads empirical update-space conditional moments.
-    learning_objective: str = "legacy_fusion_dp"
-    joint_calibration_path: str | None = None
-    joint_calibration_state_key: str = "default"
-    # ``table`` uses a calibrated ideal/reference update and therefore keeps
-    # e_alg in the same joint vector expression. ``zero`` is an explicitly
-    # labelled empirical approximation for experiments that validate e_alg as
-    # approximately common/negligible across candidate profiles.
-    joint_calibration_e_alg_policy: str = "table"
-    # ``error`` prevents silent fallback to the retired learning objective.
-    # ``legacy`` exists only for backward-compatible diagnostics/tests.
-    joint_calibration_missing_policy: str = "error"
+    # The only supported formal learning objective is the strict
+    # predecision-certificate online upper bound. ``None`` is allowed only for
+    # unit-level construction; selection/evaluation fails closed without it.
+    learning_objective: str | None = None
     # V370: opt-in explicit, fixed Client->Edge pair trust admission. Omitted
     # trust entries are untrusted; runtime supplies the actual Edge id.
     # New fields are appended to preserve existing positional construction.
@@ -248,11 +234,6 @@ class SelectionConfig:
                 raise ValueError("trusted LIE requires privacy_unit='sample'")
             if not self.trusted_edge_split_execution:
                 raise ValueError("trusted LIE requires trusted_edge_split_execution=True")
-            if self.learning_objective == "joint_calibration":
-                raise ValueError(
-                    "trusted LIE needs a new learning-proxy calibration; "
-                    "existing joint_calibration tables describe noisy embeddings"
-                )
         seen_trust_clients: set[int] = set()
         for client_id, edge_id in self.trusted_client_edge_pairs:
             if not (0 <= int(client_id) < self.num_clients):
@@ -275,34 +256,15 @@ class SelectionConfig:
             seen_fast_clients.add(int(client_id))
         if self.mainline_fusion:
             raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
-        if self.learning_objective not in {"legacy_fusion_dp", "joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"}:
+        if self.learning_objective is not None and self.learning_objective != "online_upper_bound":
             raise ValueError(
-                "learning_objective must be legacy_fusion_dp, joint_calibration, online_upper_bound or online_j_oracle_diagnostic"
+                "learning_objective must be 'online_upper_bound'; legacy fusion, "
+                "joint calibration and oracle diagnostics have been removed"
             )
         if self.learning_objective == "online_upper_bound" and not self.online_bound_manifest_path:
             raise ValueError("online_upper_bound requires online_bound_manifest_path; no fallback")
         if self.online_bound_round < 0:
             raise ValueError("online_bound_round must be nonnegative")
-        if self.joint_calibration_e_alg_policy not in {"table", "zero"}:
-            raise ValueError(
-                "joint_calibration_e_alg_policy must be 'table' or 'zero'"
-            )
-        if self.joint_calibration_missing_policy not in {"error", "legacy"}:
-            raise ValueError(
-                "joint_calibration_missing_policy must be 'error' or 'legacy'"
-            )
-        if self.learning_objective == "joint_calibration" and self.privacy_unit != "sample":
-            raise ValueError(
-                "joint_calibration is defined for the Sample-DP selector; set privacy_unit='sample'"
-            )
-        if (
-            self.learning_objective == "joint_calibration"
-            and not self.joint_calibration_path
-            and self.joint_calibration_missing_policy == "error"
-        ):
-            raise ValueError(
-                "joint_calibration_path is required when learning_objective='joint_calibration'"
-            )
 
 
 def enable_static_pair_admission(
@@ -377,7 +339,6 @@ class Candidate:
     edge_aggregation_payload: float = 0.0
     cloud_aggregation_payload: float = 0.0
     link_metrics: tuple[dict[str, Any], ...] = ()
-    global_release_required: bool = False
     feature_noise_multiplier: float | None = None
     update_noise_multiplier: float | None = None
     dp_execution_plan: str = "independent"
@@ -424,8 +385,6 @@ def candidate_mechanisms_for_object(candidate: Candidate, obj: str) -> list[str]
             local_block_cycles=1,
             edge_loops=spec.E_edge_loops,
         )
-        if candidate.global_release_required:
-            transmissions = _fusion_link_transmissions(candidate.mode, 1, spec.E_edge_loops)
         object_by_link = {link_id: event_obj for link_id, event_obj, _count, _eligible in transmissions}
         return [
             mechanism
@@ -481,7 +440,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
     for mode, spec in MODE_SPECS.items():
         if mode in config.excluded_modes:
             continue
-        if (config.mainline_fusion or (config.trusted_edge_split_execution and config.privacy_unit != "sample")) and mode == "LIC":
+        if (config.trusted_edge_split_execution and config.privacy_unit != "sample") and mode == "LIC":
             continue
         events = _mode_link_transmissions(
             mode,
@@ -765,22 +724,13 @@ class ProfileEvaluation:
     fusion_distortion: float = 0.0
     fusion_cosine_distortion: float = 0.0
     fusion_objective_enabled: bool = False
-    # Legacy primitive/update-DP diagnostic.  It is kept for audit/backward
-    # comparison but is not the formal learning objective when
-    # learning_objective='joint_calibration'.
+    # Primitive/update-DP diagnostics. They are not the learning objective.
     dp_perturbation: float | None = None
     feature_perturbation: float = 0.0
     update_clip_perturbation: float = 0.0
     fusion_bound: float = 0.0
-    # Joint update-space proxy diagnostics. These are zero for the legacy
-    # objective and populated when learning_objective='joint_calibration'.
-    joint_mean_error_sq: float = 0.0
-    joint_variance_trace: float = 0.0
-    joint_e_alg_norm_sq: float = 0.0
-    joint_e_agg_norm_sq: float = 0.0
-    joint_bias_norm_sq: float = 0.0
-    learning_proxy_source: str = "legacy_fusion_dp"
-    # Online-J-only decomposition. Never reuse joint_calibration diagnostic names.
+    learning_proxy_source: str = "unset"
+    # Online-J decomposition.
     online_j_center_norm_sq: float = 0.0
     online_j_radius: float = 0.0
     online_j_ideal_radius: float = 0.0
@@ -1012,11 +962,6 @@ def run_selection_experiment(
                             "online_j_mode_radius": evaluation.online_j_mode_radius,
                             "online_j_mode_variance_second_moment": evaluation.online_j_mode_variance_second_moment,
                             "learning_proxy_source": evaluation.learning_proxy_source,
-                            "joint_mean_error_sq": evaluation.joint_mean_error_sq,
-                            "joint_variance_trace": evaluation.joint_variance_trace,
-                            "joint_e_alg_norm_sq": evaluation.joint_e_alg_norm_sq,
-                            "joint_e_agg_norm_sq": evaluation.joint_e_agg_norm_sq,
-                            "joint_bias_norm_sq": evaluation.joint_bias_norm_sq,
                             "cloud_fusion_ratio": evaluation.cloud_fusion_ratio,
                             "he_clients": sum(
                                 candidate_has_he(candidate)
@@ -1154,11 +1099,6 @@ def run_selection_experiment(
                     "online_j_mode_radius": profile_evaluation.online_j_mode_radius if profile_evaluation else "",
                     "online_j_mode_variance_second_moment": profile_evaluation.online_j_mode_variance_second_moment if profile_evaluation else "",
                     "learning_proxy_source": profile_evaluation.learning_proxy_source if profile_evaluation else "",
-                    "joint_mean_error_sq": profile_evaluation.joint_mean_error_sq if profile_evaluation else "",
-                    "joint_variance_trace": profile_evaluation.joint_variance_trace if profile_evaluation else "",
-                    "joint_e_alg_norm_sq": profile_evaluation.joint_e_alg_norm_sq if profile_evaluation else "",
-                    "joint_e_agg_norm_sq": profile_evaluation.joint_e_agg_norm_sq if profile_evaluation else "",
-                    "joint_bias_norm_sq": profile_evaluation.joint_bias_norm_sq if profile_evaluation else "",
                     "cloud_fusion_ratio": profile_evaluation.cloud_fusion_ratio if profile_evaluation else "",
                     "admitted_client_ids_objective": ";".join(str(cid) for cid in profile_evaluation.admitted_client_ids) if profile_evaluation else "",
                 }
@@ -1283,8 +1223,8 @@ def enumerate_candidates(
             audit_exclusions[mode] = "excluded_mode"
             continue
 
-        if (config.mainline_fusion or (config.trusted_edge_split_execution and config.privacy_unit != "sample")) and mode == "LIC":
-            audit_exclusions[mode] = "trusted_edge_or_mainline_excludes_LIC"
+        if (config.trusted_edge_split_execution and config.privacy_unit != "sample") and mode == "LIC":
+            audit_exclusions[mode] = "trusted_edge_excludes_LIC"
             continue
 
         if config.require_cloud_participation and not _mode_reaches_cloud(spec):
@@ -1434,7 +1374,6 @@ def enumerate_candidates(
                 spec,
                 allow_he=config.allow_he,
                 no_dp_ablation=config.no_dp_ablation,
-                mainline_fusion=config.mainline_fusion,
                 trusted_lie_joint_sample_dp=(
                     config.trusted_lie_joint_sample_dp and mode == "LIE"
                 ),
@@ -1447,7 +1386,6 @@ def enumerate_candidates(
                 policy_allow_none,
                 trusted_edge_split_execution=config.trusted_edge_split_execution,
                 update_mechanism_options=config.update_mechanism_options,
-                mainline_fusion=config.mainline_fusion,
                 privacy_requirement=privacy_requirement,
             )
         )
@@ -1858,20 +1796,11 @@ def _mode_reaches_cloud(spec: ModeSpec) -> bool:
 
 
 def _candidate_reaches_cloud(candidate: Candidate) -> bool:
-    if candidate.global_release_required:
-        return True
     spec = MODE_SPECS.get(candidate.mode)
     return bool(spec and _mode_reaches_cloud(spec))
 
 
 def validate_update_protection_goal(config: SelectionConfig, policy: str) -> None:
-    if config.mainline_fusion:
-        if not config.trusted_edge_split_execution:
-            raise ValueError("Mainline fusion requires the trusted edge execution domain")
-        if abs(float(config.aggregation_fraction) - 1.0) > 1e-12:
-            raise ValueError("Mainline fusion requires aggregation_fraction=1.0")
-        if config.update_protection_goal != "released_model_dp":
-            raise ValueError("Mainline fusion requires update_protection_goal=released_model_dp")
     if config.update_protection_goal not in {"packet_protection", "released_model_dp"}:
         raise ValueError("Unknown update protection goal")
     if config.update_protection_goal == "released_model_dp":
@@ -1884,8 +1813,6 @@ def validate_update_protection_goal(config: SelectionConfig, policy: str) -> Non
 
 def candidate_meets_update_goal(config: SelectionConfig, candidate: Candidate) -> bool:
     """Necessary cloud update coverage only, not a transcript privacy proof."""
-    if config.mainline_fusion:
-        return candidate.mode != "LIC" and candidate.global_release_required
     if config.update_protection_goal == "packet_protection":
         return True
     if config.update_protection_goal != "released_model_dp":
@@ -2150,11 +2077,8 @@ def choose_global_pareto_profile(
         "evaluate_profile_sec": 0.0,
         "replacement_priority_calls": 0,
         "replacement_priority_sec": 0.0,
-        "incremental_jlearn_calls": 0,
-        "incremental_jlearn_sec": 0.0,
-        "full_jlearn_fallback_calls": 0,
-        "full_jlearn_fallback_sec": 0.0,
-        "replacement_stats_build_sec": 0.0,
+        "full_jlearn_calls": 0,
+        "full_jlearn_sec": 0.0,
         "flow_objective_update_sec": 0.0,
         "neighbor_candidates_generated": 0,
         "neighbor_candidates_retained": 0,
@@ -2406,12 +2330,6 @@ def choose_global_pareto_profile(
 
     bounded_iterations = config.pareto_max_iters if search_method in {"bounded", "mo_lns"} else 0
 
-    # Scoped to this one Pareto search call. Joint-calibration replacement
-    # statistics depend on the client/mode profile, admitted cohort, and the
-    # fixed config/sample metadata for this call.
-    _replacement_stats_cache = {}
-    _replacement_stats_cache_maxsize = 4
-
     for _iter_idx in range(max(0, bounded_iterations)):
         _perf_add(perf, "search_iterations")
         neighbor_started_at = time.perf_counter()
@@ -2436,60 +2354,6 @@ def choose_global_pareto_profile(
                 evaluated.profile,
                 flow_inputs_by_candidate,
             )
-            replacement_stats = None
-            if objective == "pareto" and config.pareto_neighbor_top_k > 0 and config.learning_objective not in {"online_upper_bound", "online_j_oracle_diagnostic"}:
-                use_replacement_cache = (
-                    config.learning_objective == "joint_calibration"
-                )
-                cache_key = None
-
-                if use_replacement_cache:
-                    cache_key = (
-                        tuple(
-                            (
-                                int(cid),
-                                str(candidate.mode),
-                                bool(_candidate_reaches_cloud(candidate)),
-                            )
-                            for cid, candidate in sorted(
-                                evaluated.profile.items()
-                            )
-                        ),
-                        tuple(
-                            sorted(
-                                int(cid)
-                                for cid in evaluated.admitted_client_ids
-                            )
-                        ),
-                    )
-                    replacement_stats = _replacement_stats_cache.get(cache_key)
-
-                if replacement_stats is None:
-                    stats_started_at = time.perf_counter()
-                    replacement_stats = _LearningReplacementStats(
-                        config,
-                        evaluated.profile,
-                        client_samples,
-                        client_edges,
-                        evaluated.admitted_client_ids,
-                    )
-                    _perf_add(
-                        perf,
-                        "replacement_stats_build_sec",
-                        time.perf_counter() - stats_started_at,
-                    )
-
-                    if use_replacement_cache and cache_key is not None:
-                        if cache_key not in _replacement_stats_cache:
-                            if (
-                                len(_replacement_stats_cache)
-                                >= _replacement_stats_cache_maxsize
-                            ):
-                                oldest_key = next(
-                                    iter(_replacement_stats_cache)
-                                )
-                                _replacement_stats_cache.pop(oldest_key)
-                            _replacement_stats_cache[cache_key] = replacement_stats
             profile_neighbors: list[
                 tuple[
                     float,
@@ -2497,8 +2361,6 @@ def choose_global_pareto_profile(
                     tuple[tuple[int, ...], float] | None,
                     int,
                     Candidate,
-                    _LearningReplacementStats | None,
-                    float | None,
                 ]
             ] = []
             # MO-LNS first version: explore a rotating subset of client coordinates
@@ -2526,17 +2388,6 @@ def choose_global_pareto_profile(
                 position = client_positions[client_id]
                 signature_prefix = evaluated.profile_signature[:position]
                 signature_suffix = evaluated.profile_signature[position + 1:]
-
-                old_cloud_entry = (
-                    replacement_stats._cloud_entry(client_id, current)
-                    if (
-                        replacement_stats is not None
-                        and objective != "latency"
-                        and config.pareto_neighbor_top_k > 0
-                        and config.learning_objective not in {"joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"}
-                    )
-                    else None
-                )
 
                 for candidate, candidate_key, token in candidate_neighbor_rows[client_id]:
                     if candidate == current:
@@ -2570,10 +2421,7 @@ def choose_global_pareto_profile(
                         )
                         _perf_add(perf, "flow_objective_update_sec", time.perf_counter() - flow_started_at)
                     if config.pareto_neighbor_top_k > 0:
-                        (
-                            priority,
-                            priority_next_learning,
-                        ) = _global_replacement_priority(
+                        priority = _global_replacement_priority(
                             objective=objective,
                             config=config,
                             evaluated=evaluated,
@@ -2584,13 +2432,10 @@ def choose_global_pareto_profile(
                             client_edges=client_edges,
                             trial_profile=None,
                             flow_objectives=flow_objectives,
-                            replacement_stats=replacement_stats,
-                            old_cloud_entry=old_cloud_entry,
                             profiler=perf,
                         )
                     else:
                         priority = 0.0
-                        priority_next_learning = None
 
                     append_started_at = time.perf_counter()
 
@@ -2601,8 +2446,6 @@ def choose_global_pareto_profile(
                             flow_objectives,
                             client_id,
                             candidate,
-                            replacement_stats,
-                            priority_next_learning,
                         )
                     )
 
@@ -2640,8 +2483,6 @@ def choose_global_pareto_profile(
                 flow_objectives,
                 client_id,
                 candidate,
-                replacement_stats,
-                priority_next_learning,
             ) in profile_neighbors:
                 profile = dict(evaluated.profile)
                 profile[client_id] = candidate
@@ -2653,8 +2494,6 @@ def choose_global_pareto_profile(
                         flow_objectives,
                         client_id,
                         candidate,
-                        replacement_stats,
-                        priority_next_learning,
                     )
                 )
 
@@ -2679,78 +2518,16 @@ def choose_global_pareto_profile(
             profile,
             profile_key,
             flow_objectives,
-            changed_client_id,
-            changed_candidate,
-            replacement_stats,
-            priority_next_learning,
+            _changed_client_id,
+            _changed_candidate,
         ) in neighbors:
-            incremental_evaluation = None
-
-            if (
-                objective == "pareto"
-                and flow_objectives is not None
-                and replacement_stats is not None
-            ):
-                admitted, next_latency = flow_objectives
-
-                next_learning = priority_next_learning
-
-                if next_learning is not None:
-                    _perf_add(
-                        perf,
-                        "neighbor_priority_learning_reuse_calls",
-                    )
-                else:
-                    recompute_started_at = time.perf_counter()
-                    next_learning = replacement_stats.replacement_cost(
-                        changed_client_id,
-                        changed_candidate,
-                        admitted,
-                    )
-                    _perf_add(
-                        perf,
-                        "neighbor_retained_jlearn_recompute_calls",
-                    )
-                    _perf_add(
-                        perf,
-                        "neighbor_retained_jlearn_recompute_sec",
-                        time.perf_counter() - recompute_started_at,
-                    )
-
-                if next_learning is not None:
-                    cloud_fusion_ratio = _cloud_update_coverage_ratio(
-                        profile,
-                        client_samples,
-                        admitted,
-                    )
-
-                    incremental_evaluation = ProfileEvaluation(
-                        profile=profile,
-                        system_latency=float(next_latency),
-                        system_omega=float(next_learning),
-                        cloud_fusion_ratio=float(cloud_fusion_ratio),
-                        admitted_client_ids=tuple(sorted(admitted)),
-                        profile_signature=profile_key,
-                    )
-
-                    _perf_add(
-                        perf,
-                        "neighbor_incremental_evaluation_calls",
-                    )
-
-            if incremental_evaluation is None:
-                incremental_evaluation = evaluate(
+            evaluated_neighbors.append(
+                evaluate(
                     profile,
                     profile_signature=profile_key,
                     flow_objectives=flow_objectives,
                 )
-
-                _perf_add(
-                    perf,
-                    "neighbor_full_evaluation_fallback_calls",
-                )
-
-            evaluated_neighbors.append(incremental_evaluation)
+            )
 
         _perf_add(
             perf,
@@ -2797,23 +2574,19 @@ def choose_global_pareto_profile(
             break
         archive = next_archive
 
-    # Incremental Pareto neighbors carry an exact scalar learning cost but do
-    # not carry the full joint-calibration decomposition.  Re-evaluate the
-    # bounded final archive *before* ranking it so selection and exported
-    # diagnostics use the same complete ProfileEvaluation objects.  Do not
-    # touch the large neighbor loop: this costs at most archive_size full
-    # evaluations per selection round.
-    if config.learning_objective in {"joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"}:
-        archive = [
-            evaluate(item.profile, profile_signature=item.profile_signature)
-            for item in archive
-        ]
-        # Seeds are also exposed in pareto_profile_audit.csv.  They must not
-        # retain scalar-only incremental/default diagnostics either.
-        seed_evaluations = [
-            evaluate(item.profile, profile_signature=item.profile_signature)
-            for item in seed_evaluations
-        ]
+    # Re-evaluate the bounded final archive *before* ranking it so selection
+    # and exported diagnostics use the same complete ProfileEvaluation
+    # objects.  This costs at most archive_size full evaluations per round.
+    archive = [
+        evaluate(item.profile, profile_signature=item.profile_signature)
+        for item in archive
+    ]
+    # Seeds are also exposed in pareto_profile_audit.csv and must carry the
+    # same complete evaluation.
+    seed_evaluations = [
+        evaluate(item.profile, profile_signature=item.profile_signature)
+        for item in seed_evaluations
+    ]
 
     chosen = (
         _choose_tchebycheff(archive, config.pareto_norm_eps)
@@ -3505,21 +3278,6 @@ def _repair_edge_cloud_coverage(
                 flow_inputs_by_candidate,
             )
 
-            # Exact fixed-admission J_learn replacement statistics.
-            replacement_stats = None
-
-            if (
-                base_flow_stats is not None
-                and objective != "latency"
-            ):
-                replacement_stats = _LearningReplacementStats(
-                    config,
-                    profile,
-                    client_samples,
-                    client_edges,
-                    base_flow_stats.admitted_client_ids,
-                )
-
             repairs: list[ProfileEvaluation] = []
 
             for client_id in edge_clients:
@@ -3572,26 +3330,6 @@ def _repair_edge_cloud_coverage(
                                     sorted(admitted)
                                 ),
                             )
-
-                        elif replacement_stats is not None:
-                            next_learning = (
-                                replacement_stats.replacement_cost(
-                                    client_id,
-                                    candidate,
-                                    admitted,
-                                )
-                            )
-
-                            if next_learning is not None:
-                                evaluated = ProfileEvaluation(
-                                    profile=repaired,
-                                    system_latency=float(next_latency),
-                                    system_omega=float(next_learning),
-                                    cloud_fusion_ratio=0.0,
-                                    admitted_client_ids=tuple(
-                                        sorted(admitted)
-                                    ),
-                                )
 
                     # ----------------------------------------------------
                     # Exact full-evaluation fallback
@@ -3917,23 +3655,6 @@ def _online_bound_for_profile(
     )
 
 
-def _oracle_bound_for_profile(
-    config: SelectionConfig,
-    profile: dict[int, Candidate],
-    client_samples: dict[int, float],
-    admitted_client_ids: tuple[int, ...],
-):
-    if not config.online_bound_manifest_path:
-        raise ValueError("simulator oracle J requires the current predecision snapshot")
-    return evaluate_oracle_diagnostic(
-        snapshot_path=config.online_bound_manifest_path,
-        round_index=config.online_bound_round,
-        profile=profile, client_samples=client_samples,
-        admitted_client_ids=admitted_client_ids,
-        reaches_cloud=_candidate_reaches_cloud,
-    )
-
-
 def _selection_learning_cost(
     config: SelectionConfig,
     profile: dict[int, Candidate],
@@ -3941,33 +3662,18 @@ def _selection_learning_cost(
     client_edges: dict[int, int],
     admitted_client_ids: tuple[int, ...],
 ) -> float:
-    """The *same* formal J_learn used by complete-profile Pareto evaluation.
+    """The same formal online-J upper bound used by full-profile evaluation.
 
-    Fixed-admission lookahead is used for cheap seed/neighbor comparisons;
-    selected neighbors are subsequently evaluated using their actual flow.
+    Initial seeds, neighbour lookahead and final evaluation all call this
+    function. There is no legacy fusion or table-calibration fallback.
     """
-    if config.learning_objective == "online_upper_bound":
-        return _online_bound_for_profile(config, profile, client_samples, admitted_client_ids).upper
-    if config.learning_objective == "online_j_oracle_diagnostic":
-        return _oracle_bound_for_profile(config, profile, client_samples, admitted_client_ids).upper
-    joint_components = _joint_calibration_learning_components(
-        config,
-        profile,
-        client_samples,
-        admitted_client_ids,
-    )
-    if joint_components is not None:
-        return joint_components.total
-
-    r_cloud = _cloud_update_coverage_ratio(profile, client_samples, admitted_client_ids)
-    clip = max(float(config.omega_update_clip_norm), 0.0)
-    return (
-        4.0 * clip * clip * (1.0 - r_cloud) ** 2
-        + _global_dp_perturbation_cost(
-            config, profile, client_samples, client_edges,
-            admitted_client_ids=admitted_client_ids,
+    if config.learning_objective != "online_upper_bound":
+        raise ValueError(
+            "formal selection requires learning_objective='online_upper_bound'"
         )
-    )
+    return _online_bound_for_profile(
+        config, profile, client_samples, admitted_client_ids
+    ).upper
 
 
 def _initial_profiles(
@@ -4020,36 +3726,19 @@ def _initial_profiles(
             config, lowest_learning, masses, edges, admitted
         )
 
-        replacement_stats = _LearningReplacementStats(
-            config,
-            lowest_learning,
-            masses,
-            edges,
-            admitted,
-        )
-
         for item in pools[cid]:
             if item == current:
                 continue
 
-            cost = replacement_stats.replacement_cost(
-                cid,
-                item,
+            lowest_learning[cid] = item
+            cost = _selection_learning_cost(
+                config,
+                lowest_learning,
+                masses,
+                edges,
                 admitted,
             )
-
-            # Defensive exact fallback.  This should normally not be needed
-            # because the admission cohort is fixed during seed construction.
-            if cost is None:
-                lowest_learning[cid] = item
-                cost = _selection_learning_cost(
-                    config,
-                    lowest_learning,
-                    masses,
-                    edges,
-                    admitted,
-                )
-                lowest_learning[cid] = current
+            lowest_learning[cid] = current
 
             if (cost, item.time, _candidate_key(item)) < (
                 best_cost, best.time, _candidate_key(best)
@@ -4068,14 +3757,6 @@ def _initial_profiles(
         admitted,
     )
 
-    hint_stats = _LearningReplacementStats(
-        config,
-        lowest_learning,
-        masses,
-        edges,
-        admitted,
-    )
-
     learning_hint: dict[int, dict[tuple, float]] = {}
 
     for cid, candidates in pools.items():
@@ -4086,22 +3767,15 @@ def _initial_profiles(
             if item == current:
                 cost = reference_cost
             else:
-                cost = hint_stats.replacement_cost(
-                    cid,
-                    item,
+                lowest_learning[cid] = item
+                cost = _selection_learning_cost(
+                    config,
+                    lowest_learning,
+                    masses,
+                    edges,
                     admitted,
                 )
-
-                if cost is None:
-                    lowest_learning[cid] = item
-                    cost = _selection_learning_cost(
-                        config,
-                        lowest_learning,
-                        masses,
-                        edges,
-                        admitted,
-                    )
-                    lowest_learning[cid] = current
+                lowest_learning[cid] = current
 
             learning_hint[cid][_candidate_key(item)] = cost
 
@@ -4180,904 +3854,6 @@ def _pareto_search_client_ids(
 
 
 
-class _JointCalibrationReplacementStats:
-    """Exact O(d) single-client lookahead for the calibrated joint objective.
-
-    The online selector must remain cheap: it only reads state-conditioned
-    empirical moments that were produced by offline/periodic paired
-    clean/private calibration.  No training replay is performed here.
-
-    For the table-e_alg policy, the exact calibrated mean error simplifies to
-
-        Delta_P,0 - Delta_* + b_s
-        = sum_{i in C} a_i (u_{i,0} + b_i) - Delta_*.
-
-    Therefore a replacement only changes three Cloud accumulators:
-    sample mass, the vector numerator for (u_0+b), and the scalar variance
-    numerator.  For the zero-e_alg approximation we additionally maintain the
-    full-population clean numerator because the mean is
-
-        Delta_P,0 - Delta_F,0 + b_s.
-
-    This retains all update-space vector cross terms.  It is *not* a return to
-    J_emb + J_grad + J_opt.
-    """
-
-    def __init__(
-        self,
-        config: SelectionConfig,
-        profile: dict[int, Candidate],
-        client_samples: dict[int, float],
-        admitted_client_ids: tuple[int, ...] | list[int],
-    ) -> None:
-        self.config = config
-        self.profile = profile
-        self.samples = client_samples
-        self.admitted_ids = tuple(admitted_client_ids)
-        self.admitted = frozenset(self.admitted_ids)
-        self.state_key = config.joint_calibration_state_key
-        self.available = True
-        self._entry_cache: dict[tuple[int, str], Any] = {}
-
-        try:
-            self.table = _load_joint_calibration_table(config)
-        except (FileNotFoundError, ValueError, RuntimeError, OSError):
-            if config.joint_calibration_missing_policy == "legacy":
-                self.available = False
-                self.table = None
-                return
-            raise
-
-        assert self.table is not None
-        independence = self.table.metadata.get("cross_client_rng", "independent")
-        if str(independence).strip().lower() not in {
-            "independent",
-            "conditionally_independent",
-        }:
-            raise ValueError(
-                "joint calibration selector currently requires conditionally independent "
-                "client privacy RNG because only per-client variance traces are stored"
-            )
-
-        self.total_mass = sum(
-            max(float(client_samples.get(cid, 0.0)), 0.0)
-            for cid in profile
-        )
-        if self.total_mass <= 0.0:
-            raise ValueError(
-                "joint calibration objective requires positive total client sample mass"
-            )
-
-        # For the formal table-e_alg objective the ideal update fixes the
-        # update-space dimension even when the current search profile is all
-        # SKIP.  That makes the internal no-training fallback profile a valid
-        # point with cost ||Delta_*||^2 instead of a missing-calibration error.
-        self.ideal_update: torch.Tensor | None = None
-        dimension: int | None = None
-        if config.joint_calibration_e_alg_policy == "table":
-            try:
-                ideal = self.table.ideal_update(state_key=self.state_key)
-            except KeyError:
-                if config.joint_calibration_missing_policy == "legacy":
-                    self.available = False
-                    return
-                raise
-            self.ideal_update = ideal
-            dimension = int(ideal.numel())
-
-        self.cloud_mass = 0.0
-        self.cloud_q_num: torch.Tensor | None = (
-            torch.zeros(dimension, dtype=torch.float64)
-            if dimension is not None else None
-        )
-        self.cloud_var_num = 0.0
-        self.full_clean_num: torch.Tensor | None = (
-            torch.zeros(dimension, dtype=torch.float64)
-            if dimension is not None else None
-        )
-
-        for cid, candidate in profile.items():
-            if candidate.mode == "SKIP":
-                # Phi_clean(SKIP)=Phi_DP(SKIP)=0 exactly; SKIP is not an
-                # empirical calibration cell and must never require a table row.
-                continue
-            entry = self._lookup(cid, candidate)
-            if entry is None:
-                self.available = False
-                return
-            entry_dim = int(entry.clean_update_mean.numel())
-            if dimension is None:
-                dimension = entry_dim
-                self.cloud_q_num = torch.zeros(dimension, dtype=torch.float64)
-                self.full_clean_num = torch.zeros(dimension, dtype=torch.float64)
-            elif entry_dim != dimension:
-                raise ValueError(
-                    "joint calibration entries must share one update-space dimension"
-                )
-            mass = self._mass(cid)
-            assert self.full_clean_num is not None
-            self.full_clean_num += mass * entry.clean_update_mean
-            if cid in self.admitted and _candidate_reaches_cloud(candidate):
-                self.cloud_mass += mass
-                assert self.cloud_q_num is not None
-                self.cloud_q_num += mass * (entry.clean_update_mean + entry.bias_mean)
-                self.cloud_var_num += mass * mass * float(entry.variance_trace)
-
-        if dimension is None:
-            dimension = 0
-            self.cloud_q_num = torch.zeros(0, dtype=torch.float64)
-            self.full_clean_num = torch.zeros(0, dtype=torch.float64)
-
-        self.dimension = dimension
-        assert self.cloud_q_num is not None
-        assert self.full_clean_num is not None
-
-        if self.ideal_update is not None and int(self.ideal_update.numel()) != self.dimension:
-            raise ValueError(
-                "joint calibration ideal/reference update dimension does not match "
-                "mode entries"
-            )
-
-    def _mass(self, cid: int) -> float:
-        return max(float(self.samples.get(cid, 0.0)), 0.0)
-
-    def _lookup(self, cid: int, candidate: Candidate) -> Any | None:
-        key = (int(cid), str(candidate.mode))
-        if key in self._entry_cache:
-            return self._entry_cache[key]
-        assert self.table is not None
-        try:
-            entry = self.table.lookup(
-                mode=candidate.mode,
-                state_key=self.state_key,
-                client_id=cid,
-            )
-        except KeyError:
-            if self.config.joint_calibration_missing_policy == "legacy":
-                return None
-            raise
-        if self._entry_cache:
-            any_entry = next(iter(self._entry_cache.values()))
-            if int(entry.clean_update_mean.numel()) != int(any_entry.clean_update_mean.numel()):
-                raise ValueError(
-                    "joint calibration entries must share one update-space dimension"
-                )
-        self._entry_cache[key] = entry
-        return entry
-
-    @staticmethod
-    def _mean_from_num(
-        numerator: torch.Tensor,
-        mass: float,
-    ) -> torch.Tensor:
-        if mass > 0.0:
-            return numerator / mass
-        return torch.zeros_like(numerator)
-
-    def current_cost(self) -> float | None:
-        if not self.available:
-            return None
-        return self._cost_from_accumulators(
-            cloud_mass=self.cloud_mass,
-            cloud_q_num=self.cloud_q_num,
-            cloud_var_num=self.cloud_var_num,
-            full_clean_num=self.full_clean_num,
-        )
-
-    def _cost_from_accumulators(
-        self,
-        *,
-        cloud_mass: float,
-        cloud_q_num: torch.Tensor,
-        cloud_var_num: float,
-        full_clean_num: torch.Tensor,
-    ) -> float:
-        cloud_joint_mean = self._mean_from_num(cloud_q_num, cloud_mass)
-        if self.config.joint_calibration_e_alg_policy == "table":
-            assert self.ideal_update is not None
-            mean_error = cloud_joint_mean - self.ideal_update
-        else:
-            delta_f0 = full_clean_num / self.total_mass
-            mean_error = cloud_joint_mean - delta_f0
-
-        mean_error_sq = float(torch.dot(mean_error, mean_error).item())
-        variance = (
-            max(float(cloud_var_num), 0.0) / (cloud_mass * cloud_mass)
-            if cloud_mass > 0.0
-            else 0.0
-        )
-        return float(mean_error_sq + variance)
-
-    def replacement_cost(
-        self,
-        cid: int,
-        candidate: Candidate,
-        admitted_client_ids: tuple[int, ...] | list[int],
-    ) -> float | None:
-        if not self.available:
-            return None
-        if frozenset(admitted_client_ids) != self.admitted:
-            # Admission changes are intentionally handled by the full-profile
-            # reference path.  This class is exact only for fixed admission.
-            return None
-
-        old_candidate = self.profile[cid]
-        old_entry = (
-            None if old_candidate.mode == "SKIP"
-            else self._lookup(cid, old_candidate)
-        )
-        new_entry = (
-            None if candidate.mode == "SKIP"
-            else self._lookup(cid, candidate)
-        )
-        if old_candidate.mode != "SKIP" and old_entry is None:
-            return None
-        if candidate.mode != "SKIP" and new_entry is None:
-            return None
-        if new_entry is not None and int(new_entry.clean_update_mean.numel()) != self.dimension:
-            # The zero-e_alg approximation may build an all-SKIP snapshot
-            # before any empirical vector dimension is known.  In that rare
-            # case, fall back to the exact full-profile path for this neighbor.
-            if self.dimension == 0:
-                return None
-            raise ValueError(
-                "joint calibration replacement entry has an incompatible dimension"
-            )
-
-        mass = self._mass(cid)
-        old_cloud = cid in self.admitted and _candidate_reaches_cloud(old_candidate)
-        new_cloud = cid in self.admitted and _candidate_reaches_cloud(candidate)
-
-        next_cloud_mass = self.cloud_mass
-        next_cloud_q_num = self.cloud_q_num.clone()
-        next_cloud_var_num = self.cloud_var_num
-        # Under the table e_alg policy, _cost_from_accumulators uses
-        # cloud_q_num and ideal_update only. Keep the base clean numerator
-        # read-only instead of cloning a vector that this objective ignores.
-        next_full_clean_num = (
-            self.full_clean_num
-            if self.config.joint_calibration_e_alg_policy == "table"
-            else self.full_clean_num.clone()
-        )
-
-        zero = torch.zeros(self.dimension, dtype=torch.float64)
-        old_clean = zero if old_entry is None else old_entry.clean_update_mean
-        new_clean = zero if new_entry is None else new_entry.clean_update_mean
-        old_bias = zero if old_entry is None else old_entry.bias_mean
-        new_bias = zero if new_entry is None else new_entry.bias_mean
-        old_variance = 0.0 if old_entry is None else float(old_entry.variance_trace)
-        new_variance = 0.0 if new_entry is None else float(new_entry.variance_trace)
-
-        # Delta_F,0 changes with the candidate's clean trajectory.  SKIP has
-        # the exact zero clean trajectory by definition.
-        if self.config.joint_calibration_e_alg_policy != "table":
-            next_full_clean_num += mass * (new_clean - old_clean)
-
-        if old_cloud:
-            next_cloud_mass -= mass
-            next_cloud_q_num -= mass * (old_clean + old_bias)
-            next_cloud_var_num -= mass * mass * old_variance
-        if new_cloud:
-            next_cloud_mass += mass
-            next_cloud_q_num += mass * (new_clean + new_bias)
-            next_cloud_var_num += mass * mass * new_variance
-
-        # Floating-point subtraction can leave a tiny negative residue.
-        if next_cloud_mass < 0.0 and abs(next_cloud_mass) < 1e-12:
-            next_cloud_mass = 0.0
-        if next_cloud_var_num < 0.0 and abs(next_cloud_var_num) < 1e-12:
-            next_cloud_var_num = 0.0
-
-        return self._cost_from_accumulators(
-            cloud_mass=next_cloud_mass,
-            cloud_q_num=next_cloud_q_num,
-            cloud_var_num=next_cloud_var_num,
-            full_clean_num=next_full_clean_num,
-        )
-
-
-class _LearningReplacementStats:
-    """Fixed-admission O(affected-group) single-client J_learn lookahead.
-
-    The exact full-profile objective remains the reference; this snapshot
-    replaces the repeated scan of every client during neighbor ranking.
-    Cloud noise is stored in unnormalized sample-mass units, making changes
-    to the Cloud denominator an exact one-scalar update. Edge-local costs
-    need only recompute the client's own Edge group.
-    """
-
-    def __init__(
-        self,
-        config: SelectionConfig,
-        profile: dict[int, Candidate],
-        client_samples: dict[int, float],
-        client_edges: dict[int, int],
-        admitted_client_ids: tuple[int, ...] | list[int],
-    ) -> None:
-        self.config = config
-        self.profile = profile
-        self.samples = client_samples
-        self.edges = client_edges
-        self.admitted_ids = tuple(admitted_client_ids)
-        self.admitted = frozenset(self.admitted_ids)
-        self._joint_stats: _JointCalibrationReplacementStats | None = None
-        if config.learning_objective == "joint_calibration":
-            self._joint_stats = _JointCalibrationReplacementStats(
-                config,
-                profile,
-                client_samples,
-                admitted_client_ids,
-            )
-            # The legacy fusion/update-DP bookkeeping below is irrelevant for
-            # the joint proxy and can be expensive to build for large profiles.
-            return
-
-        self.total_samples = sum(max(float(value), 0.0) for value in client_samples.values())
-        self.admitted_mass = sum(
-            max(float(client_samples.get(cid, 0.0)), 0.0)
-            for cid in self.admitted if cid in profile
-        )
-        self.dim = max(float(config.omega_update_dimension), 0.0)
-        self.clip = max(float(config.omega_update_clip_norm), 0.0)
-        self.factor = self.dim * (2.0 * self.clip) ** 2
-        self.default_sigma = max(
-            float(resolved_privacy_parameters(config)["update_noise_multiplier"]), 0.0
-        ) if self.factor > 0.0 and self.admitted else 0.0
-        self.cloud_mass = 0.0
-        self.secure: dict[int, tuple[float, float]] = {}
-        self.packets: dict[tuple[int, str, str], dict[int, tuple[float, float]]] = {}
-        self.independent: dict[int, tuple[float, float]] = {}
-        self.edge_groups: dict[int, dict[int, Candidate]] = {}
-        for cid in self.admitted:
-            candidate = profile.get(cid)
-            if candidate is None:
-                continue
-            if _candidate_reaches_cloud(candidate):
-                self.cloud_mass += self._mass(cid)
-            classification, key, pair = self._cloud_entry(cid, candidate)
-            if classification == "secure":
-                self.secure[cid] = pair
-            elif classification == "packet":
-                self.packets.setdefault(key, {})[cid] = pair
-            elif classification == "independent":
-                self.independent[cid] = pair
-            if candidate.mode == "LIIE":
-                self.edge_groups.setdefault(int(client_edges.get(cid, -1)), {})[cid] = candidate
-        self.secure_score = self._max_product_sq(self.secure)
-
-        # Stage 12E1:
-        # _max_product_sq(secure) depends only on the independent maxima of
-        # mass and sigma.  A single-client replacement can remove at most one
-        # member, so top-2 is sufficient for an exact O(1) update.
-        self.secure_mass_top2 = tuple(
-            sorted(
-                (
-                    (float(pair[0]), int(cid))
-                    for cid, pair in self.secure.items()
-                ),
-                reverse=True,
-            )[:2]
-        )
-        self.secure_sigma_top2 = tuple(
-            sorted(
-                (
-                    (float(pair[1]), int(cid))
-                    for cid, pair in self.secure.items()
-                ),
-                reverse=True,
-            )[:2]
-        )
-
-        self.packet_scores = {
-            key: self._max_product_sq(members)
-            for key, members in self.packets.items()
-        }
-
-        # Stage 12E2:
-        # Exact O(1) single-client replacement inside each packet group.
-        self.packet_mass_top2 = {
-            key: tuple(
-                sorted(
-                    (
-                        (float(pair[0]), int(cid))
-                        for cid, pair in members.items()
-                    ),
-                    reverse=True,
-                )[:2]
-            )
-            for key, members in self.packets.items()
-        }
-
-        self.packet_sigma_top2 = {
-            key: tuple(
-                sorted(
-                    (
-                        (float(pair[1]), int(cid))
-                        for cid, pair in members.items()
-                    ),
-                    reverse=True,
-                )[:2]
-            )
-            for key, members in self.packets.items()
-        }
-
-        self.packet_score_total = sum(self.packet_scores.values())
-        self.independent_score = sum(
-            (mass * sigma) ** 2
-            for mass, sigma in self.independent.values()
-        )
-        self.edge_scores = {
-            edge: self._edge_cost(members)
-            for edge, members in self.edge_groups.items()
-        } if self.factor > 0.0 else {}
-        self.edge_total = sum(self.edge_scores.values())
-
-        # Stage 12E3:
-        # Exact fast path for LIIE -> LIIE replacement. Membership and
-        # group sample mass stay fixed, so only the candidate-dependent
-        # DP mechanism/sigma contribution needs updating.
-        self.edge_group_masses: dict[int, float] = {}
-        self.edge_member_counts: dict[int, int] = {}
-        self.edge_aggregate_counts: dict[int, int] = {}
-        self.edge_independent_group_scores: dict[int, float] = {}
-        self.edge_mass_max: dict[int, float] = {}
-        self.edge_sigma_top2: dict[int, tuple[tuple[float, int], ...]] = {}
-
-        for edge, members in self.edge_groups.items():
-            group_mass = sum(
-                self._mass(member_cid)
-                for member_cid in members
-            )
-
-            self.edge_group_masses[edge] = group_mass
-            self.edge_member_counts[edge] = len(members)
-
-            self.edge_aggregate_counts[edge] = sum(
-                1
-                for member_candidate in members.values()
-                if _candidate_uses_edge_local_exact_update_dp(
-                    member_candidate
-                )
-            )
-
-            if group_mass > 0.0:
-                self.edge_independent_group_scores[edge] = sum(
-                    (
-                        self._mass(member_cid)
-                        * self._sigma(member_candidate)
-                        / group_mass
-                    ) ** 2
-                    for member_cid, member_candidate in members.items()
-                    if mechanism_uses_dp(
-                        candidate_link_mechanism(
-                            member_candidate,
-                            "L_E_upd",
-                        )
-                    )
-                )
-            else:
-                self.edge_independent_group_scores[edge] = 0.0
-
-            self.edge_mass_max[edge] = max(
-                (
-                    self._mass(member_cid)
-                    for member_cid in members
-                ),
-                default=0.0,
-            )
-
-            self.edge_sigma_top2[edge] = tuple(
-                sorted(
-                    (
-                        (
-                            float(self._sigma(member_candidate)),
-                            int(member_cid),
-                        )
-                        for member_cid, member_candidate
-                        in members.items()
-                    ),
-                    reverse=True,
-                )[:2]
-            )
-
-    def _mass(self, cid: int) -> float:
-        return max(float(self.samples.get(cid, 0.0)), 0.0)
-
-    def _sigma(self, candidate: Candidate) -> float:
-        return max(float(candidate.update_noise_multiplier or self.default_sigma), 0.0)
-
-    @staticmethod
-    def _max_product_sq(members: dict[int, tuple[float, float]]) -> float:
-        if not members:
-            return 0.0
-        mass = max(pair[0] for pair in members.values())
-        sigma = max(pair[1] for pair in members.values())
-        return (mass * sigma) ** 2
-
-    @staticmethod
-    def _replacement_max_from_top2(
-        top2: tuple[tuple[float, int], ...],
-        cid: int,
-        new_value: float | None,
-    ) -> float:
-        """Exact max after removing cid and optionally inserting new_value."""
-        if not top2:
-            remaining = 0.0
-        elif top2[0][1] == cid:
-            remaining = top2[1][0] if len(top2) > 1 else 0.0
-        else:
-            remaining = top2[0][0]
-
-        if new_value is not None:
-            remaining = max(remaining, float(new_value))
-
-        return float(remaining)
-
-
-    def _cloud_entry(
-        self, cid: int, candidate: Candidate,
-    ) -> tuple[str, tuple[int, str, str] | None, tuple[float, float]]:
-        mass, sigma = self._mass(cid), self._sigma(candidate)
-        pair = (mass, sigma)
-        if not _candidate_reaches_cloud(candidate):
-            return "none", None, pair
-        if _candidate_uses_secure_aggregate_update_dp_for_selection(candidate):
-            return "secure", None, pair
-        if candidate.dp_execution_plan == "cloud_packet" and candidate.mode in EDGE_CLOUD_MODES:
-            key = (
-                int(self.edges.get(cid, -1)), candidate.mode,
-                candidate_link_mechanism(candidate, "E_C_upd"),
-            )
-            return "packet", key, pair
-        spec = MODE_SPECS.get(candidate.mode)
-        edge_loops = max(int(spec.E_edge_loops if spec is not None else 1), 1)
-        for link_id, obj, _count, privacy_eligible in _mode_link_transmissions(
-            candidate.mode, 1, edge_loops,
-        ):
-            if (obj == "upd" and privacy_eligible and link_id.endswith("_C_upd")
-                and mechanism_uses_dp(candidate_link_mechanism(candidate, link_id, fallback_object="upd"))):
-                return "independent", None, pair
-        return "none", None, pair
-
-    def _edge_cost(self, members: dict[int, Candidate]) -> float:
-        group_mass = sum(self._mass(cid) for cid in members)
-        if group_mass <= 0.0 or self.admitted_mass <= 0.0:
-            return 0.0
-        aggregate = [cid for cid, candidate in members.items()
-                     if _candidate_uses_edge_local_exact_update_dp(candidate)]
-        if aggregate:
-            if len(aggregate) != len(members) or len(members) < 2:
-                raise ValueError("Inconsistent LIIE aggregate DP cohort in profile")
-            group_sigma = max(self._sigma(members[cid]) for cid in members)
-            max_mass = max(self._mass(cid) for cid in members)
-            group_score = (group_sigma * max_mass / group_mass) ** 2
-        else:
-            group_score = sum(
-                (self._mass(cid) * self._sigma(candidate) / group_mass) ** 2
-                for cid, candidate in members.items()
-                if mechanism_uses_dp(candidate_link_mechanism(candidate, "L_E_upd"))
-            )
-        return self.factor * (group_mass / self.admitted_mass) * group_score
-
-    def replacement_cost(
-        self,
-        cid: int,
-        candidate: Candidate,
-        admitted_client_ids: tuple[int, ...] | list[int],
-        old_cloud_entry: tuple[Any, Any, Any] | None = None,
-    ) -> float | None:
-        """Return exact fixed-admission lookahead, or None for a changed cohort.
-
-        Legacy fusion/update-DP and the calibrated joint objective use separate
-        incremental algebra.  The joint path retains the full update-space
-        vector mean and variance trace, so its directional cross terms are not
-        replaced by independent scalar penalties.
-        """
-        if self.config.learning_objective == "joint_calibration":
-            if self._joint_stats is None:
-                return None
-            return self._joint_stats.replacement_cost(
-                cid,
-                candidate,
-                admitted_client_ids,
-            )
-        if admitted_client_ids != self.admitted_ids:
-            if frozenset(admitted_client_ids) != self.admitted:
-                return None
-        old = self.profile[cid]
-        mass = self._mass(cid)
-        cloud_mass = self.cloud_mass + mass * (
-            int(_candidate_reaches_cloud(candidate)) - int(_candidate_reaches_cloud(old))
-        )
-        fusion_mass = cloud_mass / self.total_samples if self.total_samples > 0.0 else 0.0
-        fusion_bound = 4.0 * self.clip * self.clip * (1.0 - fusion_mass) ** 2
-        if self.factor <= 0.0 or not self.admitted:
-            return fusion_bound
-
-        if old_cloud_entry is None:
-            old_type, old_key, old_pair = self._cloud_entry(cid, old)
-        else:
-            old_type, old_key, old_pair = old_cloud_entry
-
-        new_type, new_key, new_pair = self._cloud_entry(cid, candidate)
-        secure_score = self.secure_score
-        if old_type == "secure" or new_type == "secure":
-            new_mass = (
-                float(new_pair[0])
-                if new_type == "secure"
-                else None
-            )
-            new_sigma = (
-                float(new_pair[1])
-                if new_type == "secure"
-                else None
-            )
-
-            secure_mass_max = self._replacement_max_from_top2(
-                self.secure_mass_top2,
-                cid,
-                new_mass,
-            )
-            secure_sigma_max = self._replacement_max_from_top2(
-                self.secure_sigma_top2,
-                cid,
-                new_sigma,
-            )
-
-            secure_score = (
-                secure_mass_max * secure_sigma_max
-            ) ** 2
-
-        packet_score = self.packet_score_total
-        keys = {
-            key
-            for key in (
-                old_key if old_type == "packet" else None,
-                new_key if new_type == "packet" else None,
-            )
-            if key is not None
-        }
-
-        for key in keys:
-            packet_score -= self.packet_scores.get(key, 0.0)
-
-            new_mass = (
-                float(new_pair[0])
-                if new_type == "packet" and new_key == key
-                else None
-            )
-            new_sigma = (
-                float(new_pair[1])
-                if new_type == "packet" and new_key == key
-                else None
-            )
-
-            mass_max = self._replacement_max_from_top2(
-                self.packet_mass_top2.get(key, ()),
-                cid,
-                new_mass,
-            )
-            sigma_max = self._replacement_max_from_top2(
-                self.packet_sigma_top2.get(key, ()),
-                cid,
-                new_sigma,
-            )
-
-            packet_score += (
-                mass_max * sigma_max
-            ) ** 2
-
-        independent_score = self.independent_score
-        if old_type == "independent":
-            independent_score -= (old_pair[0] * old_pair[1]) ** 2
-        if new_type == "independent":
-            independent_score += (new_pair[0] * new_pair[1]) ** 2
-        cloud_dp = (
-            self.factor * (secure_score + packet_score + independent_score) / (cloud_mass ** 2)
-            if cloud_mass > 0.0 else 0.0
-        )
-
-        edge_dp = self.edge_total
-        if old.mode == "LIIE" or candidate.mode == "LIIE":
-            edge = int(self.edges.get(cid, -1))
-            edge_dp -= self.edge_scores.get(edge, 0.0)
-
-            if old.mode == "LIIE" and candidate.mode == "LIIE":
-                # Membership is unchanged. Therefore member_count,
-                # group_mass and mass maximum are fixed.
-                group_mass = self.edge_group_masses.get(edge, 0.0)
-                member_count = self.edge_member_counts.get(edge, 0)
-
-                old_aggregate = (
-                    _candidate_uses_edge_local_exact_update_dp(old)
-                )
-                new_aggregate = (
-                    _candidate_uses_edge_local_exact_update_dp(candidate)
-                )
-
-                aggregate_count = (
-                    self.edge_aggregate_counts.get(edge, 0)
-                    - int(old_aggregate)
-                    + int(new_aggregate)
-                )
-
-                if group_mass <= 0.0 or self.admitted_mass <= 0.0:
-                    next_edge_cost = 0.0
-
-                elif aggregate_count:
-                    # Preserve the exact consistency check from _edge_cost().
-                    if (
-                        aggregate_count != member_count
-                        or member_count < 2
-                    ):
-                        raise ValueError(
-                            "Inconsistent LIIE aggregate DP cohort in profile"
-                        )
-
-                    group_sigma = self._replacement_max_from_top2(
-                        self.edge_sigma_top2.get(edge, ()),
-                        cid,
-                        self._sigma(candidate),
-                    )
-
-                    max_mass = self.edge_mass_max.get(edge, 0.0)
-
-                    group_score = (
-                        group_sigma
-                        * max_mass
-                        / group_mass
-                    ) ** 2
-
-                    next_edge_cost = (
-                        self.factor
-                        * (group_mass / self.admitted_mass)
-                        * group_score
-                    )
-
-                else:
-                    # Independent-DP cohort. group_mass is unchanged, so
-                    # update only this client's normalized squared term.
-                    group_score = (
-                        self.edge_independent_group_scores.get(
-                            edge,
-                            0.0,
-                        )
-                    )
-
-                    old_uses_dp = mechanism_uses_dp(
-                        candidate_link_mechanism(
-                            old,
-                            "L_E_upd",
-                        )
-                    )
-                    new_uses_dp = mechanism_uses_dp(
-                        candidate_link_mechanism(
-                            candidate,
-                            "L_E_upd",
-                        )
-                    )
-
-                    if old_uses_dp:
-                        group_score -= (
-                            mass
-                            * self._sigma(old)
-                            / group_mass
-                        ) ** 2
-
-                    if new_uses_dp:
-                        group_score += (
-                            mass
-                            * self._sigma(candidate)
-                            / group_mass
-                        ) ** 2
-
-                    next_edge_cost = (
-                        self.factor
-                        * (group_mass / self.admitted_mass)
-                        * group_score
-                    )
-
-                edge_dp += next_edge_cost
-
-            else:
-                # Stage 12F13:
-                # Exact O(1) fast path for membership changes when the
-                # resulting LIIE cohort uses independent DP.
-                #
-                # The existing normalized independent score is rescaled
-                # from the old group mass to the new group mass, then only
-                # this client's contribution is removed/added.
-                base_group_mass = self.edge_group_masses.get(edge, 0.0)
-                new_group_mass = base_group_mass
-                new_aggregate_count = self.edge_aggregate_counts.get(edge, 0)
-
-                if old.mode == "LIIE":
-                    new_group_mass -= mass
-                    new_aggregate_count -= int(
-                        _candidate_uses_edge_local_exact_update_dp(old)
-                    )
-                else:
-                    new_group_mass += mass
-                    new_aggregate_count += int(
-                        _candidate_uses_edge_local_exact_update_dp(candidate)
-                    )
-
-                if new_group_mass <= 0.0 or self.admitted_mass <= 0.0:
-                    next_edge_cost = 0.0
-
-                elif new_aggregate_count == 0:
-                    group_score = self.edge_independent_group_scores.get(
-                        edge,
-                        0.0,
-                    )
-
-                    # Remove this client's old contribution while still
-                    # expressed using the original denominator.
-                    if (
-                        old.mode == "LIIE"
-                        and base_group_mass > 0.0
-                        and mechanism_uses_dp(
-                            candidate_link_mechanism(
-                                old,
-                                "L_E_upd",
-                            )
-                        )
-                    ):
-                        group_score -= (
-                            mass
-                            * self._sigma(old)
-                            / base_group_mass
-                        ) ** 2
-
-                    # Rescale all unchanged members to the new denominator.
-                    if base_group_mass > 0.0:
-                        group_score *= (
-                            base_group_mass / new_group_mass
-                        ) ** 2
-                    else:
-                        group_score = 0.0
-
-                    # Add this client's new contribution using the new
-                    # denominator.
-                    if (
-                        candidate.mode == "LIIE"
-                        and mechanism_uses_dp(
-                            candidate_link_mechanism(
-                                candidate,
-                                "L_E_upd",
-                            )
-                        )
-                    ):
-                        group_score += (
-                            mass
-                            * self._sigma(candidate)
-                            / new_group_mass
-                        ) ** 2
-
-                    next_edge_cost = (
-                        self.factor
-                        * (new_group_mass / self.admitted_mass)
-                        * group_score
-                    )
-
-                    edge_dp += next_edge_cost
-
-                else:
-                    # Aggregate-DP membership changes retain the original
-                    # reference path, including its consistency checks.
-                    members = dict(
-                        self.edge_groups.get(edge, {})
-                    )
-                    members.pop(cid, None)
-
-                    if candidate.mode == "LIIE":
-                        members[cid] = candidate
-
-                    edge_dp += self._edge_cost(members)
-
-        return float(fusion_bound + cloud_dp + edge_dp)
-
-
 def _global_replacement_priority(
     *,
     objective: str,
@@ -5090,14 +3866,13 @@ def _global_replacement_priority(
     client_edges: dict[int, int],
     trial_profile: dict[int, Candidate] | None,
     flow_objectives: tuple[tuple[int, ...], float] | None,
-    replacement_stats: _LearningReplacementStats | None = None,
-    old_cloud_entry: tuple[Any, Any, Any] | None = None,
     profiler: dict[str, Any] | None = None,
-) -> tuple[float, float | None]:
+) -> float:
     """Rank neighbors by the two *formal* paper objectives.
 
     This fixed-admission score is only a beam prefilter, not a proof of
-    dominance.  Exact flow and J_learn are evaluated for retained neighbors.
+    dominance.  The learning term is the same strict online upper bound used
+    for full-profile evaluation; there is no incremental or legacy fallback.
     """
     priority_started_at = time.perf_counter()
     _perf_add(profiler, "replacement_priority_calls")
@@ -5106,49 +3881,35 @@ def _global_replacement_priority(
         else float(evaluated.system_latency + candidate.time - current.time)
     )
     if objective == "latency":
-        return next_time, None
+        return next_time
     admitted = (
         tuple(flow_objectives[0]) if flow_objectives is not None
         else evaluated.admitted_client_ids
     )
-    next_learning = None
-    if replacement_stats is not None:
-        incremental_started_at = time.perf_counter()
-        next_learning = replacement_stats.replacement_cost(
-            client_id,
-            candidate,
-            admitted,
-            old_cloud_entry=old_cloud_entry,
-        )
-        _perf_add(profiler, "incremental_jlearn_calls")
-        _perf_add(profiler, "incremental_jlearn_sec", time.perf_counter() - incremental_started_at)
-    if next_learning is None:
-        fallback_started_at = time.perf_counter()
+    learning_started_at = time.perf_counter()
 
-        # Stage 11B: materialize the complete trial profile only when the
-        # incremental learning-cost path is unavailable.
-        fallback_profile = trial_profile
-        if fallback_profile is None:
-            fallback_profile = dict(evaluated.profile)
-            fallback_profile[client_id] = candidate
-            _perf_add(
-                profiler,
-                "neighbor_priority_fallback_profile_materializations",
-            )
-
-        next_learning = _selection_learning_cost(
-            config,
-            fallback_profile,
-            client_samples,
-            client_edges,
-            admitted,
-        )
-        _perf_add(profiler, "full_jlearn_fallback_calls")
+    trial_profile = trial_profile
+    if trial_profile is None:
+        trial_profile = dict(evaluated.profile)
+        trial_profile[client_id] = candidate
         _perf_add(
             profiler,
-            "full_jlearn_fallback_sec",
-            time.perf_counter() - fallback_started_at,
+            "neighbor_priority_profile_materializations",
         )
+
+    next_learning = _selection_learning_cost(
+        config,
+        trial_profile,
+        client_samples,
+        client_edges,
+        admitted,
+    )
+    _perf_add(profiler, "full_jlearn_calls")
+    _perf_add(
+        profiler,
+        "full_jlearn_sec",
+        time.perf_counter() - learning_started_at,
+    )
     arithmetic_started_at = time.perf_counter()
 
     time_scale = max(abs(evaluated.system_latency), abs(next_time), 1.0)
@@ -5171,7 +3932,7 @@ def _global_replacement_priority(
         time.perf_counter() - priority_started_at,
     )
 
-    return priority, float(next_learning)
+    return priority
 
 
 def _state_diff_vector(state_diff: dict[str, dict[str, torch.Tensor]]) -> torch.Tensor:
@@ -5197,202 +3958,6 @@ def _weighted_update(
     for vec, weight in updates:
         out = out + vec * (max(float(weight), 0.0) / total)
     return out
-
-
-@dataclass(frozen=True)
-class _JointLearningProxyComponents:
-    total: float
-    mean_error_sq: float
-    variance_trace: float
-    e_alg_norm_sq: float
-    e_agg_norm_sq: float
-    bias_norm_sq: float
-    source: str
-
-
-@lru_cache(maxsize=16)
-def _load_joint_calibration_table_cached(
-    path_text: str,
-    mtime_ns: int,
-) -> JointUpdateCalibrationTable:
-    # mtime_ns is intentionally part of the cache key so an offline refresh can
-    # replace the file without restarting a long-running experiment process.
-    del mtime_ns
-    return JointUpdateCalibrationTable.load(path_text)
-
-
-def _load_joint_calibration_table(config: SelectionConfig) -> JointUpdateCalibrationTable:
-    if not config.joint_calibration_path:
-        raise FileNotFoundError("joint_calibration_path is not configured")
-    path = Path(config.joint_calibration_path).expanduser().resolve()
-    stat = path.stat()
-    return _load_joint_calibration_table_cached(str(path), int(stat.st_mtime_ns))
-
-
-def _joint_calibration_learning_components(
-    config: SelectionConfig,
-    profile: dict[int, Candidate],
-    client_samples: dict[int, float],
-    admitted_client_ids: tuple[int, ...] | list[int] | set[int],
-) -> _JointLearningProxyComponents | None:
-    """Compute the state-conditioned joint update-space selection proxy.
-
-    This is the executable counterpart of
-
-        J_hat = ||e_alg_hat + e_agg_hat + b_s_hat||^2 + v_s_hat.
-
-    The table contains empirical moments from offline paired clean/private
-    executions.  No paired run, Jacobian, or linearization is performed here.
-    Per-client privacy RNG is assumed conditionally independent, giving
-    v_s_hat = sum_i a_i^2 v_i_hat.
-    """
-    if config.learning_objective != "joint_calibration":
-        return None
-
-    try:
-        table = _load_joint_calibration_table(config)
-    except (FileNotFoundError, ValueError, RuntimeError, OSError):
-        if config.joint_calibration_missing_policy == "legacy":
-            return None
-        raise
-
-    independence = table.metadata.get("cross_client_rng", "independent")
-    if str(independence).strip().lower() not in {"independent", "conditionally_independent"}:
-        raise ValueError(
-            "joint calibration selector currently requires conditionally independent "
-            "client privacy RNG because only per-client variance traces are stored"
-        )
-
-    total_mass = sum(
-        max(float(client_samples.get(client_id, 0.0)), 0.0)
-        for client_id in profile
-    )
-    if total_mass <= 0.0:
-        raise ValueError("joint calibration objective requires positive total client sample mass")
-
-    admitted = set(admitted_client_ids)
-    cloud_ids = [
-        client_id
-        for client_id, candidate in profile.items()
-        if client_id in admitted and _candidate_reaches_cloud(candidate)
-    ]
-    cloud_mass = sum(
-        max(float(client_samples.get(client_id, 0.0)), 0.0)
-        for client_id in cloud_ids
-    )
-
-    state_key = config.joint_calibration_state_key
-    entries: dict[int, Any] = {}
-    dimension: int | None = None
-    for client_id, candidate in profile.items():
-        # SKIP is an internal no-training/no-release action, not a calibrated
-        # training mode.  Its clean update, DP bias, and DP variance are all
-        # exactly zero by definition, so requiring a table row for ``SKIP``
-        # would make strict missing-policy evaluation fail on valid fallback
-        # profiles used by the Pareto/coverage search.
-        if candidate.mode == "SKIP":
-            continue
-        try:
-            entry = table.lookup(
-                mode=candidate.mode,
-                state_key=state_key,
-                client_id=client_id,
-            )
-        except KeyError:
-            if config.joint_calibration_missing_policy == "legacy":
-                return None
-            raise
-        if dimension is None:
-            dimension = int(entry.clean_update_mean.numel())
-        if int(entry.clean_update_mean.numel()) != dimension:
-            raise ValueError("joint calibration entries must share one update-space dimension")
-        entries[client_id] = entry
-
-    if dimension is None:
-        if config.joint_calibration_e_alg_policy == "table":
-            try:
-                ideal_update = table.ideal_update(state_key=state_key)
-            except KeyError:
-                if config.joint_calibration_missing_policy == "legacy":
-                    return None
-                raise
-            # With an all-SKIP profile, Phi_clean(SKIP)=Phi_DP(SKIP)=0.
-            # Hence the exact calibrated mean error is simply -Delta_* and
-            # there is no DP variance term.
-            e_alg_norm_sq = float(torch.dot(ideal_update, ideal_update).item())
-            return _JointLearningProxyComponents(
-                total=e_alg_norm_sq,
-                mean_error_sq=e_alg_norm_sq,
-                variance_trace=0.0,
-                e_alg_norm_sq=e_alg_norm_sq,
-                e_agg_norm_sq=0.0,
-                bias_norm_sq=0.0,
-                source="joint_calibration_table_e_alg",
-            )
-        return _JointLearningProxyComponents(
-            total=0.0,
-            mean_error_sq=0.0,
-            variance_trace=0.0,
-            e_alg_norm_sq=0.0,
-            e_agg_norm_sq=0.0,
-            bias_norm_sq=0.0,
-            source="joint_calibration_zero_e_alg_approx",
-        )
-
-    delta_f0 = torch.zeros(dimension, dtype=torch.float64)
-    delta_p0 = torch.zeros(dimension, dtype=torch.float64)
-    bias_s = torch.zeros(dimension, dtype=torch.float64)
-    variance_s = 0.0
-
-    for client_id, entry in entries.items():
-        mass = max(float(client_samples.get(client_id, 0.0)), 0.0)
-        p_i = mass / total_mass
-        delta_f0 += p_i * entry.clean_update_mean
-
-        if client_id in cloud_ids and cloud_mass > 0.0:
-            a_i = mass / cloud_mass
-            delta_p0 += a_i * entry.clean_update_mean
-            bias_s += a_i * entry.bias_mean
-            variance_s += (a_i * a_i) * float(entry.variance_trace)
-
-    e_agg = delta_p0 - delta_f0
-
-    if config.joint_calibration_e_alg_policy == "table":
-        try:
-            ideal_update = table.ideal_update(state_key=state_key)
-        except KeyError:
-            if config.joint_calibration_missing_policy == "legacy":
-                return None
-            raise
-        if int(ideal_update.numel()) != dimension:
-            raise ValueError(
-                "joint calibration ideal/reference update dimension does not match mode entries"
-            )
-        e_alg = delta_f0 - ideal_update
-        source = "joint_calibration_table_e_alg"
-    else:
-        # Explicit empirical approximation: e_alg is treated as zero.  This is
-        # not claimed to be an identity and must be validated against paired-MC
-        # ground truth before formal use.
-        e_alg = torch.zeros_like(delta_f0)
-        source = "joint_calibration_zero_e_alg_approx"
-
-    mean_error = e_alg + e_agg + bias_s
-    mean_error_sq = float(torch.dot(mean_error, mean_error).item())
-    e_alg_norm_sq = float(torch.dot(e_alg, e_alg).item())
-    e_agg_norm_sq = float(torch.dot(e_agg, e_agg).item())
-    bias_norm_sq = float(torch.dot(bias_s, bias_s).item())
-    total = mean_error_sq + max(float(variance_s), 0.0)
-
-    return _JointLearningProxyComponents(
-        total=float(total),
-        mean_error_sq=mean_error_sq,
-        variance_trace=max(float(variance_s), 0.0),
-        e_alg_norm_sq=e_alg_norm_sq,
-        e_agg_norm_sq=e_agg_norm_sq,
-        bias_norm_sq=bias_norm_sq,
-        source=source,
-    )
 
 
 def _profile_fusion_distortion(
@@ -5606,51 +4171,20 @@ def _evaluate_profile(
         client_samples,
         admitted_client_ids,
     )
-    # Formal selection-time fusion bound from the paper:
-    #   J_fusion^ub = 4 C_u^2 (1-r_C)^2.
-    # For Edge-only profiles r_C=0 and _global_dp_perturbation_cost returns
-    # zero because there is no Cloud release, hence J_learn=4 C_u^2.
+    if config.learning_objective != "online_upper_bound":
+        raise ValueError(
+            "formal profile evaluation requires learning_objective="
+            "'online_upper_bound'; legacy fusion, joint calibration and "
+            "oracle diagnostics are not supported"
+        )
+    # Diagnostic-only legacy algebra; not part of the learning objective.
     clip_norm = max(float(config.omega_update_clip_norm), 0.0)
     fusion_bound = 4.0 * clip_norm * clip_norm * (1.0 - cloud_fusion_ratio) ** 2
-    # Latest Sample-DP selector path: the Pareto learning objective is the
-    # *single* joint update-space second moment estimated from offline paired
-    # clean/private calibration.  The legacy fusion+DP expression remains only
-    # as an opt-in backward-compatible path and as a diagnostic fallback.
-    if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"}:
-        if config.learning_objective == "online_upper_bound":
-            online = _online_bound_for_profile(config, profile, client_samples, tuple(admitted_client_ids))
-        else:
-            online = _oracle_bound_for_profile(config, profile, client_samples, tuple(admitted_client_ids))
-        system_learning_error = online.upper
-        learning_proxy_source = online.source
-        joint_mean_error_sq = 0.0
-        joint_variance_trace = 0.0
-        joint_e_alg_norm_sq = 0.0
-        joint_e_agg_norm_sq = 0.0
-        joint_bias_norm_sq = 0.0
-        joint_components = None
-    else:
-        joint_components = _joint_calibration_learning_components(
-            config, profile, client_samples, admitted_client_ids,
-        )
-    if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"}:
-        pass  # calculated from new-J; never fall back to old Fusion
-    elif joint_components is None:
-        system_learning_error = fusion_bound + system_dp
-        learning_proxy_source = "legacy_fusion_dp"
-        joint_mean_error_sq = 0.0
-        joint_variance_trace = 0.0
-        joint_e_alg_norm_sq = 0.0
-        joint_e_agg_norm_sq = 0.0
-        joint_bias_norm_sq = 0.0
-    else:
-        system_learning_error = joint_components.total
-        learning_proxy_source = joint_components.source
-        joint_mean_error_sq = joint_components.mean_error_sq
-        joint_variance_trace = joint_components.variance_trace
-        joint_e_alg_norm_sq = joint_components.e_alg_norm_sq
-        joint_e_agg_norm_sq = joint_components.e_agg_norm_sq
-        joint_bias_norm_sq = joint_components.bias_norm_sq
+    online = _online_bound_for_profile(
+        config, profile, client_samples, tuple(admitted_client_ids)
+    )
+    system_learning_error = online.upper
+    learning_proxy_source = online.source
 
     fusion_distortion, fusion_cosine_distortion = _profile_fusion_distortion(
         profile,
@@ -5675,22 +4209,17 @@ def _evaluate_profile(
         feature_perturbation=system_feature,
         update_clip_perturbation=system_update_clip,
         fusion_bound=fusion_bound,
-        joint_mean_error_sq=joint_mean_error_sq,
-        joint_variance_trace=joint_variance_trace,
-        joint_e_alg_norm_sq=joint_e_alg_norm_sq,
-        joint_e_agg_norm_sq=joint_e_agg_norm_sq,
-        joint_bias_norm_sq=joint_bias_norm_sq,
         learning_proxy_source=learning_proxy_source,
-        online_j_center_norm_sq=online.central_norm ** 2 if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_radius=online.radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_ideal_radius=online.ideal_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_noise_second_moment=online.q_aggregate if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_proved_noise_floor=online.q_aggregate_proved_floor if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_numeric_radius=online.numeric_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_lower_bound=online.lower if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_reference_radius=online.reference_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_mode_radius=online.mode_radius if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
-        online_j_mode_variance_second_moment=online.mode_variance_second_moment if config.learning_objective in {"online_upper_bound", "online_j_oracle_diagnostic"} else 0.0,
+        online_j_center_norm_sq=online.central_norm ** 2,
+        online_j_radius=online.radius,
+        online_j_ideal_radius=online.ideal_radius,
+        online_j_noise_second_moment=online.q_aggregate,
+        online_j_proved_noise_floor=online.q_aggregate_proved_floor,
+        online_j_numeric_radius=online.numeric_radius,
+        online_j_lower_bound=online.lower,
+        online_j_reference_radius=online.reference_radius,
+        online_j_mode_radius=online.mode_radius,
+        online_j_mode_variance_second_moment=online.mode_variance_second_moment,
     )
 
 
@@ -5757,7 +4286,6 @@ def _profile_flow_inputs_by_candidate(
                 state_diff={},
                 sample_count=max(1, int(round(client_samples.get(client_id, 1.0)))),
                 edge_loops=MODE_SPECS[candidate.mode].E_edge_loops,
-                fused_release=config.mainline_fusion,
                 edge_to_cloud_time=candidate.edge_to_cloud_time,
                 return_path_time=candidate.return_path_time,
                 edge_aggregation_payload=candidate.edge_aggregation_payload,
@@ -5778,8 +4306,6 @@ def _full_buffer_flow_stats(
     profile: dict[int, Candidate],
     flow_inputs_by_candidate: dict[int, dict[tuple, ClientFlowInput]],
 ) -> _FullBufferFlowStats | None:
-    if config.mainline_fusion:
-        return None
     client_inputs = {
         client_id: flow_inputs_by_candidate[client_id][_candidate_key(candidate)]
         for client_id, candidate in profile.items()
@@ -6394,8 +4920,6 @@ def _candidate_dp_event_counts(
     candidate: Candidate,
     config: SelectionConfig,
 ) -> tuple[int, int, int]:
-    if config.mainline_fusion:
-        return 0, 0, 0  # DP belongs to the final aggregate, never these links.
     feature_events = 0
     client_update_events = 0
     edge_update_events = 0
@@ -6864,9 +5388,6 @@ def _omega_from_profile_stats(
             )
     cloud_samples = sum(stats.cloud_samples_by_edge.values())
     cloud_fusion_ratio = cloud_samples / max(stats.total_samples, 1e-12)
-    weighted_local += _fusion_aggregate_noise_cost(
-        config, profile, client_edges, admitted_client_ids, stats.client_samples
-    )
     return (
         weighted_local
         + config.cloud_fusion_xi / (cloud_fusion_ratio + config.cloud_fusion_eps),
@@ -6941,9 +5462,6 @@ def _global_omega_proxy_from_admitted(
         for client_id in weights
     )
     cloud_fusion_ratio = admitted_cloud_samples / max(stats.total_samples, 1e-12)
-    weighted_local += _fusion_aggregate_noise_cost(
-        config, profile, client_edges, admitted_client_ids, client_samples
-    )
     return (
         weighted_local
         + config.cloud_fusion_xi / (cloud_fusion_ratio + config.cloud_fusion_eps),
@@ -6975,39 +5493,6 @@ def _cloud_client_aggregation_weights(
         client_id: mass / total_mass
         for client_id, mass in represented_mass.items()
     }
-
-
-def _fusion_aggregate_noise_cost(
-    config: SelectionConfig,
-    profile: dict[int, Candidate],
-    client_edges: dict[int, int],
-    admitted_client_ids: list[int] | tuple[int, ...],
-    client_samples: dict[int, float],
-) -> float:
-    if not config.mainline_fusion or not admitted_client_ids:
-        return 0.0
-    weights = _cloud_client_aggregation_weights(
-        profile, client_samples, client_edges, admitted_client_ids
-    )
-    if not weights:
-        return 0.0
-    max_weight = max(weights.values())
-    privacy_parameters = resolved_privacy_parameters(config)
-    sigma = float(privacy_parameters["update_noise_multiplier"])
-    sensitivity = 2.0 * max(float(config.omega_update_clip_norm), 1e-12) * max_weight
-    eta = max(float(config.omega_learning_rate), 1e-12)
-    local_cycles = max(float(config.L_block_cycles), 1.0)
-    variance_scale = (
-        max(float(config.omega_smoothness), 1e-12)
-        * eta
-        * local_cycles
-        / max(float(config.omega_mu), 1e-12)
-    )
-    gradient_variance = (
-        sigma * sigma * sensitivity * sensitivity * float(config.omega_update_dimension)
-        / (eta * eta * local_cycles * local_cycles)
-    )
-    return variance_scale * gradient_variance
 
 
 def _aggregation_sizes(
@@ -7190,21 +5675,6 @@ def _local_omega_components(
         ),
         config,
     )
-    if config.mainline_fusion and candidate.global_release_required:
-        eta = max(float(config.omega_learning_rate), 1e-12)
-        local_cycles = max(float(config.L_block_cycles), 1.0)
-        clip_bias = max(float(config.omega_update_clip_excess_sq), 0.0) / (
-            eta * eta * local_cycles * local_cycles
-        )
-        return _OmegaComponents(
-            client_bias=(
-                components.client_bias
-                + (3.0 / (2.0 * max(float(config.omega_mu), 1e-12))) * clip_bias
-            ),
-            client_variance=components.client_variance,
-            edge_bias=0.0,
-            edge_variance=0.0,
-        )
     return components
 
 
@@ -7592,7 +6062,6 @@ def _sample_mechanism_assignments(
     spec: ModeSpec,
     *,
     allow_he: bool = True,
-    mainline_fusion: bool = False,
     trusted_lie_joint_sample_dp: bool = False,
     no_dp_ablation: bool = False,
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
@@ -7612,12 +6081,6 @@ def _sample_mechanism_assignments(
         local_block_cycles=1,
         edge_loops=spec.E_edge_loops,
     )
-    if mainline_fusion:
-        all_transmissions = _fusion_link_transmissions(
-            spec.name,
-            1,
-            spec.E_edge_loops,
-        )
 
     transmissions = [
         event
@@ -7660,7 +6123,6 @@ def _mechanism_assignments(
     allow_none: bool = False,
     trusted_edge_split_execution: bool = False,
     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3"),
-    mainline_fusion: bool = False,
     privacy_requirement: ExposurePrivacyRequirement | None = None,
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     all_transmissions = _mode_link_transmissions(
@@ -7668,8 +6130,6 @@ def _mechanism_assignments(
         local_block_cycles=1,
         edge_loops=spec.E_edge_loops,
     )
-    if mainline_fusion:
-        all_transmissions = _fusion_link_transmissions(spec.name, 1, spec.E_edge_loops)
     transmissions = [event for event in all_transmissions if event[3]]
     links = list(dict.fromkeys(event[0] for event in transmissions))
     link_objects = {event[0]: event[1] for event in all_transmissions}
@@ -7731,20 +6191,6 @@ def _mechanism_assignments(
         if trusted_edge_split_execution
         and link.startswith("L_E_")
     }
-    if mainline_fusion:
-        # The selector chooses execution topology only. DP is enforced by the
-        # global release gate; HE is the fixed confidentiality layer whenever
-        # an update crosses into the untrusted cloud.
-        link_assignment = {}
-        for link in links:
-            obj = link_objects[link]
-            if link.startswith("L_E_"):
-                link_assignment[link] = "trusted"
-            elif obj == "upd" and link.endswith("_C_upd"):
-                link_assignment[link] = "he3"
-            else:
-                link_assignment[link] = "none"
-        return [(_object_mechanism_summary(link_assignment, link_objects), link_assignment)]
     if policy in {"no_protection", "fixed_splitfed_no_protection"}:
         link_assignments = [{
             link: ("trusted" if link in trusted_links else "none")
@@ -7961,8 +6407,7 @@ def _estimate_candidate(
         # Direct client-cloud split executes the remote partition once per
         # split interaction, just as L-E split modes repeat edge work.
         cloud_time *= L
-    link_events = (_fusion_link_transmissions(mode, L, E) if config.mainline_fusion
-                   else _mode_link_transmissions(mode, L, E))
+    link_events = _mode_link_transmissions(mode, L, E)
     actual_link_mechanisms = dict(link_mechanisms or {})
     compute_time = E * block_compute if E > 1 else block_compute
     link_metrics: list[dict[str, Any]] = []
@@ -8063,26 +6508,14 @@ def _estimate_candidate(
     else:
         cloud_aggregation_payload = 0.0
 
-    if config.mainline_fusion:
-        edge_to_cloud_time = sum(item["total_link_time"] for item in link_metrics
-                                 if item["link_id"] == "E_C_upd")
-        first_aggregation_arrival_time = compute_time + sum(
-            item["total_link_time"] for item in link_metrics
-            if item["link_id"] != "E_C_upd"
-            and not item["link_id"].endswith("_final_return"))
-        edge_aggregation_payload = _profile_object_size(config, "upd")
-        cloud_aggregation_payload = effective_payload("E_C_upd")
-
     edge_aggregation_events = E if mode in {"LIEIIIC", "LIIEIIIC"} else int(
         mode in {"LIE", "LIIE"}
     )
-    if config.mainline_fusion:
-        edge_aggregation_events = 1
     edge_aggregation_time = edge_aggregation_events * (
         config.edge_aggregation_beta * edge_aggregation_payload
         + config.edge_aggregation_fixed
     )
-    cloud_aggregation_time = int(config.mainline_fusion or _mode_reaches_cloud(spec)) * (
+    cloud_aggregation_time = int(_mode_reaches_cloud(spec)) * (
         config.cloud_aggregation_beta * cloud_aggregation_payload
         + config.cloud_aggregation_fixed
     )
@@ -8308,32 +6741,28 @@ def _estimate_candidate(
     # Global penalty: only cloud-reaching objects affect global model accuracy
     protected_links = [event for event in link_events if event[3]]
     mech_penalty = (
-        0.0
-        if config.mainline_fusion
-        else (
-            sum(
-                utility_penalty(
-                    actual_link_mechanisms[link_id],
-                    max(
-                        float(
-                            resolved_sample_privacy_parameters(
-                                config,
-                                0,
-                            )["sample_budget"]
-                            if config.privacy_unit == "sample"
-                            else resolved_privacy_parameters(config)[
-                                "update_budget"
-                                if obj == "upd"
-                                else "feature_budget"
-                            ]
-                        ),
-                        1e-6,
+        sum(
+            utility_penalty(
+                actual_link_mechanisms[link_id],
+                max(
+                    float(
+                        resolved_sample_privacy_parameters(
+                            config,
+                            0,
+                        )["sample_budget"]
+                        if config.privacy_unit == "sample"
+                        else resolved_privacy_parameters(config)[
+                            "update_budget"
+                            if obj == "upd"
+                            else "feature_budget"
+                        ]
                     ),
-                )
-                for link_id, obj, _count, _privacy_eligible in protected_links
+                    1e-6,
+                ),
             )
-            / max(len(protected_links), 1)
+            for link_id, obj, _count, _privacy_eligible in protected_links
         )
+        / max(len(protected_links), 1)
     )
     penalty = spec.mode_penalty + mech_penalty
     progress = (round_idx + 1.0) / max(config.rounds, 1)
@@ -8343,7 +6772,7 @@ def _estimate_candidate(
         client_id,
         round_idx,
         mode,
-        {} if config.mainline_fusion else actual_link_mechanisms,
+        actual_link_mechanisms,
     )
 
     return Candidate(
@@ -8395,7 +6824,6 @@ def _estimate_candidate(
         edge_aggregation_payload=edge_aggregation_payload,
         cloud_aggregation_payload=cloud_aggregation_payload,
         link_metrics=tuple(link_metrics),
-        global_release_required=bool(config.mainline_fusion),
         feature_noise_multiplier=(
             float(feature_noise_multiplier)
             if feature_dp_events > 0 and feature_noise_multiplier is not None
@@ -8468,11 +6896,7 @@ def _sample_dp_event_counts(
 
     spec = MODE_SPECS[mode]
 
-    local_steps = (
-        None
-        if config.mainline_fusion
-        else int(config.L_block_cycles)
-    )
+    local_steps = int(config.L_block_cycles)
 
     # K_i is the number of *actually executable* minibatches in one training
     # block under the runtime epoch/batch/step-limit semantics. Hierarchical
@@ -8495,18 +6919,10 @@ def _sample_dp_event_counts(
     if local_batch_events <= 0:
         return 0, 0, 0
 
-    link_events = (
-        _fusion_link_transmissions(
-            mode,
-            1,
-            spec.E_edge_loops,
-        )
-        if config.mainline_fusion
-        else _mode_link_transmissions(
-            mode,
-            1,
-            spec.E_edge_loops,
-        )
+    link_events = _mode_link_transmissions(
+        mode,
+        1,
+        spec.E_edge_loops,
     )
 
     split_objects = {
@@ -8591,20 +7007,6 @@ def _mode_link_events(
             edge_loops,
         )
     )
-
-
-def _fusion_link_transmissions(mode, local_block_cycles, edge_loops):
-    if mode == "LIC":
-        return ()
-    if mode in {"LIE", "LIEIIC", "LIEIIIC"}:
-        training = tuple(event for event in _mode_link_transmissions(
-            "LIE", max(1, local_block_cycles) * max(1, edge_loops), 1)
-            if not event[0].endswith("_final_return"))
-    else:
-        training = (("L_E_upd", "upd", 1, True),)
-    return training + (("E_C_upd", "upd", 1, True),
-                       ("C_E_upd_final_return", "upd", 1, False),
-                       ("E_L_upd_final_return", "upd", 1, False))
 
 
 _DYNAMIC_MODE_POLICIES = {
@@ -8944,7 +7346,8 @@ def choose_random_feasible_profile(
     from .tier_resources import evaluate_tier_capacities
 
     rng = random.Random(int(random_seed))
-    edges = client_edges or {}
+    edges\
+        = client_edges or {}
     previous = previous_choices or {}
     representatives = {}
 

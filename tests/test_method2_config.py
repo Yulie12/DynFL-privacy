@@ -12,7 +12,7 @@ from experiments.run_paper_config import ROOT, build_command, validate_config
 
 
 def config():
-    return json.loads((ROOT / "configs/method2_fixed_he_dp_cifar10.json").read_text())
+    return json.loads((ROOT / "configs/legacy_method2/method2_fixed_he_dp_cifar10.json").read_text())
 
 
 def test_bridge_preserves_horizon_and_real_custody():
@@ -41,7 +41,7 @@ def test_no_profiled_fallback_or_resume():
 
 
 def test_resource_policy_bridge():
-    cfg = json.loads((ROOT / "configs/method2_resource_placement_cifar10.json").read_text())
+    cfg = json.loads((ROOT / "configs/legacy_method2/method2_resource_placement_cifar10.json").read_text())
     validate_config(cfg)
     command = build_command(cfg, seed=42, policies=["resource_placement"], rounds=None, max_new_rounds=2)
     assert command[command.index("--execution-layout") + 1] == "resource_dynamic"

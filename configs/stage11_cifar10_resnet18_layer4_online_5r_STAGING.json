@@ -1,5 +1,5 @@
 {
-  "name": "stage11_cifar10_resnet18_layer4_online_5round_STAGING",
+  "name": "stage11_cifar10_resnet18_layer4_online_5r_STAGING",
   "execution_revision": "paper_flow_v31_mode_specific_privacy",
   "output_root": "out/stage11_cifar10_resnet18_layer4_online_5r",
   "seeds": [

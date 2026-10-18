@@ -62,7 +62,8 @@
       "17": 20.0,
       "18": 20.0,
       "19": 20.0
-    }
+    },
+    "split_batch_size": 128
   },
   "network": {
     "end_edge_rate_mb_s": 5,
@@ -108,6 +109,10 @@
       40
     ],
     "scale_bits": 40
+  },
+  "learning": {
+    "objective": "online_upper_bound",
+    "online_bound_manifest_path": "certificates/REAL_cifar10_resnet18_predecision_required.json"
   },
   "optimization": {
     "pareto_archive_size": 16,

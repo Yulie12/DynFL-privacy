@@ -32,10 +32,9 @@ def test_preflight_fails_before_hierarchical_sample_dispatch():
     gate(privacy_unit='sample', train_tasks=tasks[:1], mode_specs=specs)
 
 
-def test_preflight_integrated_before_calibration_capture_and_worker_dispatch():
+def test_preflight_integrated_before_worker_dispatch():
     path = Path(__file__).resolve().parents[1] / 'dynfed' / 'fmnist_lenet5_dynamic.py'
     source = path.read_text(encoding='utf-8-sig')
     call = source.index('        _assert_sample_hierarchical_preflight(\n')
-    capture = source.index('        calibration_capture_stats:')
     dispatch = source.index('        worker_results = _run_client_training_tasks(')
-    assert call < capture < dispatch
+    assert call < dispatch

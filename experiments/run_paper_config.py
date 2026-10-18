@@ -121,8 +121,7 @@ def build_command(
     privacy = config["privacy"]
     he = config["he"]
     optimization = config["optimization"]
-    learning = config.get("learning", {})
-    calibration_capture = config.get("calibration_capture", {})
+    learning = config["learning"]
     network = config["network"]
 
     command = [sys.executable, str(ROOT / "experiments" / "run_fmnist_lenet5.py")]
@@ -206,18 +205,8 @@ def build_command(
         "pareto_neighbor_top_k": optimization["pareto_neighbor_top_k"],
         "cloud_fusion_xi": optimization["cloud_fusion_xi"],
         "cloud_fusion_eps": optimization["cloud_fusion_eps"],
-        "learning_objective": learning.get("objective", "legacy_fusion_dp"),
+        "learning_objective": learning["objective"],
         "online_bound_manifest_path": learning.get("online_bound_manifest_path"),
-        "joint_calibration_path": learning.get("calibration_path"),
-        "joint_calibration_state_key": learning.get("state_key", "default"),
-        "joint_calibration_e_alg_policy": learning.get("e_alg_policy", "table"),
-        "joint_calibration_missing_policy": learning.get("missing_policy", "error"),
-        "joint_calibration_capture_path": calibration_capture.get("output_path"),
-        "joint_calibration_capture_trials": calibration_capture.get("trials", 0),
-        "joint_calibration_capture_period": calibration_capture.get("period", 10),
-        "joint_calibration_capture_max_clients": calibration_capture.get("max_clients", 8),
-        "joint_calibration_capture_sample_limit": calibration_capture.get("sample_limit", 64),
-        "joint_calibration_capture_scope": calibration_capture.get("scope", "candidate_modes"),
         "seed": seed,
         "output_root": config["output_root"],
     }
@@ -373,48 +362,40 @@ def validate_config(config: dict) -> None:
             "may remain in the repository but cannot be selected by run_paper_config.py."
         )
     if config["system"].get("mainline_fusion"):
-        if he.get("backend") != "seal":
-            raise ValueError("Mainline fusion requires the Method 2 SEAL custodian backend")
-        if privacy.get("protection_scope") != "global_release_dp_plus_he_confidentiality":
-            raise ValueError(
-                "Mainline fusion requires global release DP plus HE confidentiality"
-            )
-        if privacy.get("update_protection_goal") != "released_model_dp":
-            raise ValueError("Mainline fusion requires released_model_dp")
-        if privacy.get("accounting_mode") != "rdp_auto":
-            raise ValueError("Mainline fusion requires accounting_mode=rdp_auto")
-        if float(config["system"].get("aggregation_fraction", 0.0)) != 1.0:
-            raise ValueError("Mainline fusion requires full participation")
-        if he.get("execution") != "real" or not he.get("require_real_he"):
-            raise ValueError("Mainline fusion requires real HE")
-        if int(he.get("aggregation_size", 0)) != 0:
-            raise ValueError("Mainline fusion requires aggregation_size=0")
-        incompatible = {
-            "no_protection",
-            "fixed_he",
-            "fixed_dp",
-            "privacy_only",
-            "fixed_splitfed_no_protection",
-            "fixed_splitfed_trusted_edge",
-        }.intersection(config.get("policies", ()))
-        if incompatible:
-            raise ValueError(
-                "Policies incompatible with mainline fusion mandatory release: "
-                + ", ".join(sorted(incompatible))
-            )
-    else:
-        if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
-            raise ValueError(
-                "Formal configurations must protect cross-domain updates and secure aggregate releases"
-            )
-        if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
-            raise ValueError(
-                "Formal configurations must expose DP, HE, and their combined DP+HE update mechanism"
-            )
-        if privacy.get("release_calibration") != "tex_packet":
-            raise ValueError("TeX configurations require whole packet DP calibration")
+        raise ValueError(
+            "mainline_fusion/Method2 global-release overlay has been removed "
+            "from the current DynFL design"
+        )
+    if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
+        raise ValueError(
+            "Formal configurations must protect cross-domain updates and secure aggregate releases"
+        )
+    if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
+        raise ValueError(
+            "Formal configurations must expose DP, HE, and their combined DP+HE update mechanism"
+        )
+    if privacy.get("release_calibration") != "tex_packet":
+        raise ValueError("TeX configurations require whole packet DP calibration")
     if float(privacy["cloud_dp_stability_threshold"]) <= 0.0:
         raise ValueError("The cloud DP stability threshold must be positive")
+    learning = config.get("learning")
+    if not isinstance(learning, dict) or not learning.get("objective"):
+        raise ValueError(
+            "Formal configurations must declare learning.objective explicitly; "
+            "no learning method may be selected implicitly"
+        )
+    objective = learning["objective"]
+    if objective != "online_upper_bound":
+        raise ValueError(
+            f"Unsupported learning.objective: {objective}; only "
+            "'online_upper_bound' is supported. Legacy fusion, joint "
+            "calibration and oracle diagnostics have been removed."
+        )
+    manifest = learning.get("online_bound_manifest_path")
+    if not isinstance(manifest, str) or not manifest.strip():
+        raise ValueError(
+            "online_upper_bound requires learning.online_bound_manifest_path; no fallback"
+        )
 
 
 if __name__ == "__main__":

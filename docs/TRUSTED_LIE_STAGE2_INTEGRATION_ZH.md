@@ -18,7 +18,8 @@ selection = replace(selection,
     trusted_lie_joint_sample_dp=True,
     # 配合真实训练 batch；CPU/Lenet5 目前使用 64，CUDA/ResNet18 特定模型使用 128。
     split_batch_size=128,
-    learning_objective="legacy_fusion_dp",
+    learning_objective="online_upper_bound",
+    online_bound_manifest_path="certificates/REAL_predecision_required.json",
 )
 ```
 
@@ -32,7 +33,7 @@ selection = replace(selection,
 
 此版本仍不构成端到端 Sample-DP 证明：动态模式选择对私人信息的依赖、初始化/缓存与跨轮组合、模型及元数据的所有发布、资源侧信道、真实异机可信域、以及具体 batch/多阶段覆盖仍需单独审计。
 
-旧版 Joint Proxy 校准文件假设带噪 embedding，不适合直接为当前 LIE 作出学习效用评估；因此配置 `learning_objective="joint_calibration"` 与本开关组合会**立即拒绝运行**，而不是默默使用过期代理。未来重新校准前请勿开展论文正式实验。资源不足优先 Split 的 admission 策略及其他六模式的可信路径也尚未在本补丁中实现。
+当前正式学习目标只接受 `online_upper_bound`，并要求该轮真实的事前证书。`legacy_fusion_dp`、`joint_calibration` 与 oracle 诊断均已移除，配置会**立即拒绝运行**；缺少有效证书同样在客户端训练前失败关闭，而不是默默使用过期代理或回退到其他目标。资源不足优先 Split 的 admission 策略及其他六模式的可信路径也尚未在本补丁中实现。
 
 ## 安全回归命令
 

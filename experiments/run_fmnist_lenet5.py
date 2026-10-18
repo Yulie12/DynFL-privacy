@@ -18,24 +18,15 @@ from dynfed.utils import timestamped_dir
 
 
 
-LEGACY_DEFAULT_POLICIES = (
+DEFAULT_POLICIES = (
     "ours", "fixed_dp", "fixed_he", "random", "privacy_only", "no_protection"
-)
-FUSION_DEFAULT_POLICIES = (
-    "ours",
-    "individual_optimal",
-    "random",
-    "fixed_fedavg",
-    "fixed_splitfed",
-    "fixed_hfl",
-    "nsga2",
 )
 
 
 def _resolved_policies(args: argparse.Namespace) -> tuple[str, ...]:
     if args.policies:
         return tuple(args.policies)
-    return FUSION_DEFAULT_POLICIES if args.mainline_fusion else LEGACY_DEFAULT_POLICIES
+    return DEFAULT_POLICIES
 
 
 def parse_args() -> argparse.Namespace:
@@ -175,85 +166,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dp-sample-optimizer-noise-multiplier", type=float, default=None)
     parser.add_argument(
         "--learning-objective",
-        default="legacy_fusion_dp",
-        choices=["legacy_fusion_dp", "joint_calibration", "online_upper_bound", "online_j_oracle_diagnostic"],
+        required=True,
+        choices=["online_upper_bound"],
         help=(
-            "Pareto learning objective. joint_calibration uses the latest joint update-space "
-            "proxy from an offline paired clean/private calibration table."
+            "Pareto learning objective. Only the strict predecision online "
+            "certificate is supported; legacy fusion, joint calibration and "
+            "oracle diagnostics have been removed."
         ),
     )
     parser.add_argument(
         "--online-bound-manifest-path", default=None,
-        help="Predecision round-indexed online-J certificates. Required for online_upper_bound; no proxy fallback.",
-    )
-    parser.add_argument(
-        "--joint-calibration-path",
-        default=None,
-        help="Torch calibration table built from offline paired clean/private trajectories.",
-    )
-    parser.add_argument(
-        "--joint-calibration-state-key",
-        default="default",
-        help=(
-            "Calibration state key. Use 'auto_round' to query round:<t>; the table may "
-            "fall back to the nearest calibrated round or default."
-        ),
-    )
-    parser.add_argument(
-        "--joint-calibration-e-alg-policy",
-        default="table",
-        choices=["table", "zero"],
-        help=(
-            "table requires a calibrated ideal/reference update and keeps e_alg explicitly; "
-            "zero is an empirical approximation that must be validated against paired-MC."
-        ),
-    )
-    parser.add_argument(
-        "--joint-calibration-missing-policy",
-        default="error",
-        choices=["error", "legacy"],
-        help="Whether missing calibration data is fatal or falls back to the retired legacy objective.",
-    )
-    parser.add_argument(
-        "--joint-calibration-capture-path",
-        default=None,
-        help=(
-            "Opt-in offline/periodic matched clean/private capture output (.pt). "
-            "This is calibration work, not an online selector input measurement."
-        ),
-    )
-    parser.add_argument(
-        "--joint-calibration-capture-trials",
-        type=int,
-        default=0,
-        help="Private DP-RNG trials per captured (round, client, mode) cell; use >=2 when capture is enabled.",
-    )
-    parser.add_argument(
-        "--joint-calibration-capture-period",
-        type=int,
-        default=10,
-        help="Capture every N rounds in a dedicated calibration pass.",
-    )
-    parser.add_argument(
-        "--joint-calibration-capture-max-clients",
-        type=int,
-        default=8,
-        help="Maximum held-out clients sampled per capture round; 0 means all clients.",
-    )
-    parser.add_argument(
-        "--joint-calibration-capture-sample-limit",
-        type=int,
-        default=64,
-        help="Maximum held-out calibration samples per sampled client; 0 means all held-out samples.",
-    )
-    parser.add_argument(
-        "--joint-calibration-capture-scope",
-        default="candidate_modes",
-        choices=["selected", "candidate_modes"],
-        help=(
-            "selected captures only the chosen mode; candidate_modes captures one feasible Sample-DP "
-            "candidate for every available mode of each sampled client."
-        ),
+        help="Predecision round-indexed online-J certificates. Required; no proxy fallback.",
     )
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
@@ -270,13 +193,6 @@ def parse_args() -> argparse.Namespace:
         help="Opt-in whole-profile Cloud DP release selection; legacy preserves old execution.",
     )
     parser.add_argument("--update-protection-goal", choices=["packet_protection", "released_model_dp"], default="packet_protection")
-    parser.add_argument(
-        "--mainline-fusion",
-        action="store_true",
-        help=(
-            "LEGACY/REMOVED: the Method2 global-release overlay is no longer a valid DynFL mainline option."
-        ),
-    )
     parser.add_argument(
         "--trusted-edge-split-execution",
         action="store_true",
@@ -418,11 +334,6 @@ def _validate_trusted_lie_cli(args: argparse.Namespace) -> None:
         raise ValueError("trusted LIE requires --trusted-edge-split-execution")
     if args.privacy_unit != "sample":
         raise ValueError("trusted LIE requires --privacy-unit sample")
-    if args.learning_objective == "joint_calibration":
-        raise ValueError(
-            "trusted LIE requires a new learning-proxy calibration; "
-            "the old noisy-embedding joint calibration is incompatible"
-        )
 
 
 def main() -> None:
@@ -582,18 +493,11 @@ def main() -> None:
         update_mechanism_options=tuple(args.update_mechanisms),
         liie_edge_dp_plan=args.liie_edge_dp_plan,
         cloud_dp_plan=args.cloud_dp_plan,
-        update_protection_goal=(
-            "released_model_dp" if args.mainline_fusion else args.update_protection_goal
-        ),
-        mainline_fusion=args.mainline_fusion,
+        update_protection_goal=args.update_protection_goal,
         learning_objective=args.learning_objective,
         uncapped_local_batches=args.uncapped_local_batches,
         corrected_admission_policy=args.corrected_admission_policy,
         online_bound_manifest_path=args.online_bound_manifest_path,
-        joint_calibration_path=args.joint_calibration_path,
-        joint_calibration_state_key=args.joint_calibration_state_key,
-        joint_calibration_e_alg_policy=args.joint_calibration_e_alg_policy,
-        joint_calibration_missing_policy=args.joint_calibration_missing_policy,
     )
     # V370_STATIC_PAIR_MANIFEST_RUNNER: load manifest before training starts.
     if args.static_pair_admission_manifest is not None:
@@ -634,24 +538,12 @@ def main() -> None:
         he_backend=args.he_backend,
         he_execution=args.he_execution,
         he_local_deps=args.he_local_deps,
-        require_real_he=(args.require_real_he or args.mainline_fusion),
+        require_real_he=args.require_real_he,
         he_aggregation_size=args.he_aggregation_size,
         he_workers=max(1, args.he_workers),
         executor=args.executor,
         executor_workers=args.executor_workers,
         console_format=args.console_format,
-        joint_calibration_capture_path=args.joint_calibration_capture_path,
-        joint_calibration_capture_trials=args.joint_calibration_capture_trials,
-        joint_calibration_capture_period=args.joint_calibration_capture_period,
-        joint_calibration_capture_max_clients=(
-            None if args.joint_calibration_capture_max_clients == 0
-            else args.joint_calibration_capture_max_clients
-        ),
-        joint_calibration_capture_sample_limit=(
-            None if args.joint_calibration_capture_sample_limit == 0
-            else args.joint_calibration_capture_sample_limit
-        ),
-        joint_calibration_capture_scope=args.joint_calibration_capture_scope,
     )
 
     detail_path = output_root / "console_details.log"

@@ -73,11 +73,13 @@ def test_direct_cloud_packet_has_higher_final_variance_than_aggregate():
     )
 
 
-def test_pareto_compares_both_complete_release_profiles():
+def test_pareto_compares_both_complete_release_profiles(synthetic_online_bound):
     config = SelectionConfig(
         cloud_dp_plan='pareto', num_clients=2, num_edges=2,
         omega_update_dimension=4., omega_update_clip_norm=.25,
         pareto_max_iters=1, pareto_archive_size=8,
+        learning_objective='online_upper_bound',
+        online_bound_manifest_path='certificates/test_synthetic_online.json',
     )
     base = candidate(mode='LIIEIIIC', link='E_C_upd')
     selected = [(i, base, [base], 8.) for i in (0, 1)]

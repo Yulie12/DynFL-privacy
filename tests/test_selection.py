@@ -1,4 +1,7 @@
 import random
+import types
+
+import pytest
 
 import dynfed.selection as selection_module
 from dynfed.flow_executor import execute_mixed_round_flow
@@ -12,6 +15,33 @@ from dynfed.selection import (
     choose_global_pareto_profile,
     evaluate_global_profile,
 )
+
+
+_SYNTHETIC_ONLINE_MANIFEST = "certificates/test_synthetic_online.json"
+
+
+def _online_config(**kwargs) -> SelectionConfig:
+    """Unit-level config for search mechanics; no certificate is claimed."""
+    kwargs.setdefault("learning_objective", "online_upper_bound")
+    kwargs.setdefault("online_bound_manifest_path", _SYNTHETIC_ONLINE_MANIFEST)
+    return SelectionConfig(**kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_online_bound(monkeypatch):
+    def synthetic(config, profile, client_samples, admitted_client_ids):
+        return types.SimpleNamespace(
+            upper=1.0 + sum(float(candidate.time) for candidate in profile.values()),
+            central_norm=0.0, radius=0.0, ideal_radius=0.0,
+            q_aggregate=0.0, q_aggregate_proved_floor=0.0, numeric_radius=0.0,
+            lower=0.0, reference_radius=0.0, mode_radius=0.0,
+            mode_variance_second_moment=0.0,
+            source="synthetic_search_validation",
+        )
+
+    monkeypatch.setattr(
+        selection_module, "_online_bound_for_profile", synthetic
+    )
 
 
 def _candidate(mode: str, time: float) -> Candidate:
@@ -32,7 +62,7 @@ def _candidate(mode: str, time: float) -> Candidate:
 
 
 def test_qos_admission_requires_cloud_for_ordinary_client() -> None:
-    config = SelectionConfig(
+    config = _online_config(
         edge_only_requires_fast_deadline=True,
         fl_first_split_on_demand=True,
     )
@@ -62,7 +92,7 @@ def test_qos_admission_requires_cloud_for_ordinary_client() -> None:
 
 
 def test_qos_admission_allows_edge_only_for_fast_client() -> None:
-    config = SelectionConfig(
+    config = _online_config(
         edge_only_requires_fast_deadline=True,
         fl_first_split_on_demand=True,
     )
@@ -87,7 +117,7 @@ def test_qos_admission_allows_edge_only_for_fast_client() -> None:
 
 
 def test_qos_admission_opens_split_cloud_when_full_local_memory_is_insufficient() -> None:
-    config = SelectionConfig(
+    config = _online_config(
         edge_only_requires_fast_deadline=True,
         fl_first_split_on_demand=True,
     )
@@ -127,7 +157,7 @@ def test_formal_learning_seed_explores_cloud_when_local_cost_is_tied() -> None:
         for client_id in range(8)
     }
 
-    profiles = _initial_profiles(SelectionConfig(), pools, previous_choices={})
+    profiles = _initial_profiles(_online_config(), pools, previous_choices={})
 
     assert all(candidate.mode == "LIIE" for candidate in profiles[0].values())
     assert any(all(candidate.mode == "LIIC" for candidate in profile.values()) for profile in profiles)
@@ -144,7 +174,7 @@ def test_initial_profiles_include_sample_mass_cloud_coverage_anchors() -> None:
     samples = {0: 4.0, 1: 3.0, 2: 2.0, 3: 1.0}
 
     profiles = _initial_profiles(
-        SelectionConfig(),
+        _online_config(),
         pools,
         previous_choices={},
         client_samples=samples,
@@ -166,7 +196,7 @@ def test_initial_profiles_include_sample_mass_cloud_coverage_anchors() -> None:
 
 
 def test_each_profile_derives_its_own_admitted_clients() -> None:
-    config = SelectionConfig(
+    config = _online_config(
         num_clients=4,
         num_edges=1,
         aggregation_fraction=0.5,
@@ -207,7 +237,7 @@ def test_edge_cloud_coverage_repair_keeps_one_cloud_path_per_edge() -> None:
     edge = _candidate("LIIE", time=1.0)
     cloud = _candidate("LIIC", time=2.0)
     profile = {client_id: edge for client_id in range(4)}
-    config = SelectionConfig(
+    config = _online_config(
         num_clients=4,
         num_edges=2,
         pareto_archive_size=4,
@@ -239,7 +269,7 @@ def test_coverage_infeasible_fallback_records_failure_edges() -> None:
         (1, edge, [edge], 8.0),
     ]
     diagnostics: dict[str, object] = {}
-    config = SelectionConfig(
+    config = _online_config(
         num_clients=2,
         num_edges=1,
         require_edge_cloud_coverage=True,
@@ -272,7 +302,7 @@ def test_pareto_archive_contains_only_coverage_feasible_profiles() -> None:
         for client_id in range(4)
     ]
     diagnostics: dict[str, object] = {}
-    config = SelectionConfig(
+    config = _online_config(
         num_clients=4,
         num_edges=2,
         pareto_archive_size=8,
@@ -313,7 +343,7 @@ def test_pareto_conflict_only_limits_search_clients() -> None:
         1: [shared],
         2: [edge, cloud],
     }
-    config = SelectionConfig(pareto_conflict_only=True)
+    config = _online_config(pareto_conflict_only=True)
     seeds = _initial_profiles(config, pools, previous_choices={})
 
     assert _pareto_search_client_ids(config, pools, seeds) == (0, 2)
@@ -326,7 +356,7 @@ def test_pareto_neighbor_budget_search_runs() -> None:
         (client_id, edge, [edge, cloud], 8.0)
         for client_id in range(6)
     ]
-    config = SelectionConfig(
+    config = _online_config(
         pareto_archive_size=4,
         pareto_max_iters=2,
         pareto_neighbor_top_k=3,
@@ -352,7 +382,7 @@ def test_nsga2_reference_search_is_deterministic_and_coverage_feasible() -> None
         (client_id, edge, [edge, cloud], 8.0)
         for client_id in range(6)
     ]
-    config = SelectionConfig(
+    config = _online_config(
         seed=42,
         num_clients=6,
         num_edges=2,
@@ -403,7 +433,7 @@ def test_latency_ablation_ignores_convergence_objective() -> None:
     selected = [(0, slow_he, [fast_dp, slow_he], 8.0)]
 
     rewritten, evaluation = choose_global_pareto_profile(
-        config=SelectionConfig(
+        config=_online_config(
             num_clients=1,
             num_edges=1,
             pareto_archive_size=4,
@@ -442,7 +472,7 @@ def test_optimized_pareto_search_matches_full_event_evaluation(monkeypatch) -> N
         (client_id, edge, [edge, direct, edge_cloud], 8.0)
         for client_id in range(10)
     ]
-    config = SelectionConfig(
+    config = _online_config(
         num_clients=10,
         num_edges=2,
         aggregation_fraction=1.0,
@@ -485,7 +515,7 @@ def test_optimized_pareto_search_matches_full_event_evaluation(monkeypatch) -> N
 
 
 def test_unstable_cloud_dp_is_removed_when_he_is_available() -> None:
-    config = SelectionConfig(
+    config = _online_config(
         rounds=100,
         dp_feature_epsilon_budget=8.0,
         dp_update_epsilon_budget=8.0,
@@ -527,7 +557,7 @@ def test_tex_stability_uses_coordinate_noise_not_dimension(monkeypatch) -> None:
     dp = Candidate(**{**_candidate("LIIC", time=1.0).__dict__,
                       "mechanisms": {"upd": "dp"}})
     he = _candidate("LIIC", time=2.0)
-    config = SelectionConfig(trusted_edge_split_execution=True,
+    config = _online_config(trusted_edge_split_execution=True,
                              omega_update_dimension=10_490_890,
                              cloud_dp_stability_threshold=1.0)
     assert _stable_cloud_candidate_pool(config, [dp, he]) == [dp, he]
@@ -539,7 +569,7 @@ def test_tex_stability_uses_coordinate_noise_not_dimension(monkeypatch) -> None:
 
 
 def test_adaptive_baselines_share_cloud_dp_stability_filter() -> None:
-    config = SelectionConfig(
+    config = _online_config(
         rounds=100,
         dp_feature_epsilon_budget=8.0,
         dp_update_epsilon_budget=8.0,
@@ -561,7 +591,7 @@ def test_adaptive_baselines_share_cloud_dp_stability_filter() -> None:
 
 
 def test_fixed_dp_is_not_rewritten_by_he_stability_filter() -> None:
-    config = SelectionConfig(enforce_cloud_dp_stability=True)
+    config = _online_config(enforce_cloud_dp_stability=True)
     cloud_update_dp = Candidate(
         **{
             **_candidate("LIIC", time=1.0).__dict__,
@@ -588,7 +618,7 @@ def test_fixed_mode_ablation_keeps_global_privacy_selection() -> None:
         }
     )
     fixed_he = _candidate("LIIEIIIC", time=1.5)
-    config = SelectionConfig(
+    config = _online_config(
         num_clients=1,
         num_edges=1,
         rounds=200,
@@ -620,7 +650,7 @@ def test_reference_policies_fix_only_the_collaboration_topology() -> None:
         _candidate("LIIEIIIC", time=1.0),
         _candidate("LIIE", time=1.0),
     ]
-    config = SelectionConfig()
+    config = _online_config()
 
     assert {
         item.mode
@@ -637,7 +667,7 @@ def test_reference_policies_fix_only_the_collaboration_topology() -> None:
 
 
 def test_cloud_update_dp_is_removed_when_only_update_link_can_use_he() -> None:
-    config = SelectionConfig(
+    config = _online_config(
         rounds=100,
         dp_feature_epsilon_budget=8.0,
         dp_update_epsilon_budget=8.0,
@@ -682,7 +712,7 @@ def test_infeasible_edge_cloud_coverage_uses_skip_fallback_instead_of_crashing()
         (3, cloud, [cloud], 8.0),
     ]
     diagnostics: dict[str, object] = {}
-    config = SelectionConfig(
+    config = _online_config(
         num_clients=4,
         num_edges=2,
         require_edge_cloud_coverage=True,
@@ -804,7 +834,7 @@ def test_sample_mechanisms_reject_cloud_update_when_he_is_unavailable():
 def test_sample_dp_event_counts_follow_actual_minibatch_steps():
     from dynfed.selection import SelectionConfig, _sample_dp_event_counts
 
-    config = SelectionConfig(
+    config = _online_config(
         split_batch_size=128,
         privacy_local_epochs=3,
         L_block_cycles=5,
@@ -827,7 +857,7 @@ def test_sample_dp_event_counts_follow_actual_minibatch_steps():
 def test_sample_dp_event_counts_small_split_client_follow_epochs():
     from dynfed.selection import SelectionConfig, _sample_dp_event_counts
 
-    config = SelectionConfig(
+    config = _online_config(
         split_batch_size=128,
         privacy_local_epochs=3,
         L_block_cycles=5,
@@ -844,7 +874,7 @@ def test_sample_dp_event_counts_small_split_client_follow_epochs():
 def test_sample_dp_event_counts_full_local_have_no_split_releases():
     from dynfed.selection import SelectionConfig, _sample_dp_event_counts
 
-    config = SelectionConfig(
+    config = _online_config(
         split_batch_size=128,
         privacy_local_epochs=3,
         L_block_cycles=5,
@@ -867,7 +897,7 @@ def test_sample_selector_accounting_full_local_uses_optimizer_only():
     )
     from dynfed.training import MODE_SPECS
 
-    config = SelectionConfig(
+    config = _online_config(
         privacy_unit="sample",
         excluded_modes=tuple(
             mode
@@ -926,7 +956,7 @@ def test_sample_selector_accounting_split_composes_three_event_classes():
     )
     from dynfed.training import MODE_SPECS
 
-    config = SelectionConfig(
+    config = _online_config(
         privacy_unit="sample",
         excluded_modes=tuple(
             mode
@@ -993,7 +1023,7 @@ def test_sample_dp_frozen_split_end_has_no_optimizer_events():
         _sample_dp_event_counts,
     )
 
-    config = SelectionConfig(
+    config = _online_config(
         mainline_fusion=False,
         L_block_cycles=5,
         split_batch_size=128,
@@ -1024,7 +1054,7 @@ def test_sample_dp_trainable_split_end_keeps_optimizer_events():
         _sample_dp_event_counts,
     )
 
-    config = SelectionConfig(
+    config = _online_config(
         mainline_fusion=False,
         L_block_cycles=5,
         split_batch_size=128,

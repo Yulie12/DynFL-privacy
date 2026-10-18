@@ -2166,11 +2166,30 @@ def test_formal_configs_use_three_frozen_random_seeds() -> None:
         assert config["seeds"] == [40, 42, 44]
 
 
-def test_exact_solver_validation_reports_gap_and_both_solve_times() -> None:
+def test_exact_solver_validation_reports_gap_and_both_solve_times(monkeypatch, tmp_path) -> None:
+    import types
+
+    import dynfed.selection as selection_module
     from experiments.validate_pareto_search import run_instance
 
+    # Synthetic search-mechanics validation only: no certificate is claimed.
+    def synthetic_bound(config, profile, client_samples, admitted_client_ids):
+        total_time = sum(float(candidate.time) for candidate in profile.values())
+        return types.SimpleNamespace(
+            upper=1.0 + total_time,
+            central_norm=0.0, radius=0.0, ideal_radius=0.0,
+            q_aggregate=0.0, q_aggregate_proved_floor=0.0, numeric_radius=0.0,
+            lower=0.0, reference_radius=0.0, mode_radius=0.0,
+            mode_variance_second_moment=0.0,
+            source="synthetic_search_validation",
+        )
+
+    monkeypatch.setattr(selection_module, "_online_bound_for_profile", synthetic_bound)
+    manifest = tmp_path / "synthetic_online.json"
+    manifest.write_text("{}", encoding="utf-8")
     row = run_instance(
-        num_clients=2, seed=40, candidates_per_client=4, archive_size=8, max_iters=5
+        num_clients=2, seed=40, candidates_per_client=4, archive_size=8, max_iters=5,
+        online_bound_manifest_path=str(manifest),
     )
     assert row["scalarized_objective_gap"] >= 0.0
     assert row["bounded_pareto_solve_time_sec"] >= 0.0

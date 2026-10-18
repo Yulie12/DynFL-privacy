@@ -33,7 +33,6 @@ def make_config(**kwargs):
     data = dict(
         privacy_unit="sample", trusted_edge_split_execution=True,
         trusted_lie_joint_sample_dp=True,
-        learning_objective="legacy_fusion_dp",
         split_batch_size=64, rounds=2, L_block_cycles=1,
         privacy_local_epochs=1, initial_epsilon=8,
         excluded_modes=("LIC", "LIEIIC", "LIEIIIC", "LIIE", "LIIC", "LIIEIIIC"),
@@ -45,7 +44,7 @@ def make_config(**kwargs):
 @pytest.mark.parametrize("override, pattern", [
     ({"privacy_unit": "client"}, "privacy_unit='sample'"),
     ({"trusted_edge_split_execution": False}, "trusted_edge_split_execution"),
-    ({"learning_objective": "joint_calibration"}, "new learning-proxy calibration"),
+    ({"learning_objective": "joint_calibration"}, "online_upper_bound"),
 ])
 def test_requires_explicit_trust_and_no_stale_proxy(override, pattern):
     with pytest.raises(ValueError, match=pattern):
