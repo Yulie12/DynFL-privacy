@@ -180,7 +180,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
-    parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate", "global_release"])
+    parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate"])
     parser.add_argument("--update-mechanisms", nargs="+", choices=["dp", "he3", "dp_he3"], default=["dp", "he3"])
     parser.add_argument(
         "--liie-edge-dp-plan", choices=["independent", "aggregate"],
@@ -314,7 +314,7 @@ def parse_args() -> argparse.Namespace:
         "--policies",
         nargs="+",
         default=None,
-        help="Policies to run. Mainline fusion defaults exclude privacy-bypass controls.",
+        help="Policies to run. Formal configurations pin the four frozen baselines.",
     )
     # V370_STATIC_PAIR_MANIFEST_ARG
     parser.add_argument("--static-pair-admission-manifest", type=str, default=None, help="V370 fixed Client-Edge trust JSON manifest")

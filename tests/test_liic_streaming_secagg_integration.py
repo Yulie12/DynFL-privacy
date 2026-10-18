@@ -20,13 +20,13 @@ def test_liic_streaming_secagg_requires_pure_fixed_direct_cloud_cohort():
     liic = SimpleNamespace(mode="LIIC")
     updates = [(_update(1, 2), 3, liic, [1]), (_update(3, 4), 5, liic, [2])]
     assert _liic_streaming_secagg_eligible(
-        updates, [1.0, 1.0], execute_real_he=False, mainline_fusion=False
+        updates, [1.0, 1.0], execute_real_he=False
     )
     assert not _liic_streaming_secagg_eligible(
-        updates, [1.0, 1.0], execute_real_he=True, mainline_fusion=False
+        updates, [1.0, 1.0], execute_real_he=True
     )
     assert not _liic_streaming_secagg_eligible(
-        updates, [1.0, 0.0], execute_real_he=False, mainline_fusion=False
+        updates, [1.0, 0.0], execute_real_he=False
     )
 
 

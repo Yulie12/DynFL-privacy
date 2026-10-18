@@ -903,8 +903,8 @@ def test_update_packet_dp_uses_max_within_packet_client_fraction() -> None:
 def test_tex_packet_clips_clients_before_weighted_packet_aggregation() -> None:
     root = Path(__file__).resolve().parents[1]
     source = (root / "dynfed" / "fmnist_lenet5_dynamic.py").read_text(encoding="utf-8")
-    start = source.index("            for edge_id, updates in edge_cloud_groups.items():")
-    end = source.index("                else:\n                    edge_state, _edge_used_he", start)
+    start = source.index("        for edge_id, updates in edge_cloud_groups.items():")
+    end = source.index("            else:\n                edge_state, _edge_used_he", start)
     packet_path = source[start:end]
 
     clip_pos = packet_path.index("clipped, _original_norm, clip_scale = clip_state_difference(")

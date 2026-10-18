@@ -53,7 +53,7 @@ def test_runtime_scope_is_explicit_and_profiler_only():
     assert preflight < precharge
     scope = SOURCE[SOURCE.index('        experimental_multistage_opt_in ='):preflight]
     assert 'DYNFL_EXPERIMENTAL_SAMPLE_MULTISTAGE' in scope
-    assert 'effective_selection.mainline_fusion' in scope
+    assert 'mainline_fusion' not in SOURCE
     assert 'train_config.he_execution != "profiled"' in scope
     assert 'effective_selection.privacy_unit != "sample"' in scope
     assert 'allow_experimental_guarded_multistage=guarded_multistage_trial' in SOURCE

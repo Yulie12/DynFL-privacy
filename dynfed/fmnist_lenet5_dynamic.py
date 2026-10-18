@@ -743,7 +743,7 @@ def run_fmnist_lenet5_training(
         raise ValueError("server_step must be in (0, 1]")
     for policy in policies:
         validate_update_protection_goal(selection, policy)
-    if train_config.dp_release_calibration not in {"tex_packet", "legacy_aggregate", "global_release"}:
+    if train_config.dp_release_calibration not in {"tex_packet", "legacy_aggregate"}:
         raise ValueError("Unknown DP release calibration")
     if train_config.dp_release_calibration == "tex_packet" and train_config.execution_revision != CURRENT_EXECUTION_REVISION:
         raise ValueError("TeX packet calibration requires the current execution revision")
@@ -4820,9 +4820,6 @@ def _run_lenet5_policy(
             "feature_epsilon": max_feature_epsilon,
             "update_epsilon": reported_update_epsilon,
             "sample_epsilon": max_sample_epsilon,
-            "global_release_count": current_round["global_release_count"],
-            "global_release_epsilon": current_round["global_release_epsilon"],
-            "global_release_contract": current_round["global_release_contract"],
             "privacy_unit": effective_selection.privacy_unit,
             "privacy_guarantee": current_round["privacy_guarantee"],
             "dp_delta": (
@@ -7052,7 +7049,7 @@ def _summarize_mode_selection_audit(
         row["generation_exclusions"] = {
             reason: sum(a.get("generation_exclusions", {}).get(mode) == reason
                         for a in client_audits)
-            for reason in ("excluded_mode", "trusted_edge_or_mainline_excludes_LIC",
+            for reason in ("excluded_mode", "trusted_edge_excludes_LIC",
                            "cloud_participation_required",
                            "no_allowed_mechanism_assignment")
         }

@@ -76,8 +76,6 @@ def privacy_execution_audit(round_rows: list[dict[str, Any]]) -> dict[str, Any]:
     coverage_known = bool(cloud_rows) and all("uniform_update_dp" in row for row in cloud_rows)
     return {
         "accountant_scope": "recorded_dp_events_only",
-        "global_release_count": None,
-        "global_release_epsilon": None,
         "uniform_selected_update_dp": (
             all(bool(row["uniform_update_dp"]) for row in cloud_rows)
             if coverage_known else None
