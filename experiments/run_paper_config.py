@@ -279,8 +279,8 @@ def main() -> None:
     if args.output_root is not None:
         config["output_root"] = args.output_root
     learning_config = config.get("learning", {})
-    if isinstance(learning_config, dict) and learning_config.get("history_ema_j_shadow") is True:
-        os.environ["DYNFL_HISTORY_EMA_J_SHADOW"] = "1"
+    if isinstance(learning_config, dict) and learning_config.get("history_ema_j_enabled") is True:
+        os.environ["DYNFL_HISTORY_EMA_J_ENABLED"] = "1"
         os.environ["DYNFL_HISTORY_EMA_J_DECAY"] = str(
             learning_config.get("history_ema_j_decay", 0.9)
         )
@@ -329,20 +329,25 @@ def validate_config(config: dict) -> None:
             f"Paper experiments require {CURRENT_EXECUTION_REVISION}"
         )
     he = config["he"]
-    expected = {
-        "poly_modulus_degree": int(CKKS_POLY_MODULUS_DEGREE),
-        "coeff_modulus_bits": [int(value) for value in CKKS_COEFF_MOD_BIT_SIZES],
-        "scale_bits": int(CKKS_SCALE_BITS),
-    }
-    actual = {
-        "poly_modulus_degree": int(he["poly_modulus_degree"]),
-        "coeff_modulus_bits": [int(value) for value in he["coeff_modulus_bits"]],
-        "scale_bits": int(he["scale_bits"]),
-    }
-    if actual != expected:
-        raise RuntimeError(
-            f"Configured CKKS parameters {actual} do not match runtime {expected}"
-        )
+    learning = config.get("learning", {})
+    history_ema_j_enabled = (
+        isinstance(learning, dict) and learning.get("history_ema_j_enabled") is True
+    )
+    if not history_ema_j_enabled:
+        expected = {
+            "poly_modulus_degree": int(CKKS_POLY_MODULUS_DEGREE),
+            "coeff_modulus_bits": [int(value) for value in CKKS_COEFF_MOD_BIT_SIZES],
+            "scale_bits": int(CKKS_SCALE_BITS),
+        }
+        actual = {
+            "poly_modulus_degree": int(he["poly_modulus_degree"]),
+            "coeff_modulus_bits": [int(value) for value in he["coeff_modulus_bits"]],
+            "scale_bits": int(he["scale_bits"]),
+        }
+        if actual != expected:
+            raise RuntimeError(
+                f"Configured CKKS parameters {actual} do not match runtime {expected}"
+            )
     if int(config["system"]["clients"]) < int(config["system"]["edges"]):
         raise ValueError("The number of clients must be at least the number of edges")
     if bool(config["system"].get("trusted_edge_split_execution")):
@@ -364,8 +369,8 @@ def validate_config(config: dict) -> None:
         )
     privacy = config["privacy"]
     learning = config.get("learning")
-    history_ema_j_shadow = (
-        isinstance(learning, dict) and learning.get("history_ema_j_shadow") is True
+    history_ema_j_enabled = (
+        isinstance(learning, dict) and learning.get("history_ema_j_enabled") is True
     )
     if str(privacy.get("unit", "sample")).strip().lower() != "sample":
         raise ValueError(
@@ -377,13 +382,13 @@ def validate_config(config: dict) -> None:
             "mainline_fusion/Method2 global-release overlay has been removed "
             "from the current DynFL design"
         )
-    if history_ema_j_shadow:
+    if history_ema_j_enabled:
         if privacy.get("protection_scope") not in {
             "cross_domain_update", "cross_domain_update_and_secure_aggregate"
         }:
-            raise ValueError("History-EMA J shadow requires upload-boundary update protection")
+            raise ValueError("History-EMA J requires upload-boundary update protection")
         if privacy.get("candidate_mechanisms") != ["dp"]:
-            raise ValueError("History-EMA J shadow must use DP-only candidate mechanisms")
+            raise ValueError("History-EMA J must use DP-only candidate mechanisms")
     else:
         if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
             raise ValueError(
@@ -403,17 +408,21 @@ def validate_config(config: dict) -> None:
             "no learning method may be selected implicitly"
         )
     objective = learning["objective"]
-    if objective != "online_upper_bound":
-        raise ValueError(
-            f"Unsupported learning.objective: {objective}; only "
-            "'online_upper_bound' is supported. Legacy fusion, joint "
-            "calibration and oracle diagnostics have been removed."
-        )
-    manifest = learning.get("online_bound_manifest_path")
-    if not isinstance(manifest, str) or not manifest.strip():
-        raise ValueError(
-            "online_upper_bound requires learning.online_bound_manifest_path; no fallback"
-        )
+    if history_ema_j_enabled:
+        if objective != "history_ema_j":
+            raise ValueError("History-EMA J configuration must use learning.objective='history_ema_j'")
+        if learning.get("online_bound_manifest_path"):
+            raise ValueError("History-EMA J must not depend on an online-bound certificate")
+        if he.get("backend") != "none" or he.get("execution") != "real":
+            raise ValueError("History-EMA J requires HE disabled: backend='none', execution='real'")
+    else:
+        if objective != "online_upper_bound":
+            raise ValueError(
+                f"Unsupported learning.objective: {objective}; legacy configs use online_upper_bound."
+            )
+        manifest = learning.get("online_bound_manifest_path")
+        if not isinstance(manifest, str) or not manifest.strip():
+            raise ValueError("online_upper_bound requires learning.online_bound_manifest_path")
 
 
 if __name__ == "__main__":

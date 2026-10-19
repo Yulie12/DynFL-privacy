@@ -1,8 +1,8 @@
-"""History-EMA J shadow evaluation.
+"""History-EMA J selection objective and historical evaluation.
 
-J is a normalized squared distance between a candidate Mode's historical EMA
-prediction of its Cloud contribution and the historical EMA of eligible global
-Cloud updates. This is diagnostic-only: it never changes candidate selection.
+J is a normalized squared distance between a candidate profile's predicted
+Cloud update and the historical EMA of eligible global Cloud updates. The
+score is used by the History-EMA J profile selector after its history warm-up.
 
 Only already-produced update vectors are consumed. The caller is responsible
 for attesting that the upload path was DP-protected before Cloud aggregation.
@@ -115,6 +115,40 @@ class HistoryEMAJ:
             "mode_history_updates": int(self.mode_updates.get(mode, 0)),
         }
 
+    def predict_profile_j(
+        self, profile_modes: Mapping[int, str], client_samples: Mapping[int, float]
+    ) -> tuple[float, str]:
+        """Predict J for a candidate Cloud profile using sample-mass weights.
+
+        Per-Mode EMA vectors represent the sample-weighted mean Cloud update
+        observed for that Mode. The candidate profile mixes those vectors using
+        the candidate's Cloud-reaching sample mass. LIIE contributes no Cloud
+        update and is therefore excluded from the Cloud denominator.
+        """
+        if self.global_ema is None:
+            return 0.0, "history_ema_j_warmup_no_global_history"
+        mode_mass: dict[str, float] = {"LIIEIIIC": 0.0, "LIIC": 0.0}
+        for client_id, mode in profile_modes.items():
+            if mode not in mode_mass:
+                continue
+            mass = max(float(client_samples.get(client_id, 0.0)), 0.0)
+            mode_mass[mode] += mass
+        total_cloud_mass = sum(mode_mass.values())
+        if total_cloud_mass <= 0.0:
+            return normalized_squared_deviation(
+                torch.zeros_like(self.global_ema), self.global_ema, self.eps
+            ), "history_ema_j_no_cloud_submission"
+        active_modes = [mode for mode, mass in mode_mass.items() if mass > 0.0]
+        missing = [mode for mode in active_modes if mode not in self.mode_ema]
+        if missing:
+            return 0.0, "history_ema_j_warmup_missing_mode_history:" + ",".join(missing)
+        predicted = torch.zeros_like(self.global_ema)
+        for mode in active_modes:
+            if self.mode_ema[mode].numel() != predicted.numel():
+                raise ValueError("Mode EMA/global EMA dimensions do not match")
+            predicted += (mode_mass[mode] / total_cloud_mass) * self.mode_ema[mode]
+        return normalized_squared_deviation(predicted, self.global_ema, self.eps), "history_ema_j"
+
     def predict_all(self, round_index: int) -> list[dict[str, Any]]:
         rows = []
         for mode in TARGET_MODES:
@@ -129,9 +163,10 @@ class HistoryEMAJ:
                 eligibility_reason: str = "") -> list[dict[str, Any]]:
         """Update histories only from eligible, already-observed DP-protected uploads.
 
-        `mode_updates` must contain per-Mode sample-weighted Cloud contributions
-        formed by the caller from the actual Cloud submission units. LIIE has no
-        Cloud contribution and therefore does not appear in this mapping.
+        `mode_updates` contains per-Mode sample-weighted mean Cloud updates
+        formed by the caller from actual Cloud submission units. Candidate-profile
+        prediction later combines these means using the candidate's sample mass.
+        LIIE has no Cloud contribution and does not appear in this mapping.
         """
         rows: list[dict[str, Any]] = []
         for mode, update in mode_updates.items():

@@ -8,7 +8,7 @@ import random
 import time
 
 import torch
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from itertools import product
 from pathlib import Path
@@ -212,9 +212,9 @@ class SelectionConfig:
     update_payload_mb: float = 4.0
     mainline_fusion: bool = False
 
-    # The only supported formal learning objective is the strict
-    # predecision-certificate online upper bound. ``None`` is allowed only for
-    # unit-level construction; selection/evaluation fails closed without it.
+    # Supported learning objectives: the legacy online certificate and the
+    # current history-EMA J method. The latter consumes the in-memory EMA state
+    # from the current training process and never reads a certificate file.
     learning_objective: str | None = None
     # V370: opt-in explicit, fixed Client->Edge pair trust admission. Omitted
     # trust entries are untrusted; runtime supplies the actual Edge id.
@@ -228,6 +228,8 @@ class SelectionConfig:
     uncapped_local_batches: bool = False
     # Matched old/new 5-round baselines use identical corrected mode gates.
     corrected_admission_policy: bool = False
+    # Appended to preserve positional construction of legacy SelectionConfig.
+    history_ema_j_history: Any | None = field(default=None, compare=False, hash=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.trusted_lie_joint_sample_dp:
@@ -257,11 +259,10 @@ class SelectionConfig:
             seen_fast_clients.add(int(client_id))
         if self.mainline_fusion:
             raise ValueError("mainline_fusion/Method2 global-release overlay has been removed from the current DynFL design")
-        if self.learning_objective is not None and self.learning_objective != "online_upper_bound":
-            raise ValueError(
-                "learning_objective must be 'online_upper_bound'; legacy fusion, "
-                "joint calibration and oracle diagnostics have been removed"
-            )
+        if self.learning_objective is not None and self.learning_objective not in {
+            "online_upper_bound", "history_ema_j"
+        }:
+            raise ValueError("learning_objective must be 'online_upper_bound' or 'history_ema_j'")
         if self.learning_objective == "online_upper_bound" and not self.online_bound_manifest_path:
             raise ValueError("online_upper_bound requires online_bound_manifest_path; no fallback")
         if self.online_bound_round < 0:
@@ -404,7 +405,7 @@ def candidate_link_mechanism(
 ) -> str:
     if (
         candidate.mode == "LIIEIIIC" and link_id == "E_C_upd"
-        and os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+        and os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
     ):
         return "none"
     if candidate.link_mechanisms and link_id in candidate.link_mechanisms:
@@ -1224,10 +1225,10 @@ def enumerate_candidates(
     if config.corrected_admission_policy and not config.strict_pair_admission:
         raise ValueError("corrected admission policy requires explicit strict Client-Edge pair manifest")
 
-    history_ema_j_shadow = os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+    history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
     for mode, spec in MODE_SPECS.items():
-        if history_ema_j_shadow and mode not in {"LIIE", "LIIEIIIC", "LIIC"}:
-            audit_exclusions[mode] = "history_ema_j_three_mode_shadow_scope"
+        if history_ema_j_enabled and mode not in {"LIIE", "LIIEIIIC", "LIIC"}:
+            audit_exclusions[mode] = "history_ema_j_three_mode_scope"
             continue
         if mode in config.excluded_modes:
             audit_exclusions[mode] = "excluded_mode"
@@ -3665,6 +3666,27 @@ def _online_bound_for_profile(
     )
 
 
+def _history_ema_j_profile_cost(
+    config: SelectionConfig,
+    profile: dict[int, Candidate],
+    client_samples: dict[int, float],
+    admitted_client_ids: tuple[int, ...],
+) -> tuple[float, str]:
+    history = config.history_ema_j_history
+    if history is None:
+        return 0.0, "history_ema_j_warmup_no_state"
+    if history.global_ema is None:
+        return 0.0, "history_ema_j_warmup_no_global_history"
+    if any(mode not in history.mode_ema for mode in ("LIIC", "LIIEIIIC")):
+        return 0.0, "history_ema_j_warmup_need_both_cloud_modes"
+    admitted = set(admitted_client_ids)
+    modes = {
+        client_id: (candidate.mode if client_id in admitted else "SKIP")
+        for client_id, candidate in profile.items()
+    }
+    return history.predict_profile_j(modes, client_samples)
+
+
 def _selection_learning_cost(
     config: SelectionConfig,
     profile: dict[int, Candidate],
@@ -3672,18 +3694,16 @@ def _selection_learning_cost(
     client_edges: dict[int, int],
     admitted_client_ids: tuple[int, ...],
 ) -> float:
-    """The same formal online-J upper bound used by full-profile evaluation.
-
-    Initial seeds, neighbour lookahead and final evaluation all call this
-    function. There is no legacy fusion or table-calibration fallback.
-    """
-    if config.learning_objective != "online_upper_bound":
-        raise ValueError(
-            "formal selection requires learning_objective='online_upper_bound'"
-        )
-    return _online_bound_for_profile(
-        config, profile, client_samples, admitted_client_ids
-    ).upper
+    """Return the active learning objective for candidate-profile ranking."""
+    if config.learning_objective == "history_ema_j":
+        return _history_ema_j_profile_cost(
+            config, profile, client_samples, admitted_client_ids
+        )[0]
+    if config.learning_objective == "online_upper_bound":
+        return _online_bound_for_profile(
+            config, profile, client_samples, admitted_client_ids
+        ).upper
+    raise ValueError("selection requires learning_objective='history_ema_j' or 'online_upper_bound'")
 
 
 def _initial_profiles(
@@ -4181,20 +4201,22 @@ def _evaluate_profile(
         client_samples,
         admitted_client_ids,
     )
-    if config.learning_objective != "online_upper_bound":
-        raise ValueError(
-            "formal profile evaluation requires learning_objective="
-            "'online_upper_bound'; legacy fusion, joint calibration and "
-            "oracle diagnostics are not supported"
-        )
     # Diagnostic-only legacy algebra; not part of the learning objective.
     clip_norm = max(float(config.omega_update_clip_norm), 0.0)
     fusion_bound = 4.0 * clip_norm * clip_norm * (1.0 - cloud_fusion_ratio) ** 2
-    online = _online_bound_for_profile(
-        config, profile, client_samples, tuple(admitted_client_ids)
-    )
-    system_learning_error = online.upper
-    learning_proxy_source = online.source
+    online = None
+    if config.learning_objective == "history_ema_j":
+        system_learning_error, learning_proxy_source = _history_ema_j_profile_cost(
+            config, profile, client_samples, tuple(admitted_client_ids)
+        )
+    elif config.learning_objective == "online_upper_bound":
+        online = _online_bound_for_profile(
+            config, profile, client_samples, tuple(admitted_client_ids)
+        )
+        system_learning_error = online.upper
+        learning_proxy_source = online.source
+    else:
+        raise ValueError("profile evaluation requires history_ema_j or online_upper_bound")
 
     fusion_distortion, fusion_cosine_distortion = _profile_fusion_distortion(
         profile,
@@ -4220,16 +4242,16 @@ def _evaluate_profile(
         update_clip_perturbation=system_update_clip,
         fusion_bound=fusion_bound,
         learning_proxy_source=learning_proxy_source,
-        online_j_center_norm_sq=online.central_norm ** 2,
-        online_j_radius=online.radius,
-        online_j_ideal_radius=online.ideal_radius,
-        online_j_noise_second_moment=online.q_aggregate,
-        online_j_proved_noise_floor=online.q_aggregate_proved_floor,
-        online_j_numeric_radius=online.numeric_radius,
-        online_j_lower_bound=online.lower,
-        online_j_reference_radius=online.reference_radius,
-        online_j_mode_radius=online.mode_radius,
-        online_j_mode_variance_second_moment=online.mode_variance_second_moment,
+        online_j_center_norm_sq=0.0 if online is None else online.central_norm ** 2,
+        online_j_radius=0.0 if online is None else online.radius,
+        online_j_ideal_radius=0.0 if online is None else online.ideal_radius,
+        online_j_noise_second_moment=0.0 if online is None else online.q_aggregate,
+        online_j_proved_noise_floor=0.0 if online is None else online.q_aggregate_proved_floor,
+        online_j_numeric_radius=0.0 if online is None else online.numeric_radius,
+        online_j_lower_bound=0.0 if online is None else online.lower,
+        online_j_reference_radius=0.0 if online is None else online.reference_radius,
+        online_j_mode_radius=0.0 if online is None else online.mode_radius,
+        online_j_mode_variance_second_moment=0.0 if online is None else online.mode_variance_second_moment,
     )
 
 
@@ -6140,15 +6162,15 @@ def _mechanism_assignments(
         local_block_cycles=1,
         edge_loops=spec.E_edge_loops,
     )
-    history_ema_j_shadow = os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
-    if history_ema_j_shadow and spec.name == "LIIEIIIC":
+    history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
+    if history_ema_j_enabled and spec.name == "LIIEIIIC":
         # The new method protects L_E_upd before Edge aggregation; E_C_upd is
         # deliberately unprotected and must not be a candidate DP/HE boundary.
         all_transmissions = tuple(
             (link, obj, count, False if link == "E_C_upd" else eligible)
             for link, obj, count, eligible in all_transmissions
         )
-    if history_ema_j_shadow and spec.name in {"LIIE", "LIIEIIIC", "LIIC"}:
+    if history_ema_j_enabled and spec.name in {"LIIE", "LIIEIIIC", "LIIC"}:
         allow_he = False
         update_mechanism_options = ("dp",)
     transmissions = [event for event in all_transmissions if event[3]]
@@ -7138,11 +7160,11 @@ def _mode_link_transmissions(
             ("E_L_upd_final_return", "upd", 1, False),
         )
     if mode == "LIIEIIIC":
-        history_ema_j_shadow = os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+        history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
         return (
             ("L_E_upd", "upd", E, True),
             ("E_L_upd_loop_return", "upd", E, False),
-            ("E_C_upd", "upd", 1, not history_ema_j_shadow),
+            ("E_C_upd", "upd", 1, not history_ema_j_enabled),
             ("C_E_upd_final_return", "upd", 1, False),
             ("E_L_upd_final_return", "upd", 1, False),
         )

@@ -167,16 +167,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--learning-objective",
         required=True,
-        choices=["online_upper_bound"],
+        choices=["online_upper_bound", "history_ema_j"],
         help=(
-            "Pareto learning objective. Only the strict predecision online "
-            "certificate is supported; legacy fusion, joint calibration and "
-            "oracle diagnostics have been removed."
+            "Learning objective: history_ema_j uses the in-memory historical EMA-J "
+            "score and requires no certificate; online_upper_bound is the legacy option."
         ),
     )
     parser.add_argument(
         "--online-bound-manifest-path", default=None,
-        help="Predecision round-indexed online-J certificates. Required; no proxy fallback.",
+        help="Legacy online_upper_bound certificate manifest; not used by history_ema_j.",
     )
     parser.add_argument("--dp-delta", type=float, default=1e-5)
     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])

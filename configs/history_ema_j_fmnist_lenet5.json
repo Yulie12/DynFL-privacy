@@ -1,7 +1,7 @@
 {
-  "name": "history_ema_j_fmnist_lenet5_shadow",
+  "name": "history_ema_j_fmnist_lenet5",
   "execution_revision": "paper_flow_v31_mode_specific_privacy",
-  "output_root": "out/history_ema_j_fmnist_lenet5_shadow",
+  "output_root": "out/history_ema_j_fmnist_lenet5",
   "seeds": [
     2026
   ],
@@ -75,11 +75,11 @@
     "sample_optimizer_clip_norm": 3.0
   },
   "he": {
-    "backend": "seal",
-    "execution": "profiled",
+    "backend": "none",
+    "execution": "real",
     "require_real_he": false,
     "aggregation_size": 0,
-    "workers": 4,
+    "workers": 1,
     "poly_modulus_degree": 8192,
     "coeff_modulus_bits": [
       50,
@@ -96,9 +96,8 @@
     "cloud_fusion_eps": 0.05
   },
   "learning": {
-    "objective": "online_upper_bound",
-    "online_bound_manifest_path": "certificates/REAL_history_ema_j_fmnist_lenet5_predecision_required.json",
-    "history_ema_j_shadow": true,
-    "history_ema_j_decay": 0.9
+    "objective": "history_ema_j",
+    "history_ema_j_decay": 0.9,
+    "history_ema_j_enabled": true
   }
 }

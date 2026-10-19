@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backtest history-EMA J shadow predictions from history_ema_j_shadow.jsonl."""
+"""Backtest History-EMA J predictions and realized observations from history_ema_j.jsonl."""
 from __future__ import annotations
 
 import argparse
@@ -90,13 +90,13 @@ def backtest(path: str | Path, *, include_mixed: bool = False) -> dict[str, Any]
             and r.get("observed_j") is not None and r.get("selected_mode_mix") is True
         ) if not include_mixed else 0,
         "include_mixed": bool(include_mixed),
-        "note": "Shadow backtest only; this does not certify online_upper_bound or prove J predicts accuracy.",
+        "note": "Historical J backtest; metrics evaluate prediction calibration only and do not establish test-accuracy monotonicity.",
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("jsonl", type=Path, help="history_ema_j_shadow.jsonl")
+    parser.add_argument("jsonl", type=Path, help="history_ema_j.jsonl")
     parser.add_argument("--output", type=Path, default=None, help="optional JSON report path")
     parser.add_argument("--include-mixed", action="store_true",
                         help="include rounds where several Modes were selected; default excludes them")
