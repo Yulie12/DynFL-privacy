@@ -33,6 +33,7 @@ from .fmnist_dynamic_training import FmnistDynamicConfig as _FmnistDynamicConfig
 from .fmnist_dynamic_training import load_fmnist_arrays
 from .flow_executor import EDGE_CLOUD_MODES, EDGE_ONLY_MODES, ClientFlowInput, execute_mixed_round_flow
 from .online_j_runtime import hydrate_online_manifest, liic_shadow_metadata, write_predecision_json
+from .history_ema_j import HistoryEMAJ, append_jsonl, flatten_update, normalized_squared_deviation, TARGET_MODES
 from .he_backend import (
     CKKS_COEFF_MOD_BIT_SIZES,
     CKKS_POLY_MODULUS_DEGREE,
@@ -480,6 +481,8 @@ def _candidate_training_mechanisms(
         mechanisms["upd"] = "none"
     if (
         aggregate_cloud_update_dp
+        and not (os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+                 and candidate.mode == "LIIEIIIC")
         and update_link != "L_E_upd"
         and mechanism_uses_dp(_candidate_cloud_update_mechanism(candidate))
     ):
@@ -509,6 +512,11 @@ def _candidate_worker_update_dp_applied(
 
 def _candidate_cloud_update_mechanism(candidate: Candidate | None) -> str:
     if candidate is None:
+        return "none"
+    if (
+        candidate.mode == "LIIEIIIC"
+        and os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+    ):
         return "none"
     link_id = {
         "LIIC": "L_C_upd",
@@ -548,6 +556,11 @@ def _candidate_uses_local_packet_update_dp(
     trusted_edge_split_execution: bool = False,
 ) -> bool:
     mechanism = _candidate_cloud_update_mechanism(candidate)
+    if (
+        candidate is not None and candidate.mode == "LIIC"
+        and os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+    ):
+        return mechanism_uses_dp(mechanism) and not mechanism_uses_he(mechanism)
     if candidate is not None and getattr(candidate, "dp_execution_plan", "independent") == "cloud_packet":
         return mechanism_uses_dp(mechanism)
     # Full-local direct-cloud FL no longer needs high-dimensional local packet DP.
@@ -567,6 +580,12 @@ def _candidate_uses_secure_aggregate_update_dp(
     trusted_edge_split_execution: bool = False,
 ) -> bool:
     mechanism = _candidate_cloud_update_mechanism(candidate)
+    if (
+        candidate is not None
+        and candidate.mode in {"LIIE", "LIIEIIIC", "LIIC"}
+        and os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+    ):
+        return False
     if candidate is not None and getattr(candidate, "dp_execution_plan", "independent") == "cloud_packet":
         return False
     if candidate is not None and candidate.mode == "LIIC":
@@ -1431,6 +1450,19 @@ def _run_lenet5_policy(
     previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
 
     checkpoint_path = output_dir / "checkpoint.pt"
+    history_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+    history_j = HistoryEMAJ(
+        decay=float(os.environ.get("DYNFL_HISTORY_EMA_J_DECAY", "0.9")),
+        eps=float(os.environ.get("DYNFL_HISTORY_EMA_J_EPS", "1e-12")),
+    )
+    history_j_log_path = output_dir / "history_ema_j_shadow.jsonl"
+    history_j_state_path = output_dir / "history_ema_j_state.pt"
+    history_j_resume_path = (
+        Path(resume_from_policy_dir) / "history_ema_j_state.pt"
+        if resume_from_policy_dir is not None else None
+    )
+    if history_j_enabled and history_j_resume_path is not None and history_j_resume_path.exists():
+        history_j.load(history_j_resume_path)
     if resume_from_policy_dir is not None:
         checkpoint = _load_policy_checkpoint(resume_from_policy_dir, device)
         if checkpoint is None:
@@ -2073,6 +2105,8 @@ def _run_lenet5_policy(
             plan=effective_selection.liie_edge_dp_plan,
             execute_real_he=execute_real_he,
         )
+        if os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1":
+            planned_liie_groups = {}
         if planned_liie_groups:
             if not update_dp_execution_enabled:
                 raise ValueError("LIIE aggregate DP requires update DP execution to be enabled")
@@ -2140,6 +2174,19 @@ def _run_lenet5_policy(
                         ),
                     )
         previous_choices = {client_id: candidate for client_id, candidate, _candidates, _rem in selected}
+
+        # Shadow-only prediction: this never changes the formal Mode selector.
+        history_j_predictions = []
+        if history_j_enabled:
+            history_j_predictions = history_j.predict_all(round_idx)
+            selected_mode_counts = {
+                mode: sum(1 for _cid, cand, _pool, _rem in selected if cand.mode == mode)
+                for mode in TARGET_MODES
+            }
+            for row in history_j_predictions:
+                row["selected_clients_in_mode"] = selected_mode_counts.get(row["mode"], 0)
+                row["selected_mode_mix"] = len({cand.mode for _cid, cand, _pool, _rem in selected if cand.mode != "SKIP"}) > 1
+            append_jsonl(history_j_log_path, history_j_predictions)
 
         for client_id, candidate, _candidates, rem in selected:
             if not candidate_meets_update_goal(effective_selection, candidate):
@@ -3925,6 +3972,10 @@ def _run_lenet5_policy(
         global_state_diffs: list[dict[str, dict[str, torch.Tensor]]] = []
         global_candidates: list[Candidate | None] = []
         global_he_mask: list[bool] = []
+        history_pre_cloud_state = (
+            _snapshot_trainable_parameters(global_end, global_edge)
+            if history_j_enabled else None
+        )
         before_cloud_update = (
             _snapshot_trainable_parameters(global_end, global_edge)
             if cloud_updates and train_config.server_step != 1.0
@@ -3997,6 +4048,150 @@ def _run_lenet5_policy(
             _apply_cloud_server_step(
                 global_end, global_edge, before_cloud_update, train_config.server_step
             )
+
+        if history_j_enabled:
+            history_rows: list[dict[str, Any]] = []
+            prior_global_ema = None if history_j.global_ema is None else history_j.global_ema.clone()
+            selected_modes = {cand.mode for _cid, cand, _pool, _rem in selected}
+            # Build sample-weighted per-Mode observed Cloud contributions. LIIE is
+            # Edge-only and intentionally has no Cloud packet in this implementation.
+            mode_parts: dict[str, list[tuple[torch.Tensor, float]]] = {}
+            mode_reasons: dict[str, str] = {}
+            packet_dp_indices_for_shadow = {idx for idx, _std, _seed in local_dp_pending_components}
+            aggregate_dp_active_for_shadow = any(
+                float(value) > 0.0 for value in aggregate_dp_share_stds
+            ) or bool(liic_streaming_secagg)
+            global_eligible = bool(cloud_updates) and not aggregate_dp_active_for_shadow
+            global_reason = (
+                "aggregate-DP is excluded from this method"
+                if aggregate_dp_active_for_shadow else
+                "no Cloud submission in this round" if not cloud_updates else ""
+            )
+            for cloud_idx, (state_diff, sample_count, candidate, _client_ids) in enumerate(cloud_updates):
+                mode = candidate.mode if candidate is not None else "UNKNOWN"
+                if mode not in {"LIIC", "LIIEIIIC"}:
+                    global_eligible = False
+                    global_reason = f"unsupported Cloud contributor Mode: {mode}"
+                    continue
+                if candidate is None or str(getattr(candidate, "dp_execution_plan", "independent")) == "aggregate":
+                    global_eligible = False
+                    global_reason = "aggregate-DP execution plan is excluded from this method"
+                    continue
+                if aggregate_dp_active_for_shadow:
+                    continue
+                if mode == "LIIC":
+                    upload_mechanism = candidate_link_mechanism(candidate, "L_C_upd")
+                    if not mechanism_uses_dp(upload_mechanism) or cloud_idx not in packet_dp_indices_for_shadow:
+                        global_eligible = False
+                        global_reason = "LIIC L_C_upd was not observed as packet-DP protected"
+                        mode_reasons[mode] = global_reason
+                        continue
+                else:
+                    upload_mechanism = candidate_link_mechanism(candidate, "L_E_upd")
+                    ec_mechanism = _candidate_cloud_update_mechanism(candidate)
+                    if mechanism_uses_dp(ec_mechanism) or mechanism_uses_he(ec_mechanism):
+                        global_eligible = False
+                        global_reason = "LIIEIIIC E_C_upd must be unprotected and HE-free for this method"
+                        mode_reasons[mode] = global_reason
+                        continue
+                    if not mechanism_uses_dp(upload_mechanism):
+                        global_eligible = False
+                        global_reason = "LIIEIIIC L_E_upd was not configured for DP protection"
+                        mode_reasons[mode] = global_reason
+                        continue
+                if candidate_has_he(candidate):
+                    global_eligible = False
+                    global_reason = f"{mode} candidate uses HE, which is outside History-EMA J"
+                    mode_reasons[mode] = global_reason
+                    continue
+                cloud_weight = (
+                    float(global_aggregation_weights[cloud_idx])
+                    if cloud_idx < len(global_aggregation_weights) else 0.0
+                )
+                # Preserve the actual Cloud sample-weight mass I_i. Do not
+                # renormalize each Mode's subset to sum to one in mixed rounds.
+                mode_parts.setdefault(mode, []).append((flatten_update(state_diff), cloud_weight))
+            mode_updates_for_shadow = {
+                mode: sum(
+                    (vector * weight for vector, weight in items),
+                    torch.zeros_like(items[0][0]),
+                )
+                for mode, items in mode_parts.items() if items
+            }
+            if history_pre_cloud_state is not None:
+                history_post_cloud_state = _snapshot_trainable_parameters(global_end, global_edge)
+                global_delta = {
+                    part: {
+                        name: history_post_cloud_state[part][name].detach().cpu()
+                             - history_pre_cloud_state[part][name].detach().cpu()
+                        for name in history_pre_cloud_state[part]
+                    }
+                    for part in history_pre_cloud_state
+                }
+            else:
+                global_delta = None
+
+            # Score observed Mode outputs against the *pre-round* global EMA for
+            # retrospective calibration, then update the EMA state.
+            for mode in TARGET_MODES:
+                if mode == "LIIE":
+                    if mode in selected_modes and prior_global_ema is not None:
+                        no_op = torch.zeros_like(prior_global_ema)
+                        history_rows.append({
+                            "event": "realized_j", "round_index": int(round_idx),
+                            "mode": mode, "status": "no_cloud_submission_zero_contribution",
+                            "selected_mode_mix": len(selected_modes - {"SKIP"}) > 1,
+                            "predicted_j": next((r.get("predicted_j") for r in history_j_predictions if r["mode"] == mode), None),
+                            "observed_j": normalized_squared_deviation(no_op, prior_global_ema, history_j.eps),
+                            "reference_global_ema_norm": float(torch.linalg.vector_norm(prior_global_ema).item()),
+                        })
+                    continue
+                if mode in mode_updates_for_shadow and prior_global_ema is not None:
+                    observed_vec = flatten_update(mode_updates_for_shadow[mode])
+                    history_rows.append({
+                        "event": "realized_j", "round_index": int(round_idx),
+                        "mode": mode, "status": "observed_dp_protected_upload_contribution",
+                        "selected_mode_mix": len(selected_modes - {"SKIP"}) > 1,
+                        "predicted_j": next((r.get("predicted_j") for r in history_j_predictions if r["mode"] == mode), None),
+                        "observed_j": normalized_squared_deviation(observed_vec, prior_global_ema, history_j.eps),
+                        "observed_update_norm": float(torch.linalg.vector_norm(observed_vec).item()),
+                        "reference_global_ema_norm": float(torch.linalg.vector_norm(prior_global_ema).item()),
+                    })
+                elif mode in selected_modes:
+                    history_rows.append({
+                        "event": "realized_j", "round_index": int(round_idx),
+                        "mode": mode, "status": "excluded_from_history",
+                        "selected_mode_mix": len(selected_modes - {"SKIP"}) > 1,
+                        "predicted_j": next((r.get("predicted_j") for r in history_j_predictions if r["mode"] == mode), None),
+                        "observed_j": None,
+                        "reason": mode_reasons.get(mode, global_reason or "no eligible observed Cloud contribution"),
+                    })
+            selected_non_skip_modes = selected_modes - {"SKIP"}
+            homogeneous_mode_round = len(selected_non_skip_modes) == 1
+            mode_updates_for_history = (
+                mode_updates_for_shadow if homogeneous_mode_round and global_eligible else {}
+            )
+            if not homogeneous_mode_round and mode_updates_for_shadow:
+                history_rows.append({
+                    "event": "mode_ema_update", "round_index": int(round_idx),
+                    "status": "skipped_mixed_mode_round",
+                    "reason": "a mixed Mode profile does not identify a full single-Mode Cloud update",
+                })
+            elif homogeneous_mode_round and mode_updates_for_shadow and not global_eligible:
+                history_rows.append({
+                    "event": "mode_ema_update", "round_index": int(round_idx),
+                    "status": "skipped_ineligible_cloud_update",
+                    "reason": global_reason or "global update was not eligible for the historical reference",
+                })
+            history_rows.extend(history_j.observe(
+                round_index=round_idx,
+                global_update=global_delta,
+                mode_updates=mode_updates_for_history,
+                global_history_eligible=global_eligible and global_delta is not None,
+                eligibility_reason=global_reason,
+            ))
+            append_jsonl(history_j_log_path, history_rows)
+
         for client_id, candidate, _candidates, _remaining in selected:
             if _mode_reaches_cloud(candidate.mode):
                 client_model_states.pop(client_id, None)
@@ -4990,6 +5185,8 @@ def _run_lenet5_policy(
             client_model_states=client_model_states,
             sample_dispatch_identity=sample_dispatch_identity,
         )
+        if history_j_enabled:
+            history_j.save(history_j_state_path)
         privacy_progress = (
             f"sample_eps={max_sample_epsilon:.3f}"
             if effective_selection.privacy_unit == "sample"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import random
 import time
 
@@ -401,6 +402,11 @@ def candidate_link_mechanism(
     *,
     fallback_object: str = "upd",
 ) -> str:
+    if (
+        candidate.mode == "LIIEIIIC" and link_id == "E_C_upd"
+        and os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+    ):
+        return "none"
     if candidate.link_mechanisms and link_id in candidate.link_mechanisms:
         return candidate.link_mechanisms[link_id]
     return candidate.mechanisms.get(fallback_object, "none")
@@ -1218,7 +1224,11 @@ def enumerate_candidates(
     if config.corrected_admission_policy and not config.strict_pair_admission:
         raise ValueError("corrected admission policy requires explicit strict Client-Edge pair manifest")
 
+    history_ema_j_shadow = os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
     for mode, spec in MODE_SPECS.items():
+        if history_ema_j_shadow and mode not in {"LIIE", "LIIEIIIC", "LIIC"}:
+            audit_exclusions[mode] = "history_ema_j_three_mode_shadow_scope"
+            continue
         if mode in config.excluded_modes:
             audit_exclusions[mode] = "excluded_mode"
             continue
@@ -6130,6 +6140,17 @@ def _mechanism_assignments(
         local_block_cycles=1,
         edge_loops=spec.E_edge_loops,
     )
+    history_ema_j_shadow = os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
+    if history_ema_j_shadow and spec.name == "LIIEIIIC":
+        # The new method protects L_E_upd before Edge aggregation; E_C_upd is
+        # deliberately unprotected and must not be a candidate DP/HE boundary.
+        all_transmissions = tuple(
+            (link, obj, count, False if link == "E_C_upd" else eligible)
+            for link, obj, count, eligible in all_transmissions
+        )
+    if history_ema_j_shadow and spec.name in {"LIIE", "LIIEIIIC", "LIIC"}:
+        allow_he = False
+        update_mechanism_options = ("dp",)
     transmissions = [event for event in all_transmissions if event[3]]
     links = list(dict.fromkeys(event[0] for event in transmissions))
     link_objects = {event[0]: event[1] for event in all_transmissions}
@@ -7117,10 +7138,11 @@ def _mode_link_transmissions(
             ("E_L_upd_final_return", "upd", 1, False),
         )
     if mode == "LIIEIIIC":
+        history_ema_j_shadow = os.environ.get("DYNFL_HISTORY_EMA_J_SHADOW", "").strip() == "1"
         return (
             ("L_E_upd", "upd", E, True),
             ("E_L_upd_loop_return", "upd", E, False),
-            ("E_C_upd", "upd", 1, True),
+            ("E_C_upd", "upd", 1, not history_ema_j_shadow),
             ("C_E_upd_final_return", "upd", 1, False),
             ("E_L_upd_final_return", "upd", 1, False),
         )

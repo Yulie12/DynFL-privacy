@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -277,6 +278,12 @@ def main() -> None:
         config["he"]["require_real_he"] = args.he_execution == "real"
     if args.output_root is not None:
         config["output_root"] = args.output_root
+    learning_config = config.get("learning", {})
+    if isinstance(learning_config, dict) and learning_config.get("history_ema_j_shadow") is True:
+        os.environ["DYNFL_HISTORY_EMA_J_SHADOW"] = "1"
+        os.environ["DYNFL_HISTORY_EMA_J_DECAY"] = str(
+            learning_config.get("history_ema_j_decay", 0.9)
+        )
     validate_config(config)
     seeds = args.seeds or [int(seed) for seed in config["seeds"]]
     policies = args.policies or list(config["policies"])
@@ -356,6 +363,10 @@ def validate_config(config: dict) -> None:
             + ", ".join(FORMAL_BASELINE_POLICIES)
         )
     privacy = config["privacy"]
+    learning = config.get("learning")
+    history_ema_j_shadow = (
+        isinstance(learning, dict) and learning.get("history_ema_j_shadow") is True
+    )
     if str(privacy.get("unit", "sample")).strip().lower() != "sample":
         raise ValueError(
             "Formal paper experiments are Sample-DP only. Legacy client-level DP "
@@ -366,19 +377,26 @@ def validate_config(config: dict) -> None:
             "mainline_fusion/Method2 global-release overlay has been removed "
             "from the current DynFL design"
         )
-    if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
-        raise ValueError(
-            "Formal configurations must protect cross-domain updates and secure aggregate releases"
-        )
-    if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
-        raise ValueError(
-            "Formal configurations must expose DP, HE, and their combined DP+HE update mechanism"
-        )
+    if history_ema_j_shadow:
+        if privacy.get("protection_scope") not in {
+            "cross_domain_update", "cross_domain_update_and_secure_aggregate"
+        }:
+            raise ValueError("History-EMA J shadow requires upload-boundary update protection")
+        if privacy.get("candidate_mechanisms") != ["dp"]:
+            raise ValueError("History-EMA J shadow must use DP-only candidate mechanisms")
+    else:
+        if privacy.get("protection_scope") != "cross_domain_update_and_secure_aggregate":
+            raise ValueError(
+                "Formal configurations must protect cross-domain updates and secure aggregate releases"
+            )
+        if privacy.get("candidate_mechanisms") != ["dp", "he3", "dp_he3"]:
+            raise ValueError(
+                "Formal configurations must expose DP, HE, and their combined DP+HE update mechanism"
+            )
     if privacy.get("release_calibration") != "tex_packet":
         raise ValueError("TeX configurations require whole packet DP calibration")
     if float(privacy["cloud_dp_stability_threshold"]) <= 0.0:
         raise ValueError("The cloud DP stability threshold must be positive")
-    learning = config.get("learning")
     if not isinstance(learning, dict) or not learning.get("objective"):
         raise ValueError(
             "Formal configurations must declare learning.objective explicitly; "

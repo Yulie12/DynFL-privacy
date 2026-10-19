@@ -1,0 +1,68 @@
+% Proposed replacement fragment for the J definition in main(4).tex.
+% Merge this section into the existing method section after the original TeX source is available.
+\subsection{History-EMA Normalized Update Deviation}
+\label{subsec:history-ema-j}
+
+Let $\Delta^{C}_{t}(h)$ denote the final Cloud update induced by candidate Mode
+plan $h$ at round $t$. The history state is formed only from update observations
+whose Client-to-Cloud or Client-to-Edge upload path is confirmed to have been
+DP-protected before the update reaches the next aggregation tier. No additional
+protection is applied to $E_C^{\mathrm{upd}}$.
+
+For each eligible historical observation, update the global reference EMA as
+\begin{equation}
+\bar{\Delta}^{G}_{t}
+=\rho\bar{\Delta}^{G}_{t-1}+(1-\rho)\Delta^{G}_{t},
+\label{eq:history-global-ema}
+\end{equation}
+and the candidate-Mode update EMA as
+\begin{equation}
+\bar{\Delta}^{C}_{h,t}
+=\rho\bar{\Delta}^{C}_{h,t-1}+(1-\rho)\Delta^{C}_{h,t}.
+\label{eq:history-mode-ema}
+\end{equation}
+Here $\rho\in[0,1)$ is the EMA decay. The pre-decision prediction for candidate
+$h$ is $\widehat{\Delta}^{C}_{t}(h)=\bar{\Delta}^{C}_{h,t-1}$, and the history
+reference available before round $t$ is $\bar{\Delta}^{G}_{t-1}$. The proposed
+score is
+\begin{equation}
+\boxed{
+J_t(h)=
+\frac{\left\|
+\widehat{\Delta}^{C}_{t}(h)-\bar{\Delta}^{G}_{t-1}
+\right\|_2^2}
+{\left\|\bar{\Delta}^{G}_{t-1}\right\|_2^2+\varepsilon}
+}
+\label{eq:history-ema-j}
+\end{equation}
+where $\varepsilon>0$ prevents division by zero. A candidate is scored only when
+the required historical EMA states are available; missing history is reported
+as unavailable rather than replaced with an invented zero update.
+
+Cloud aggregation uses the actual sample-count weights. For Cloud submission
+units $i$, let $n_i$ be the sample count and
+\begin{equation}
+I_i=\frac{n_i}{\sum_{j\in\mathcal{C}_t}n_j},\qquad
+\widehat{\Delta}^{C}_{t}(h)=\sum_{i\in\mathcal{C}_t(h)} I_i\,
+\widehat{u}_{i,t}(h).
+\label{eq:history-cloud-sample-weights}
+\end{equation}
+The weights are not renormalized separately for each Mode when the round
+contains a mixture of Modes. In LIIEIIIC, all clients assigned to the same Edge
+form one joint Edge-to-Cloud submission unit; its weight is the sample count of
+the entire group. The number of Edge aggregation loops $E_B$ describes the
+execution procedure and is not a multiplicative contribution coefficient.
+
+In the implementation considered here, LIIE is Edge-only and does not submit
+an update to Cloud. It is therefore represented as a no-op Cloud contribution,
+not as an observed Cloud packet. Its score is available only when a historical
+global EMA exists. For LIIC, the eligible upload boundary is $L_C^{\mathrm{upd}}$;
+for LIIEIIIC, it is $L_E^{\mathrm{upd}}$. $E_C^{\mathrm{upd}}$ is not protected
+by this method. HE and aggregate-DP are outside the method and are not used to
+construct its history.
+
+The score is first evaluated in shadow mode and in historical backtests. It does
+not replace the existing \texttt{online\_upper\_bound} certificate mechanism or
+the formal Mode selector. The score is an update-deviation diagnostic; it does
+not by itself establish a monotonic relationship with test accuracy or prove a
+learning-error bound.
