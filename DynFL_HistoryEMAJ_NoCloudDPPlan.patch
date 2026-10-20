@@ -1,0 +1,74 @@
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index abe685c..58b90c3 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -2038,9 +2038,16 @@ def _run_lenet5_policy(
+                 if frozen_mode_runtime_active
+                 else round_evaluation_config
+             )
++            # History-EMA J compares the three Mode update predictions; it
++            # does not optimize Cloud DP release plans. Preserve the old
++            # Cloud-DP planner only for non-History-EMA-J objectives.
+             selected, profile_evaluation = (
+                 choose_cloud_dp_pareto_profile
+-                if policy == "full_dynfl" and effective_selection.cloud_dp_plan != "legacy"
++                if (
++                    effective_selection.learning_objective != "history_ema_j"
++                    and policy == "full_dynfl"
++                    and effective_selection.cloud_dp_plan != "legacy"
++                )
+                 else choose_global_pareto_profile
+             )(
+                 config=profile_selection_config,
+@@ -4673,8 +4680,10 @@ def _run_lenet5_policy(
+                 ),
+                 "local_packet_dp_released_noise_norm": local_dp_noise_norm,
+                 "aggregate_dp_release": int(aggregate_dp_noise_share_count > 0),
+-                "cloud_dp_plan_chosen": selection_diagnostics.get(
+-                    "selected_cloud_dp_plan", "legacy"
++                "cloud_dp_plan_chosen": (
++                    "not_applicable_history_ema_j"
++                    if effective_selection.learning_objective == "history_ema_j"
++                    else selection_diagnostics.get("selected_cloud_dp_plan", "legacy")
+                 ),
+                 # Branch-best predicted values.  These need not equal the
+                 # combined-archive winner, which is logged in its own fields.
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index b3ecf52..b2556d8 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -211,6 +211,12 @@ def build_command(
+         "seed": seed,
+         "output_root": config["output_root"],
+     }
++    # History-EMA J does not select among Cloud DP release plans. Keep the
++    # legacy CLI option available for archived experiments, but do not inject
++    # it into the new method's command line.
++    if learning.get("objective") == "history_ema_j":
++        values.pop("cloud_dp_plan", None)
++
+     for name, value in values.items():
+         if value is not None:
+             _append_value(command, name, value)
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 1259407..1523f75 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -136,6 +136,17 @@ def test_edge_only_client_dp_is_applied_before_edge_aggregation() -> None:
+     assert not torch.equal(protected["edge"]["w"], state_diff["edge"]["w"])
+ 
+ 
++def test_history_ema_j_runner_does_not_emit_cloud_dp_plan_flag() -> None:
++    root = Path(__file__).resolve().parents[1]
++    config = json.loads(
++        (root / "configs" / "history_ema_j_fmnist_lenet5.json").read_text(encoding="utf-8")
++    )
++    command = build_command(config, seed=2026, policies=["full_dynfl"], rounds=None)
++    assert "--learning-objective" in command
++    assert command[command.index("--learning-objective") + 1] == "history_ema_j"
++    assert "--cloud-dp-plan" not in command
++
++
+ def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
+     config_path = (
+         Path(__file__).resolve().parents[1]

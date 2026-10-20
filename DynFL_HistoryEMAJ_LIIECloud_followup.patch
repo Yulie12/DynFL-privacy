@@ -1,0 +1,147 @@
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index b0424db..0bc4e32 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -404,9 +404,11 @@ def candidate_link_mechanism(
+     fallback_object: str = "upd",
+ ) -> str:
+     if (
+-        candidate.mode == "LIIEIIIC" and link_id == "E_C_upd"
++        candidate.mode in {"LIIE", "LIIEIIIC"} and link_id == "E_C_upd"
+         and os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
+     ):
++        # In History-EMA J, Edge->Cloud is a real submission link but is not
++        # a DP-protection boundary for either Edge-first mode.
+         return "none"
+     if candidate.link_mechanisms and link_id in candidate.link_mechanisms:
+         return candidate.link_mechanisms[link_id]
+@@ -4872,8 +4874,12 @@ def _admitted_clients_for_profile(
+             continue
+         latency = candidate_arrival_with_switch(config, client_id, candidate, previous_choices.get(client_id))
+         edge_id = int(client_edges.get(client_id, -1))
+-        if candidate.mode in {"LIE", "LIIE"}:
++        if candidate.mode == "LIE":
+             groups.setdefault(("edge_only", edge_id), []).append((latency, client_id))
++        elif candidate.mode == "LIIE":
++            # LIIE aggregates once at Edge, then its Edge update is submitted
++            # to Cloud; it must not use the Edge-only admission path.
++            groups.setdefault(("LIIE", edge_id), []).append((latency, client_id))
+         elif candidate.mode in {"LIC", "LIIC"}:
+             groups.setdefault(("direct_cloud", -1), []).append((latency, client_id))
+         elif candidate.mode == "LIEIIC":
+@@ -6553,7 +6559,7 @@ def _estimate_candidate(
+         cloud_aggregation_payload = effective_payload(
+             "L_C_upd", _profile_object_size(config, "upd")
+         )
+-    elif mode in {"LIEIIC", "LIEIIIC", "LIIEIIIC"}:
++    elif mode in {"LIIE", "LIEIIC", "LIEIIIC", "LIIEIIIC"}:
+         cloud_aggregation_payload = effective_payload(
+             "E_C_upd", _profile_object_size(config, "upd")
+         )
+@@ -7138,8 +7144,12 @@ def _mode_link_transmissions(
+             ("C_L_upd_final_return", "upd", 1, False),
+         )
+     if mode == "LIIE":
++        history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
+         return (
+             ("L_E_upd", "upd", 1, True),
++            # Real Edge->Cloud submission; deliberately not a DP boundary.
++            ("E_C_upd", "upd", 1, not history_ema_j_enabled),
++            ("C_E_upd_final_return", "upd", 1, False),
+             ("E_L_upd_final_return", "upd", 1, False),
+         )
+     if mode == "LIIC":
+@@ -7281,8 +7291,10 @@ def _candidate_accuracy_jitter(
+ 
+ 
+ def _final_return_volume(mode: str) -> float:
++    # Edge-first modes that submit to Cloud need both Cloud->Edge and Edge->Client
++    # final-return legs. Edge-only LIE and direct-cloud LIIC need one leg.
+     return OBJECT_SIZES["upd"] * (
+-        2.0 if mode in {"LIEIIC", "LIEIIIC", "LIIEIIIC"} else 1.0
++        2.0 if mode in {"LIIE", "LIEIIC", "LIEIIIC", "LIIEIIIC"} else 1.0
+     )
+ 
+ 
+diff --git a/tests/test_history_ema_j.py b/tests/test_history_ema_j.py
+index c76560d..efccf0b 100644
+--- a/tests/test_history_ema_j.py
++++ b/tests/test_history_ema_j.py
+@@ -136,6 +136,52 @@ def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypa
+     assert {c.mode for c in candidates} <= {"LIIE", "LIIEIIIC", "LIIC"}
+ 
+ 
++
++def test_history_ema_j_liie_is_cloud_reaching_not_edge_only(monkeypatch):
++    from dynfed.selection import (
++        Candidate, SelectionConfig, OBJECT_SIZES, _admitted_clients_for_profile,
++        _final_return_volume, _mode_link_transmissions, candidate_link_mechanism,
++    )
++
++    monkeypatch.setenv("DYNFL_HISTORY_EMA_J_ENABLED", "1")
++    transmissions = _mode_link_transmissions("LIIE", local_block_cycles=1, edge_loops=1)
++    by_link = {row[0]: row for row in transmissions}
++    assert by_link["L_E_upd"][3] is True
++    assert by_link["E_C_upd"][3] is False
++    assert "C_E_upd_final_return" in by_link
++    assert "E_L_upd_final_return" in by_link
++
++    candidate = Candidate(
++        mode="LIIE", mechanisms={"upd": "dp"}, time=1.0, accuracy=0.5, risk=0.1,
++        epsilon_used=1.0, communication_volume=1.0, feasible_resource=True,
++        feasible_privacy=True, feasible_risk=True, feasible_time=True,
++        link_mechanisms={"L_E_upd": "dp", "E_C_upd": "dp"},
++    )
++    # Even if a stale candidate object contains a Cloud DP label, E->C is
++    # explicitly unprotected in the History-EMA J protocol.
++    assert candidate_link_mechanism(candidate, "E_C_upd") == "none"
++    assert _final_return_volume("LIIE") == pytest.approx(2.0 * OBJECT_SIZES["upd"])
++
++    # LIE remains Edge-only, while LIIE has its own Edge->Cloud aggregation
++    # group. With a 50% buffer fraction, neither mode should suppress the other.
++    cfg = SelectionConfig(num_clients=2, num_edges=1, aggregation_fraction=0.5)
++    lie = Candidate(
++        mode="LIE", mechanisms={}, time=0.1, accuracy=0.5, risk=0.1, epsilon_used=0.0,
++        communication_volume=1.0, feasible_resource=True, feasible_privacy=True,
++        feasible_risk=True, feasible_time=True, pre_aggregation_time=0.1,
++    )
++    profile = {
++        0: lie,
++        1: Candidate(
++            mode="LIIE", mechanisms={"upd": "dp"}, time=0.2, accuracy=0.5, risk=0.1,
++            epsilon_used=1.0, communication_volume=1.0, feasible_resource=True,
++            feasible_privacy=True, feasible_risk=True, feasible_time=True,
++            pre_aggregation_time=0.2,
++        ),
++    }
++    admitted = _admitted_clients_for_profile(cfg, profile, {0: 0, 1: 0}, {})
++    assert admitted == [0, 1]
++
+ def test_history_ema_j_is_active_selection_objective_without_certificate():
+     from dynfed.selection import (
+         Candidate, SelectionConfig, choose_global_pareto_profile, _selection_learning_cost
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 6844a0b..1259407 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -1167,7 +1167,10 @@ def test_mode_link_events_share_counts_between_budget_and_communication() -> Non
+     assert abs(candidate.communication_volume - expected_volume) < 1e-12
+ 
+ 
+-def test_dp_event_counts_match_every_tex_mode() -> None:
++def test_dp_event_counts_match_every_tex_mode(monkeypatch) -> None:
++    # Conformance is for the active History-EMA J protocol: E->C is a real
++    # transmission but not a DP boundary for Edge-first modes.
++    monkeypatch.setenv("DYNFL_HISTORY_EMA_J_ENABLED", "1")
+     expected = {
+         "LIE": {"emb": 5, "grad": 5, "upd": 0},
+         "LIC": {"emb": 5, "grad": 5, "upd": 0},
+@@ -1175,7 +1178,7 @@ def test_dp_event_counts_match_every_tex_mode() -> None:
+         "LIIC": {"emb": 0, "grad": 0, "upd": 1},
+         "LIEIIC": {"emb": 5, "grad": 5, "upd": 1},
+         "LIEIIIC": {"emb": 15, "grad": 15, "upd": 1},
+-        "LIIEIIIC": {"emb": 0, "grad": 0, "upd": 4},
++        "LIIEIIIC": {"emb": 0, "grad": 0, "upd": 3},
+     }
+ 
+     for mode, counts in expected.items():

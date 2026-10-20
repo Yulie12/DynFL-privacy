@@ -1,0 +1,324 @@
+diff --git a/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md b/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md
+index 987c1f1..ce78740 100644
+--- a/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md
++++ b/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md
+@@ -8,7 +8,7 @@
+ - 不使用 aggregate-DP。
+ - LIIC：`L_C_upd` 上传前 DP。
+ - LIIEIIIC：`L_E_upd` 上传前 DP，`E_C_upd` 不保护。
+-- LIIE：Edge-only，不虚构 Cloud 提交。
++- LIIE：Client→Edge 单次聚合→Cloud，记录真实 Edge 聚合提交。
+ - Cloud 权重使用候选 profile 中 Cloud-reaching 客户端样本量；同一 Edge 下 LIIEIIIC 客户端作为联合组，`E_B` 不作为贡献放大系数。
+ 
+ ## 验证
+diff --git a/dynfed/flow_executor.py b/dynfed/flow_executor.py
+index 662acff..541a6fe 100644
+--- a/dynfed/flow_executor.py
++++ b/dynfed/flow_executor.py
+@@ -6,9 +6,9 @@ from dataclasses import dataclass
+ from typing import Any
+ 
+ 
+-EDGE_ONLY_MODES = {"LIE", "LIIE"}
++EDGE_ONLY_MODES = {"LIE"}
+ CLOUD_DIRECT_MODES = {"LIC", "LIIC", "LIEIIC"}
+-EDGE_CLOUD_MODES = {"LIEIIIC", "LIIEIIIC"}
++EDGE_CLOUD_MODES = {"LIIE", "LIEIIIC", "LIIEIIIC"}
+ MULTI_EDGE_LOOP_MODES = {"LIEIIIC", "LIIEIIIC"}
+ 
+ 
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index 3651459..abe685c 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -4056,8 +4056,8 @@ def _run_lenet5_policy(
+             history_rows: list[dict[str, Any]] = []
+             prior_global_ema = None if history_j.global_ema is None else history_j.global_ema.clone()
+             selected_modes = {cand.mode for _cid, cand, _pool, _rem in selected}
+-            # Build sample-weighted per-Mode observed Cloud contributions. LIIE is
+-            # Edge-only and intentionally has no Cloud packet in this implementation.
++            # Build sample-weighted per-Mode observed Cloud contributions. LIIE
++            # contributes its once-aggregated Edge update through E->C.
+             mode_parts: dict[str, list[tuple[torch.Tensor, float]]] = {}
+             mode_reasons: dict[str, str] = {}
+             packet_dp_indices_for_history_j = {idx for idx, _std, _seed in local_dp_pending_components}
+@@ -4072,7 +4072,7 @@ def _run_lenet5_policy(
+             )
+             for cloud_idx, (state_diff, sample_count, candidate, _client_ids) in enumerate(cloud_updates):
+                 mode = candidate.mode if candidate is not None else "UNKNOWN"
+-                if mode not in {"LIIC", "LIIEIIIC"}:
++                if mode not in {"LIIE", "LIIC", "LIIEIIIC"}:
+                     global_eligible = False
+                     global_reason = f"unsupported Cloud contributor Mode: {mode}"
+                     continue
+@@ -4094,12 +4094,12 @@ def _run_lenet5_policy(
+                     ec_mechanism = _candidate_cloud_update_mechanism(candidate)
+                     if mechanism_uses_dp(ec_mechanism) or mechanism_uses_he(ec_mechanism):
+                         global_eligible = False
+-                        global_reason = "LIIEIIIC E_C_upd must be unprotected and HE-free for this method"
++                        global_reason = f"{mode} E_C_upd must be unprotected and HE-free for this method"
+                         mode_reasons[mode] = global_reason
+                         continue
+                     if not mechanism_uses_dp(upload_mechanism):
+                         global_eligible = False
+-                        global_reason = "LIIEIIIC L_E_upd was not configured for DP protection"
++                        global_reason = f"{mode} L_E_upd was not configured for DP protection"
+                         mode_reasons[mode] = global_reason
+                         continue
+                 if candidate_has_he(candidate):
+@@ -4141,18 +4141,6 @@ def _run_lenet5_policy(
+             # Score observed Mode outputs against the *pre-round* global EMA for
+             # retrospective calibration, then update the EMA state.
+             for mode in TARGET_MODES:
+-                if mode == "LIIE":
+-                    if mode in selected_modes and prior_global_ema is not None:
+-                        no_op = torch.zeros_like(prior_global_ema)
+-                        history_rows.append({
+-                            "event": "realized_j", "round_index": int(round_idx),
+-                            "mode": mode, "status": "no_cloud_submission_zero_contribution",
+-                            "selected_mode_mix": len(selected_modes - {"SKIP"}) > 1,
+-                            "predicted_j": next((r.get("predicted_j") for r in history_j_predictions if r["mode"] == mode), None),
+-                            "observed_j": normalized_squared_deviation(no_op, prior_global_ema, history_j.eps),
+-                            "reference_global_ema_norm": float(torch.linalg.vector_norm(prior_global_ema).item()),
+-                        })
+-                    continue
+                 if mode in mode_contributions_for_history_j and prior_global_ema is not None:
+                     observed_vec = flatten_update(mode_contributions_for_history_j[mode])
+                     history_rows.append({
+diff --git a/dynfed/history_ema_j.py b/dynfed/history_ema_j.py
+index 926f5c4..1ca6cd2 100644
+--- a/dynfed/history_ema_j.py
++++ b/dynfed/history_ema_j.py
+@@ -93,17 +93,6 @@ class HistoryEMAJ:
+             return {"mode": mode, "status": "unsupported_mode", "predicted_j": None}
+         if self.global_ema is None:
+             return {"mode": mode, "status": "no_global_history", "predicted_j": None}
+-        # LIIE is Edge-only in this repository: no Cloud submission means a
+-        # zero Cloud contribution, not a fabricated Cloud packet.
+-        if mode == "LIIE":
+-            candidate = torch.zeros_like(self.global_ema)
+-            return {
+-                "mode": mode, "status": "no_cloud_submission_zero_contribution",
+-                "predicted_j": normalized_squared_deviation(candidate, self.global_ema, self.eps),
+-                "predicted_update_norm": 0.0,
+-                "global_ema_norm": float(torch.linalg.vector_norm(self.global_ema).item()),
+-                "mode_history_updates": 0,
+-            }
+         candidate = self.mode_ema.get(mode)
+         if candidate is None:
+             return {"mode": mode, "status": "no_mode_history", "predicted_j": None}
+@@ -122,12 +111,12 @@ class HistoryEMAJ:
+ 
+         Per-Mode EMA vectors represent the sample-weighted mean Cloud update
+         observed for that Mode. The candidate profile mixes those vectors using
+-        the candidate's Cloud-reaching sample mass. LIIE contributes no Cloud
+-        update and is therefore excluded from the Cloud denominator.
++        the candidate's Cloud-reaching sample mass. LIIE is an Edge-first mode
++        and its once-aggregated Edge update is included in Cloud sample mass.
+         """
+         if self.global_ema is None:
+             return 0.0, "history_ema_j_warmup_no_global_history"
+-        mode_mass: dict[str, float] = {"LIIEIIIC": 0.0, "LIIC": 0.0}
++        mode_mass: dict[str, float] = {"LIIE": 0.0, "LIIEIIIC": 0.0, "LIIC": 0.0}
+         for client_id, mode in profile_modes.items():
+             if mode not in mode_mass:
+                 continue
+@@ -166,11 +155,11 @@ class HistoryEMAJ:
+         `mode_updates` contains per-Mode sample-weighted mean Cloud updates
+         formed by the caller from actual Cloud submission units. Candidate-profile
+         prediction later combines these means using the candidate's sample mass.
+-        LIIE has no Cloud contribution and does not appear in this mapping.
++        LIIE contributes its once-aggregated Edge update to Cloud and appears in this mapping.
+         """
+         rows: list[dict[str, Any]] = []
+         for mode, update in mode_updates.items():
+-            if mode not in {"LIIEIIIC", "LIIC"}:
++            if mode not in {"LIIE", "LIIEIIIC", "LIIC"}:
+                 continue
+             vec = flatten_update(update)
+             self.mode_ema[mode] = self._ema(self.mode_ema.get(mode), vec)
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index 28ab824..b0424db 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -1259,8 +1259,8 @@ def enumerate_candidates(
+                 continue
+         if config.strict_pair_admission:
+             # Legacy V370 keeps its prior gates; online objective uses added guards.
+-            # LIIE is No-Split Edge-only and requires a predeclared fast
+-            # client with a deadline. Neither gains trust/DP by this gate.
++            # LIIE is No-Split Edge-first and submits its Edge aggregate to Cloud;
++            # a predeclared fast client deadline is still required by this legacy gate.
+             if mode == "LIIE" and fast_response_deadline is None:
+                 audit_exclusions[mode] = "fast_response_not_required"
+                 continue
+@@ -3677,8 +3677,8 @@ def _history_ema_j_profile_cost(
+         return 0.0, "history_ema_j_warmup_no_state"
+     if history.global_ema is None:
+         return 0.0, "history_ema_j_warmup_no_global_history"
+-    if any(mode not in history.mode_ema for mode in ("LIIC", "LIIEIIIC")):
+-        return 0.0, "history_ema_j_warmup_need_both_cloud_modes"
++    if any(mode not in history.mode_ema for mode in ("LIIE", "LIIC", "LIIEIIIC")):
++        return 0.0, "history_ema_j_warmup_need_all_three_cloud_modes"
+     admitted = set(admitted_client_ids)
+     modes = {
+         client_id: (candidate.mode if client_id in admitted else "SKIP")
+@@ -5533,19 +5533,28 @@ def _aggregation_sizes(
+     admitted_client_ids: list[int] | tuple[int, ...] | None = None,
+ ) -> dict[int, int]:
+     admitted = set(profile) if admitted_client_ids is None else set(admitted_client_ids)
++    # DP cohort size is determined by the protected upload boundary, not by
++    # whether the resulting Edge aggregate later reaches Cloud. LIIE protects
++    # each L->E update and therefore uses its Edge cohort size for the variance
++    # proxy even though its Edge aggregate is submitted to Cloud afterwards.
+     cloud_count = sum(
+         1
+         for client_id, item in profile.items()
+-        if client_id in admitted and _candidate_reaches_cloud(item)
++        if client_id in admitted and _candidate_reaches_cloud(item) and item.mode != "LIIE"
+     )
+     edge_counts: dict[int, int] = {}
+     for client_id, candidate in profile.items():
+-        if client_id not in admitted or _candidate_reaches_cloud(candidate):
++        if client_id not in admitted or (_candidate_reaches_cloud(candidate) and candidate.mode != "LIIE"):
+             continue
+         edge_id = client_edges.get(client_id, -1)
+         edge_counts[edge_id] = edge_counts.get(edge_id, 0) + 1
+     return {
+-        client_id: max(cloud_count if _candidate_reaches_cloud(candidate) else edge_counts.get(client_edges.get(client_id, -1), 1), 1)
++        client_id: max(
++            edge_counts.get(client_edges.get(client_id, -1), 1)
++            if candidate.mode == "LIIE" or not _candidate_reaches_cloud(candidate)
++            else cloud_count,
++            1,
++        )
+         for client_id, candidate in profile.items()
+     }
+ 
+diff --git a/dynfed/training.py b/dynfed/training.py
+index 603b107..c59b4b2 100644
+--- a/dynfed/training.py
++++ b/dynfed/training.py
+@@ -14,7 +14,7 @@ from .privacy import OBJECT_SIZES, privacy_processing_time, protected_size, util
+ 
+ 
+ DIRECT_CLOUD_MODES = {"LIC", "LIIC", "LIEIIC"}
+-EDGE_ONLY_MODES = {"LIE", "LIIE"}
++EDGE_ONLY_MODES = {"LIE"}
+ MULTILEVEL_MODES = {"LIEIIIC", "LIIEIIIC"}
+ 
+ 
+@@ -39,8 +39,8 @@ MODE_SPECS = {
+     # Edge-only (data lost to global model → highest global penalty)
+     # Split modes keep labels local and exchange embeddings, logits, and gradients.
+     "LIE": ModeSpec("LIE", "edge", ["emb", "logits", "grad", "emb_grad"], [], 1.0, 0.35, 0.0, 0.17, alpha=6, edge_cpu=4, cloud_cpu=0, local_memory=0.72),
+-    # LIIE (edge-only, upd): SpeedTask in visualization (α=2)
+-    "LIIE": ModeSpec("LIIE", "edge", ["upd"], [], 1.15, 0.25, 0.0, 0.15, alpha=2, edge_cpu=4, cloud_cpu=0, local_memory=1.20),
++    # LIIE / FL_E: client updates are protected on L->E, aggregated once at Edge, then submitted to Cloud.
++    "LIIE": ModeSpec("LIIE", "edge", ["upd"], ["upd"], 1.15, 0.25, 0.42, 0.15, alpha=2, edge_cpu=4, cloud_cpu=1, local_memory=1.20),
+     # LIC (cloud-direct, emb+label+grad): SuperTask in visualization (α=6)
+     "LIC": ModeSpec("LIC", "cloud", ["emb", "logits", "grad", "emb_grad"], [], 1.0, 0.0, 0.75, 0.025, alpha=6, edge_cpu=0, cloud_cpu=4, local_memory=0.68),
+     # LIIC (cloud-direct, upd): No-Split in visualization (α=4)
+diff --git a/tests/test_history_ema_j.py b/tests/test_history_ema_j.py
+index 1930177..c76560d 100644
+--- a/tests/test_history_ema_j.py
++++ b/tests/test_history_ema_j.py
+@@ -28,23 +28,27 @@ def test_history_ema_j_prediction_and_observation_update():
+     assert history.predict("LIIC")["status"] == "ok"
+     assert history.predict("LIIEIIIC")["status"] == "ok"
+     liie = history.predict("LIIE")
+-    assert liie["status"] == "no_cloud_submission_zero_contribution"
+-    assert liie["predicted_j"] == pytest.approx(1.0)
++    assert liie["status"] == "no_mode_history"
++    history.observe(
++        round_index=1, global_update=[1.0, 1.0],
++        mode_updates={"LIIE": [1.0, 0.0]}, global_history_eligible=True,
++    )
++    assert history.predict("LIIE")["status"] == "ok"
+ 
+ 
+-def test_profile_j_uses_cloud_sample_mass_and_excludes_liie():
++def test_profile_j_uses_cloud_sample_mass_including_liie_edge_cloud_update():
+     history = HistoryEMAJ(decay=0.5)
+     history.observe(
+         round_index=0, global_update=[1.0, 1.0],
+-        mode_updates={"LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
++        mode_updates={"LIIE": [0.0, 1.0], "LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
+         global_history_eligible=True,
+     )
+-    # A 3:1 sample-mass split between LIIC and LIIEIIIC gives [0.75, 0.25].
++    # LIIE now reaches Cloud, so its sample mass participates in the profile.
+     score, source = history.predict_profile_j(
+         {0: "LIIC", 1: "LIIC", 2: "LIIC", 3: "LIIEIIIC", 4: "LIIE"},
+         {0: 100, 1: 100, 2: 100, 3: 100, 4: 100},
+     )
+-    expected = normalized_squared_deviation([0.75, 0.25], history.global_ema)
++    expected = normalized_squared_deviation([0.6, 0.4], history.global_ema)
+     assert source == "history_ema_j"
+     assert score == pytest.approx(expected)
+ 
+@@ -140,7 +144,7 @@ def test_history_ema_j_is_active_selection_objective_without_certificate():
+     history = HistoryEMAJ(decay=0.5)
+     history.observe(
+         round_index=0, global_update=[1.0, 1.0],
+-        mode_updates={"LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
++        mode_updates={"LIIE": [0.0, 1.0], "LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
+         global_history_eligible=True,
+     )
+     cfg = SelectionConfig(
+diff --git a/tests/test_paper_conformance.py b/tests/test_paper_conformance.py
+index 4f6b0d9..6844a0b 100644
+--- a/tests/test_paper_conformance.py
++++ b/tests/test_paper_conformance.py
+@@ -80,6 +80,33 @@ from dynfed.privacy import OBJECT_SIZES, PRIVACY_ALPHA
+ from experiments.run_paper_config import build_command
+ 
+ 
++
++def test_liie_edge_first_mode_submits_edge_aggregate_to_cloud():
++    from dynfed.flow_executor import EDGE_CLOUD_MODES, EDGE_ONLY_MODES
++    from dynfed.training import MODE_SPECS
++
++    assert "LIIE" not in EDGE_ONLY_MODES
++    assert "LIIE" in EDGE_CLOUD_MODES
++    assert MODE_SPECS["LIIE"].edge_to_cloud_objects == ["upd"]
++    assert MODE_SPECS["LIIE"].cloud_work > 0
++
++    result = execute_mixed_round_flow(
++        round_idx=1,
++        clients=[ClientFlowInput(
++            client_id=101, edge_id=3, mode="LIIE", candidate_time=1.0,
++            estimated_local_time=1.0, measured_local_time=1.0,
++            communication_volume=1.0, state_diff={"w": 1.0}, sample_count=10,
++            edge_loops=1, edge_to_cloud_time=0.2, edge_aggregation_payload=1.0,
++            cloud_aggregation_payload=1.0, aggregation_group="liie-edge-3",
++        )],
++        aggregation_fraction=1.0, edge_aggregation_beta=0.1,
++        edge_aggregation_fixed=0.1, cloud_aggregation_beta=0.1,
++        cloud_aggregation_fixed=0.1,
++    )
++    assert result.selected_client_ids == [101]
++    assert result.cloud_aggregation_time > 0
++    assert any(event.get("event_type") == "cloud_aggregate_round" for event in result.flow_events)
++
+ def test_edge_only_client_dp_is_applied_before_edge_aggregation() -> None:
+     from dynfed.fmnist_lenet5_dynamic import _protect_edge_only_client_update_dp
+ 
+@@ -324,7 +351,7 @@ def test_cloud_round_fuses_direct_and_interface_iii_contributions_once() -> None
+ def test_all_mode_topologies_use_the_tex_aggregation_endpoints() -> None:
+     expected = {
+         "LIE": {"edge_aggregate"},
+-        "LIIE": {"edge_aggregate"},
++        "LIIE": {"edge_aggregate", "cloud_aggregate_round"},
+         "LIC": {"cloud_aggregate_round"},
+         "LIIC": {"cloud_aggregate_round"},
+         "LIEIIC": {"cloud_aggregate_round"},
+@@ -1659,7 +1686,7 @@ def test_cloud_mode_synchronizes_global_while_edge_mode_keeps_returned_state() -
+     )
+ 
+     torch.testing.assert_close(cloud_base["end"][first_name], global_end.state_dict()[first_name])
+-    torch.testing.assert_close(edge_base["end"][first_name], returned_state["end"][first_name])
++    torch.testing.assert_close(edge_base["end"][first_name], global_end.state_dict()[first_name])
+     torch.testing.assert_close(
+         continued_edge_base["end"][first_name],
+         returned_state["end"][first_name],

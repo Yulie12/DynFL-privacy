@@ -80,6 +80,33 @@ from dynfed.privacy import OBJECT_SIZES, PRIVACY_ALPHA
 from experiments.run_paper_config import build_command
 
 
+
+def test_liie_edge_first_mode_submits_edge_aggregate_to_cloud():
+    from dynfed.flow_executor import EDGE_CLOUD_MODES, EDGE_ONLY_MODES
+    from dynfed.training import MODE_SPECS
+
+    assert "LIIE" not in EDGE_ONLY_MODES
+    assert "LIIE" in EDGE_CLOUD_MODES
+    assert MODE_SPECS["LIIE"].edge_to_cloud_objects == ["upd"]
+    assert MODE_SPECS["LIIE"].cloud_work > 0
+
+    result = execute_mixed_round_flow(
+        round_idx=1,
+        clients=[ClientFlowInput(
+            client_id=101, edge_id=3, mode="LIIE", candidate_time=1.0,
+            estimated_local_time=1.0, measured_local_time=1.0,
+            communication_volume=1.0, state_diff={"w": 1.0}, sample_count=10,
+            edge_loops=1, edge_to_cloud_time=0.2, edge_aggregation_payload=1.0,
+            cloud_aggregation_payload=1.0, aggregation_group="liie-edge-3",
+        )],
+        aggregation_fraction=1.0, edge_aggregation_beta=0.1,
+        edge_aggregation_fixed=0.1, cloud_aggregation_beta=0.1,
+        cloud_aggregation_fixed=0.1,
+    )
+    assert result.selected_client_ids == [101]
+    assert result.cloud_aggregation_time > 0
+    assert any(event.get("event_type") == "cloud_aggregate_round" for event in result.flow_events)
+
 def test_edge_only_client_dp_is_applied_before_edge_aggregation() -> None:
     from dynfed.fmnist_lenet5_dynamic import _protect_edge_only_client_update_dp
 
@@ -107,6 +134,17 @@ def test_edge_only_client_dp_is_applied_before_edge_aggregation() -> None:
     assert audit["mechanism"] == "dp"
     assert not torch.equal(protected["end"]["w"], state_diff["end"]["w"])
     assert not torch.equal(protected["edge"]["w"], state_diff["edge"]["w"])
+
+
+def test_history_ema_j_runner_does_not_emit_cloud_dp_plan_flag() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = json.loads(
+        (root / "configs" / "history_ema_j_fmnist_lenet5.json").read_text(encoding="utf-8")
+    )
+    command = build_command(config, seed=2026, policies=["full_dynfl"], rounds=None)
+    assert "--learning-objective" in command
+    assert command[command.index("--learning-objective") + 1] == "history_ema_j"
+    assert "--cloud-dp-plan" not in command
 
 
 def test_paper_smoke_limit_does_not_change_rdp_round_horizon() -> None:
@@ -324,7 +362,7 @@ def test_cloud_round_fuses_direct_and_interface_iii_contributions_once() -> None
 def test_all_mode_topologies_use_the_tex_aggregation_endpoints() -> None:
     expected = {
         "LIE": {"edge_aggregate"},
-        "LIIE": {"edge_aggregate"},
+        "LIIE": {"edge_aggregate", "cloud_aggregate_round"},
         "LIC": {"cloud_aggregate_round"},
         "LIIC": {"cloud_aggregate_round"},
         "LIEIIC": {"cloud_aggregate_round"},
@@ -1140,7 +1178,10 @@ def test_mode_link_events_share_counts_between_budget_and_communication() -> Non
     assert abs(candidate.communication_volume - expected_volume) < 1e-12
 
 
-def test_dp_event_counts_match_every_tex_mode() -> None:
+def test_dp_event_counts_match_every_tex_mode(monkeypatch) -> None:
+    # Conformance is for the active History-EMA J protocol: E->C is a real
+    # transmission but not a DP boundary for Edge-first modes.
+    monkeypatch.setenv("DYNFL_HISTORY_EMA_J_ENABLED", "1")
     expected = {
         "LIE": {"emb": 5, "grad": 5, "upd": 0},
         "LIC": {"emb": 5, "grad": 5, "upd": 0},
@@ -1148,7 +1189,7 @@ def test_dp_event_counts_match_every_tex_mode() -> None:
         "LIIC": {"emb": 0, "grad": 0, "upd": 1},
         "LIEIIC": {"emb": 5, "grad": 5, "upd": 1},
         "LIEIIIC": {"emb": 15, "grad": 15, "upd": 1},
-        "LIIEIIIC": {"emb": 0, "grad": 0, "upd": 4},
+        "LIIEIIIC": {"emb": 0, "grad": 0, "upd": 3},
     }
 
     for mode, counts in expected.items():
@@ -1659,7 +1700,7 @@ def test_cloud_mode_synchronizes_global_while_edge_mode_keeps_returned_state() -
     )
 
     torch.testing.assert_close(cloud_base["end"][first_name], global_end.state_dict()[first_name])
-    torch.testing.assert_close(edge_base["end"][first_name], returned_state["end"][first_name])
+    torch.testing.assert_close(edge_base["end"][first_name], global_end.state_dict()[first_name])
     torch.testing.assert_close(
         continued_edge_base["end"][first_name],
         returned_state["end"][first_name],

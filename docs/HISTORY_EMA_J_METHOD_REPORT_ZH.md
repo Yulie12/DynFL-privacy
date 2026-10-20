@@ -8,7 +8,7 @@
 - 不使用 aggregate-DP。
 - LIIC：`L_C_upd` 上传前 DP。
 - LIIEIIIC：`L_E_upd` 上传前 DP，`E_C_upd` 不保护。
-- LIIE：Edge-only，不虚构 Cloud 提交。
+- LIIE：Client→Edge 单次聚合→Cloud，记录真实 Edge 聚合提交。
 - Cloud 权重使用候选 profile 中 Cloud-reaching 客户端样本量；同一 Edge 下 LIIEIIIC 客户端作为联合组，`E_B` 不作为贡献放大系数。
 
 ## 验证

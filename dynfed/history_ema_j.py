@@ -93,17 +93,6 @@ class HistoryEMAJ:
             return {"mode": mode, "status": "unsupported_mode", "predicted_j": None}
         if self.global_ema is None:
             return {"mode": mode, "status": "no_global_history", "predicted_j": None}
-        # LIIE is Edge-only in this repository: no Cloud submission means a
-        # zero Cloud contribution, not a fabricated Cloud packet.
-        if mode == "LIIE":
-            candidate = torch.zeros_like(self.global_ema)
-            return {
-                "mode": mode, "status": "no_cloud_submission_zero_contribution",
-                "predicted_j": normalized_squared_deviation(candidate, self.global_ema, self.eps),
-                "predicted_update_norm": 0.0,
-                "global_ema_norm": float(torch.linalg.vector_norm(self.global_ema).item()),
-                "mode_history_updates": 0,
-            }
         candidate = self.mode_ema.get(mode)
         if candidate is None:
             return {"mode": mode, "status": "no_mode_history", "predicted_j": None}
@@ -122,12 +111,12 @@ class HistoryEMAJ:
 
         Per-Mode EMA vectors represent the sample-weighted mean Cloud update
         observed for that Mode. The candidate profile mixes those vectors using
-        the candidate's Cloud-reaching sample mass. LIIE contributes no Cloud
-        update and is therefore excluded from the Cloud denominator.
+        the candidate's Cloud-reaching sample mass. LIIE is an Edge-first mode
+        and its once-aggregated Edge update is included in Cloud sample mass.
         """
         if self.global_ema is None:
             return 0.0, "history_ema_j_warmup_no_global_history"
-        mode_mass: dict[str, float] = {"LIIEIIIC": 0.0, "LIIC": 0.0}
+        mode_mass: dict[str, float] = {"LIIE": 0.0, "LIIEIIIC": 0.0, "LIIC": 0.0}
         for client_id, mode in profile_modes.items():
             if mode not in mode_mass:
                 continue
@@ -166,11 +155,11 @@ class HistoryEMAJ:
         `mode_updates` contains per-Mode sample-weighted mean Cloud updates
         formed by the caller from actual Cloud submission units. Candidate-profile
         prediction later combines these means using the candidate's sample mass.
-        LIIE has no Cloud contribution and does not appear in this mapping.
+        LIIE contributes its once-aggregated Edge update to Cloud and appears in this mapping.
         """
         rows: list[dict[str, Any]] = []
         for mode, update in mode_updates.items():
-            if mode not in {"LIIEIIIC", "LIIC"}:
+            if mode not in {"LIIE", "LIIEIIIC", "LIIC"}:
                 continue
             vec = flatten_update(update)
             self.mode_ema[mode] = self._ema(self.mode_ema.get(mode), vec)

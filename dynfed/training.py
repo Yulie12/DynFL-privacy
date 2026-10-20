@@ -14,7 +14,7 @@ from .privacy import OBJECT_SIZES, privacy_processing_time, protected_size, util
 
 
 DIRECT_CLOUD_MODES = {"LIC", "LIIC", "LIEIIC"}
-EDGE_ONLY_MODES = {"LIE", "LIIE"}
+EDGE_ONLY_MODES = {"LIE"}
 MULTILEVEL_MODES = {"LIEIIIC", "LIIEIIIC"}
 
 
@@ -39,8 +39,8 @@ MODE_SPECS = {
     # Edge-only (data lost to global model → highest global penalty)
     # Split modes keep labels local and exchange embeddings, logits, and gradients.
     "LIE": ModeSpec("LIE", "edge", ["emb", "logits", "grad", "emb_grad"], [], 1.0, 0.35, 0.0, 0.17, alpha=6, edge_cpu=4, cloud_cpu=0, local_memory=0.72),
-    # LIIE (edge-only, upd): SpeedTask in visualization (α=2)
-    "LIIE": ModeSpec("LIIE", "edge", ["upd"], [], 1.15, 0.25, 0.0, 0.15, alpha=2, edge_cpu=4, cloud_cpu=0, local_memory=1.20),
+    # LIIE / FL_E: client updates are protected on L->E, aggregated once at Edge, then submitted to Cloud.
+    "LIIE": ModeSpec("LIIE", "edge", ["upd"], ["upd"], 1.15, 0.25, 0.42, 0.15, alpha=2, edge_cpu=4, cloud_cpu=1, local_memory=1.20),
     # LIC (cloud-direct, emb+label+grad): SuperTask in visualization (α=6)
     "LIC": ModeSpec("LIC", "cloud", ["emb", "logits", "grad", "emb_grad"], [], 1.0, 0.0, 0.75, 0.025, alpha=6, edge_cpu=0, cloud_cpu=4, local_memory=0.68),
     # LIIC (cloud-direct, upd): No-Split in visualization (α=4)

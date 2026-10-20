@@ -404,9 +404,11 @@ def candidate_link_mechanism(
     fallback_object: str = "upd",
 ) -> str:
     if (
-        candidate.mode == "LIIEIIIC" and link_id == "E_C_upd"
+        candidate.mode in {"LIIE", "LIIEIIIC"} and link_id == "E_C_upd"
         and os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
     ):
+        # In History-EMA J, Edge->Cloud is a real submission link but is not
+        # a DP-protection boundary for either Edge-first mode.
         return "none"
     if candidate.link_mechanisms and link_id in candidate.link_mechanisms:
         return candidate.link_mechanisms[link_id]
@@ -1259,8 +1261,8 @@ def enumerate_candidates(
                 continue
         if config.strict_pair_admission:
             # Legacy V370 keeps its prior gates; online objective uses added guards.
-            # LIIE is No-Split Edge-only and requires a predeclared fast
-            # client with a deadline. Neither gains trust/DP by this gate.
+            # LIIE is No-Split Edge-first and submits its Edge aggregate to Cloud;
+            # a predeclared fast client deadline is still required by this legacy gate.
             if mode == "LIIE" and fast_response_deadline is None:
                 audit_exclusions[mode] = "fast_response_not_required"
                 continue
@@ -3677,8 +3679,8 @@ def _history_ema_j_profile_cost(
         return 0.0, "history_ema_j_warmup_no_state"
     if history.global_ema is None:
         return 0.0, "history_ema_j_warmup_no_global_history"
-    if any(mode not in history.mode_ema for mode in ("LIIC", "LIIEIIIC")):
-        return 0.0, "history_ema_j_warmup_need_both_cloud_modes"
+    if any(mode not in history.mode_ema for mode in ("LIIE", "LIIC", "LIIEIIIC")):
+        return 0.0, "history_ema_j_warmup_need_all_three_cloud_modes"
     admitted = set(admitted_client_ids)
     modes = {
         client_id: (candidate.mode if client_id in admitted else "SKIP")
@@ -4872,8 +4874,12 @@ def _admitted_clients_for_profile(
             continue
         latency = candidate_arrival_with_switch(config, client_id, candidate, previous_choices.get(client_id))
         edge_id = int(client_edges.get(client_id, -1))
-        if candidate.mode in {"LIE", "LIIE"}:
+        if candidate.mode == "LIE":
             groups.setdefault(("edge_only", edge_id), []).append((latency, client_id))
+        elif candidate.mode == "LIIE":
+            # LIIE aggregates once at Edge, then its Edge update is submitted
+            # to Cloud; it must not use the Edge-only admission path.
+            groups.setdefault(("LIIE", edge_id), []).append((latency, client_id))
         elif candidate.mode in {"LIC", "LIIC"}:
             groups.setdefault(("direct_cloud", -1), []).append((latency, client_id))
         elif candidate.mode == "LIEIIC":
@@ -5533,19 +5539,28 @@ def _aggregation_sizes(
     admitted_client_ids: list[int] | tuple[int, ...] | None = None,
 ) -> dict[int, int]:
     admitted = set(profile) if admitted_client_ids is None else set(admitted_client_ids)
+    # DP cohort size is determined by the protected upload boundary, not by
+    # whether the resulting Edge aggregate later reaches Cloud. LIIE protects
+    # each L->E update and therefore uses its Edge cohort size for the variance
+    # proxy even though its Edge aggregate is submitted to Cloud afterwards.
     cloud_count = sum(
         1
         for client_id, item in profile.items()
-        if client_id in admitted and _candidate_reaches_cloud(item)
+        if client_id in admitted and _candidate_reaches_cloud(item) and item.mode != "LIIE"
     )
     edge_counts: dict[int, int] = {}
     for client_id, candidate in profile.items():
-        if client_id not in admitted or _candidate_reaches_cloud(candidate):
+        if client_id not in admitted or (_candidate_reaches_cloud(candidate) and candidate.mode != "LIIE"):
             continue
         edge_id = client_edges.get(client_id, -1)
         edge_counts[edge_id] = edge_counts.get(edge_id, 0) + 1
     return {
-        client_id: max(cloud_count if _candidate_reaches_cloud(candidate) else edge_counts.get(client_edges.get(client_id, -1), 1), 1)
+        client_id: max(
+            edge_counts.get(client_edges.get(client_id, -1), 1)
+            if candidate.mode == "LIIE" or not _candidate_reaches_cloud(candidate)
+            else cloud_count,
+            1,
+        )
         for client_id, candidate in profile.items()
     }
 
@@ -6544,7 +6559,7 @@ def _estimate_candidate(
         cloud_aggregation_payload = effective_payload(
             "L_C_upd", _profile_object_size(config, "upd")
         )
-    elif mode in {"LIEIIC", "LIEIIIC", "LIIEIIIC"}:
+    elif mode in {"LIIE", "LIEIIC", "LIEIIIC", "LIIEIIIC"}:
         cloud_aggregation_payload = effective_payload(
             "E_C_upd", _profile_object_size(config, "upd")
         )
@@ -7129,8 +7144,12 @@ def _mode_link_transmissions(
             ("C_L_upd_final_return", "upd", 1, False),
         )
     if mode == "LIIE":
+        history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
         return (
             ("L_E_upd", "upd", 1, True),
+            # Real Edge->Cloud submission; deliberately not a DP boundary.
+            ("E_C_upd", "upd", 1, not history_ema_j_enabled),
+            ("C_E_upd_final_return", "upd", 1, False),
             ("E_L_upd_final_return", "upd", 1, False),
         )
     if mode == "LIIC":
@@ -7272,8 +7291,10 @@ def _candidate_accuracy_jitter(
 
 
 def _final_return_volume(mode: str) -> float:
+    # Edge-first modes that submit to Cloud need both Cloud->Edge and Edge->Client
+    # final-return legs. Edge-only LIE and direct-cloud LIIC need one leg.
     return OBJECT_SIZES["upd"] * (
-        2.0 if mode in {"LIEIIC", "LIEIIIC", "LIIEIIIC"} else 1.0
+        2.0 if mode in {"LIIE", "LIEIIC", "LIEIIIC", "LIIEIIIC"} else 1.0
     )
 
 

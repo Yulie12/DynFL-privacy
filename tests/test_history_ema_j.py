@@ -28,23 +28,27 @@ def test_history_ema_j_prediction_and_observation_update():
     assert history.predict("LIIC")["status"] == "ok"
     assert history.predict("LIIEIIIC")["status"] == "ok"
     liie = history.predict("LIIE")
-    assert liie["status"] == "no_cloud_submission_zero_contribution"
-    assert liie["predicted_j"] == pytest.approx(1.0)
+    assert liie["status"] == "no_mode_history"
+    history.observe(
+        round_index=1, global_update=[1.0, 1.0],
+        mode_updates={"LIIE": [1.0, 0.0]}, global_history_eligible=True,
+    )
+    assert history.predict("LIIE")["status"] == "ok"
 
 
-def test_profile_j_uses_cloud_sample_mass_and_excludes_liie():
+def test_profile_j_uses_cloud_sample_mass_including_liie_edge_cloud_update():
     history = HistoryEMAJ(decay=0.5)
     history.observe(
         round_index=0, global_update=[1.0, 1.0],
-        mode_updates={"LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
+        mode_updates={"LIIE": [0.0, 1.0], "LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
         global_history_eligible=True,
     )
-    # A 3:1 sample-mass split between LIIC and LIIEIIIC gives [0.75, 0.25].
+    # LIIE now reaches Cloud, so its sample mass participates in the profile.
     score, source = history.predict_profile_j(
         {0: "LIIC", 1: "LIIC", 2: "LIIC", 3: "LIIEIIIC", 4: "LIIE"},
         {0: 100, 1: 100, 2: 100, 3: 100, 4: 100},
     )
-    expected = normalized_squared_deviation([0.75, 0.25], history.global_ema)
+    expected = normalized_squared_deviation([0.6, 0.4], history.global_ema)
     assert source == "history_ema_j"
     assert score == pytest.approx(expected)
 
@@ -132,6 +136,52 @@ def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypa
     assert {c.mode for c in candidates} <= {"LIIE", "LIIEIIIC", "LIIC"}
 
 
+
+def test_history_ema_j_liie_is_cloud_reaching_not_edge_only(monkeypatch):
+    from dynfed.selection import (
+        Candidate, SelectionConfig, OBJECT_SIZES, _admitted_clients_for_profile,
+        _final_return_volume, _mode_link_transmissions, candidate_link_mechanism,
+    )
+
+    monkeypatch.setenv("DYNFL_HISTORY_EMA_J_ENABLED", "1")
+    transmissions = _mode_link_transmissions("LIIE", local_block_cycles=1, edge_loops=1)
+    by_link = {row[0]: row for row in transmissions}
+    assert by_link["L_E_upd"][3] is True
+    assert by_link["E_C_upd"][3] is False
+    assert "C_E_upd_final_return" in by_link
+    assert "E_L_upd_final_return" in by_link
+
+    candidate = Candidate(
+        mode="LIIE", mechanisms={"upd": "dp"}, time=1.0, accuracy=0.5, risk=0.1,
+        epsilon_used=1.0, communication_volume=1.0, feasible_resource=True,
+        feasible_privacy=True, feasible_risk=True, feasible_time=True,
+        link_mechanisms={"L_E_upd": "dp", "E_C_upd": "dp"},
+    )
+    # Even if a stale candidate object contains a Cloud DP label, E->C is
+    # explicitly unprotected in the History-EMA J protocol.
+    assert candidate_link_mechanism(candidate, "E_C_upd") == "none"
+    assert _final_return_volume("LIIE") == pytest.approx(2.0 * OBJECT_SIZES["upd"])
+
+    # LIE remains Edge-only, while LIIE has its own Edge->Cloud aggregation
+    # group. With a 50% buffer fraction, neither mode should suppress the other.
+    cfg = SelectionConfig(num_clients=2, num_edges=1, aggregation_fraction=0.5)
+    lie = Candidate(
+        mode="LIE", mechanisms={}, time=0.1, accuracy=0.5, risk=0.1, epsilon_used=0.0,
+        communication_volume=1.0, feasible_resource=True, feasible_privacy=True,
+        feasible_risk=True, feasible_time=True, pre_aggregation_time=0.1,
+    )
+    profile = {
+        0: lie,
+        1: Candidate(
+            mode="LIIE", mechanisms={"upd": "dp"}, time=0.2, accuracy=0.5, risk=0.1,
+            epsilon_used=1.0, communication_volume=1.0, feasible_resource=True,
+            feasible_privacy=True, feasible_risk=True, feasible_time=True,
+            pre_aggregation_time=0.2,
+        ),
+    }
+    admitted = _admitted_clients_for_profile(cfg, profile, {0: 0, 1: 0}, {})
+    assert admitted == [0, 1]
+
 def test_history_ema_j_is_active_selection_objective_without_certificate():
     from dynfed.selection import (
         Candidate, SelectionConfig, choose_global_pareto_profile, _selection_learning_cost
@@ -140,7 +190,7 @@ def test_history_ema_j_is_active_selection_objective_without_certificate():
     history = HistoryEMAJ(decay=0.5)
     history.observe(
         round_index=0, global_update=[1.0, 1.0],
-        mode_updates={"LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
+        mode_updates={"LIIE": [0.0, 1.0], "LIIC": [1.0, 0.0], "LIIEIIIC": [0.0, 1.0]},
         global_history_eligible=True,
     )
     cfg = SelectionConfig(

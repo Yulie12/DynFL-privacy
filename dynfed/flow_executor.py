@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
-EDGE_ONLY_MODES = {"LIE", "LIIE"}
+EDGE_ONLY_MODES = {"LIE"}
 CLOUD_DIRECT_MODES = {"LIC", "LIIC", "LIEIIC"}
-EDGE_CLOUD_MODES = {"LIEIIIC", "LIIEIIIC"}
+EDGE_CLOUD_MODES = {"LIIE", "LIEIIIC", "LIIEIIIC"}
 MULTI_EDGE_LOOP_MODES = {"LIEIIIC", "LIIEIIIC"}
 
 

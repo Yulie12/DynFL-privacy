@@ -211,6 +211,12 @@ def build_command(
         "seed": seed,
         "output_root": config["output_root"],
     }
+    # History-EMA J does not select among Cloud DP release plans. Keep the
+    # legacy CLI option available for archived experiments, but do not inject
+    # it into the new method's command line.
+    if learning.get("objective") == "history_ema_j":
+        values.pop("cloud_dp_plan", None)
+
     for name, value in values.items():
         if value is not None:
             _append_value(command, name, value)

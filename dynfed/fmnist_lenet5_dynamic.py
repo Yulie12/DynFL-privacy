@@ -2038,9 +2038,16 @@ def _run_lenet5_policy(
                 if frozen_mode_runtime_active
                 else round_evaluation_config
             )
+            # History-EMA J compares the three Mode update predictions; it
+            # does not optimize Cloud DP release plans. Preserve the old
+            # Cloud-DP planner only for non-History-EMA-J objectives.
             selected, profile_evaluation = (
                 choose_cloud_dp_pareto_profile
-                if policy == "full_dynfl" and effective_selection.cloud_dp_plan != "legacy"
+                if (
+                    effective_selection.learning_objective != "history_ema_j"
+                    and policy == "full_dynfl"
+                    and effective_selection.cloud_dp_plan != "legacy"
+                )
                 else choose_global_pareto_profile
             )(
                 config=profile_selection_config,
@@ -4056,8 +4063,8 @@ def _run_lenet5_policy(
             history_rows: list[dict[str, Any]] = []
             prior_global_ema = None if history_j.global_ema is None else history_j.global_ema.clone()
             selected_modes = {cand.mode for _cid, cand, _pool, _rem in selected}
-            # Build sample-weighted per-Mode observed Cloud contributions. LIIE is
-            # Edge-only and intentionally has no Cloud packet in this implementation.
+            # Build sample-weighted per-Mode observed Cloud contributions. LIIE
+            # contributes its once-aggregated Edge update through E->C.
             mode_parts: dict[str, list[tuple[torch.Tensor, float]]] = {}
             mode_reasons: dict[str, str] = {}
             packet_dp_indices_for_history_j = {idx for idx, _std, _seed in local_dp_pending_components}
@@ -4072,7 +4079,7 @@ def _run_lenet5_policy(
             )
             for cloud_idx, (state_diff, sample_count, candidate, _client_ids) in enumerate(cloud_updates):
                 mode = candidate.mode if candidate is not None else "UNKNOWN"
-                if mode not in {"LIIC", "LIIEIIIC"}:
+                if mode not in {"LIIE", "LIIC", "LIIEIIIC"}:
                     global_eligible = False
                     global_reason = f"unsupported Cloud contributor Mode: {mode}"
                     continue
@@ -4094,12 +4101,12 @@ def _run_lenet5_policy(
                     ec_mechanism = _candidate_cloud_update_mechanism(candidate)
                     if mechanism_uses_dp(ec_mechanism) or mechanism_uses_he(ec_mechanism):
                         global_eligible = False
-                        global_reason = "LIIEIIIC E_C_upd must be unprotected and HE-free for this method"
+                        global_reason = f"{mode} E_C_upd must be unprotected and HE-free for this method"
                         mode_reasons[mode] = global_reason
                         continue
                     if not mechanism_uses_dp(upload_mechanism):
                         global_eligible = False
-                        global_reason = "LIIEIIIC L_E_upd was not configured for DP protection"
+                        global_reason = f"{mode} L_E_upd was not configured for DP protection"
                         mode_reasons[mode] = global_reason
                         continue
                 if candidate_has_he(candidate):
@@ -4141,18 +4148,6 @@ def _run_lenet5_policy(
             # Score observed Mode outputs against the *pre-round* global EMA for
             # retrospective calibration, then update the EMA state.
             for mode in TARGET_MODES:
-                if mode == "LIIE":
-                    if mode in selected_modes and prior_global_ema is not None:
-                        no_op = torch.zeros_like(prior_global_ema)
-                        history_rows.append({
-                            "event": "realized_j", "round_index": int(round_idx),
-                            "mode": mode, "status": "no_cloud_submission_zero_contribution",
-                            "selected_mode_mix": len(selected_modes - {"SKIP"}) > 1,
-                            "predicted_j": next((r.get("predicted_j") for r in history_j_predictions if r["mode"] == mode), None),
-                            "observed_j": normalized_squared_deviation(no_op, prior_global_ema, history_j.eps),
-                            "reference_global_ema_norm": float(torch.linalg.vector_norm(prior_global_ema).item()),
-                        })
-                    continue
                 if mode in mode_contributions_for_history_j and prior_global_ema is not None:
                     observed_vec = flatten_update(mode_contributions_for_history_j[mode])
                     history_rows.append({
@@ -4685,8 +4680,10 @@ def _run_lenet5_policy(
                 ),
                 "local_packet_dp_released_noise_norm": local_dp_noise_norm,
                 "aggregate_dp_release": int(aggregate_dp_noise_share_count > 0),
-                "cloud_dp_plan_chosen": selection_diagnostics.get(
-                    "selected_cloud_dp_plan", "legacy"
+                "cloud_dp_plan_chosen": (
+                    "not_applicable_history_ema_j"
+                    if effective_selection.learning_objective == "history_ema_j"
+                    else selection_diagnostics.get("selected_cloud_dp_plan", "legacy")
                 ),
                 # Branch-best predicted values.  These need not equal the
                 # combined-archive winner, which is logged in its own fields.

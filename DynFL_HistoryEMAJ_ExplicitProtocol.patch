@@ -1,0 +1,594 @@
+diff --git a/configs/history_ema_j_fmnist_lenet5.json b/configs/history_ema_j_fmnist_lenet5.json
+index b6c78ad..4d2a679 100644
+--- a/configs/history_ema_j_fmnist_lenet5.json
++++ b/configs/history_ema_j_fmnist_lenet5.json
+@@ -98,6 +98,6 @@
+   "learning": {
+     "objective": "history_ema_j",
+     "history_ema_j_decay": 0.9,
+-    "history_ema_j_enabled": true
++    "history_ema_j_eps": 1e-12
+   }
+ }
+diff --git a/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md b/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md
+index 987c1f1..8bd48cf 100644
+--- a/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md
++++ b/docs/HISTORY_EMA_J_METHOD_REPORT_ZH.md
+@@ -1,6 +1,6 @@
+ # History-EMA J 清理与验证记录
+ 
+-本分支已将 `history_ema_j` 作为正式候选 profile 学习目标接入；新方法路径不再要求 `online_upper_bound` 证书。旧证书模块仍在仓库中供历史配置兼容，但本配置、命令和新方法选择路径不依赖它们。
++本分支已将 `history_ema_j` 作为正式候选 profile 学习目标接入；新方法路径不再要求 `online_upper_bound` 证书。旧证书模块仍在仓库中供历史配置兼容，但本配置、命令和新方法选择路径不依赖它们。方法启用由 `learning.objective` 显式决定，已移除新方法路径对 `DYNFL_HISTORY_EMA_J_ENABLED` 环境变量的依赖。
+ 
+ ## 方法边界
+ 
+@@ -9,10 +9,11 @@
+ - LIIC：`L_C_upd` 上传前 DP。
+ - LIIEIIIC：`L_E_upd` 上传前 DP，`E_C_upd` 不保护。
+ - LIIE：Edge-only，不虚构 Cloud 提交。
+-- Cloud 权重使用候选 profile 中 Cloud-reaching 客户端样本量；同一 Edge 下 LIIEIIIC 客户端作为联合组，`E_B` 不作为贡献放大系数。
++- Cloud 权重使用候选 profile 中 Cloud-reaching 客户端样本量；同一 Edge 下 LIIEIIIC 客户端作为联合组，`E_B` 不作为贡献放大系数。Mode EMA 记录组输出按实际样本量加权的 Mode 内均值，候选 profile 再按 Cloud 样本量混合一次。
++- History-EMA J 的 Sample-DP 配置使用显式的上传链路 DP 机制枚举；LIIEIIIC 只为 `L_E_upd` 枚举 DP，`E_C_upd` 不进入 DP/HE 候选边界。
+ 
+ ## 验证
+ 
+-运行 `python -m pytest tests/test_history_ema_j.py -q` 与 `python -m py_compile dynfed/history_ema_j.py dynfed/selection.py dynfed/fmnist_lenet5_dynamic.py experiments/run_paper_config.py experiments/run_fmnist_lenet5.py experiments/backtest_history_ema_j.py`。
++验证：定向回归测试 `193 passed`；Python 编译检查通过；配置 dry-run 输出 `--learning-objective history_ema_j`、`--he-backend none`、显式 EMA 参数，且不输出 `--cloud-dp-plan`、`--online-bound-manifest-path`。源码路径不再引用 `DYNFL_HISTORY_EMA_J_ENABLED`。
+ 
+ 真实训练和历史回测尚需在实际数据与 GPU 环境中运行；不把 dry-run 或合成测试作为精度结论。
+diff --git a/docs/HISTORY_EMA_J_METHOD_ZH.md b/docs/HISTORY_EMA_J_METHOD_ZH.md
+index 769f036..7d2146c 100644
+--- a/docs/HISTORY_EMA_J_METHOD_ZH.md
++++ b/docs/HISTORY_EMA_J_METHOD_ZH.md
+@@ -7,10 +7,11 @@ History-EMA J 是当前分支的主动学习目标，而非影子指标。候选
+ ## 运行原则
+ 
+ - 本方法不读取、不生成、不要求任何 `online_upper_bound` 证书。
+-- `learning.objective` 必须为 `history_ema_j`，`learning.history_ema_j_enabled` 必须为 `true`。
++- `learning.objective` 必须为 `history_ema_j`；该字段是唯一方法开关，不使用环境变量隐藏开关。
+ - HE 必须关闭（`backend=none`、`execution=real`）；HE 成本不参与本方法。
+ - 不使用 aggregate-DP；LIIC 在 `L_C_upd` 使用上传前 DP，LIIEIIIC 在 `L_E_upd` 使用上传前 DP，`E_C_upd` 不做保护。
+-- 同一 Edge 的 LIIEIIIC 客户端按联合提交组处理；`E_B` 不作为贡献乘数。
++- 同一 Edge 的 LIIEIIIC 客户端按联合提交组处理；`E_B` 不作为贡献乘数。联合组只产生一条 Cloud 提交记录，组权重来自组内实际参与聚合的样本量。
++- 每个 Mode 的历史 EMA 存储该 Mode 的样本量加权平均更新；候选 Profile 预测时再按候选 Profile 的 Cloud 样本量比例混合，避免对样本权重重复加权。
+ - 初始历史不足时，所有候选 profile 使用相同的中性 J 分数，由既有延迟/可行性目标完成 warm-up；当全局历史以及 LIIC、LIIEIIIC 两种 Cloud 模式历史齐备后，J 参与全局候选 profile 的排序。
+ 
+ ## 输出
+diff --git a/dynfed/fmnist_lenet5_dynamic.py b/dynfed/fmnist_lenet5_dynamic.py
+index 3651459..81c52de 100644
+--- a/dynfed/fmnist_lenet5_dynamic.py
++++ b/dynfed/fmnist_lenet5_dynamic.py
+@@ -446,6 +446,17 @@ def _should_apply_update_dp(
+     return mode != "LIEIIIC"
+ 
+ 
++def _edge_cloud_group_key(edge_id: int, candidate: Candidate) -> tuple[int, str, str]:
++    """Key one Edge-to-Cloud submission unit.
++
++    In History-EMA J, E_C_upd is explicitly unprotected, so every client under
++    the same Edge and LIIEIIIC Mode resolves to the same ``none`` release label
++    and is merged into one final Edge group output. E_B is not part of this key
++    and cannot multiply the number or weight of Cloud contributions.
++    """
++    return (int(edge_id), candidate.mode, _candidate_cloud_update_mechanism(candidate))
++
++
+ def _candidate_training_mechanisms(
+     candidate: Candidate,
+     aggregate_cloud_update_dp: bool = False,
+@@ -481,8 +492,7 @@ def _candidate_training_mechanisms(
+         mechanisms["upd"] = "none"
+     if (
+         aggregate_cloud_update_dp
+-        and not (os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
+-                 and candidate.mode == "LIIEIIIC")
++        and not (getattr(candidate, "history_ema_j", False) and candidate.mode == "LIIEIIIC")
+         and update_link != "L_E_upd"
+         and mechanism_uses_dp(_candidate_cloud_update_mechanism(candidate))
+     ):
+@@ -515,7 +525,7 @@ def _candidate_cloud_update_mechanism(candidate: Candidate | None) -> str:
+         return "none"
+     if (
+         candidate.mode == "LIIEIIIC"
+-        and os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
++        and getattr(candidate, "history_ema_j", False)
+     ):
+         return "none"
+     link_id = {
+@@ -558,7 +568,7 @@ def _candidate_uses_local_packet_update_dp(
+     mechanism = _candidate_cloud_update_mechanism(candidate)
+     if (
+         candidate is not None and candidate.mode == "LIIC"
+-        and os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
++        and getattr(candidate, "history_ema_j", False)
+     ):
+         return mechanism_uses_dp(mechanism) and not mechanism_uses_he(mechanism)
+     if candidate is not None and getattr(candidate, "dp_execution_plan", "independent") == "cloud_packet":
+@@ -583,7 +593,7 @@ def _candidate_uses_secure_aggregate_update_dp(
+     if (
+         candidate is not None
+         and candidate.mode in {"LIIE", "LIIEIIIC", "LIIC"}
+-        and os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
++        and getattr(candidate, "history_ema_j", False)
+     ):
+         return False
+     if candidate is not None and getattr(candidate, "dp_execution_plan", "independent") == "cloud_packet":
+@@ -1450,10 +1460,10 @@ def _run_lenet5_policy(
+     previous_client_updates: dict[int, dict[str, dict[str, torch.Tensor]]] = {}
+ 
+     checkpoint_path = output_dir / "checkpoint.pt"
+-    history_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
++    history_j_enabled = effective_selection.learning_objective == "history_ema_j"
+     history_j = HistoryEMAJ(
+-        decay=float(os.environ.get("DYNFL_HISTORY_EMA_J_DECAY", "0.9")),
+-        eps=float(os.environ.get("DYNFL_HISTORY_EMA_J_EPS", "1e-12")),
++        decay=float(effective_selection.history_ema_j_decay),
++        eps=float(effective_selection.history_ema_j_eps),
+     )
+     history_j_log_path = output_dir / "history_ema_j.jsonl"
+     history_j_state_path = output_dir / "history_ema_j_state.pt"
+@@ -2107,7 +2117,7 @@ def _run_lenet5_policy(
+             plan=effective_selection.liie_edge_dp_plan,
+             execute_real_he=execute_real_he,
+         )
+-        if os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1":
++        if effective_selection.learning_objective == "history_ema_j":
+             planned_liie_groups = {}
+         if planned_liie_groups:
+             if not update_dp_execution_enabled:
+@@ -3359,10 +3369,8 @@ def _run_lenet5_policy(
+         hierarchical_streaming_secagg_groups: dict[int, list[tuple[int, Any, int, Candidate | None]]] = {}
+         for client_id, state_diff, sample_count, candidate in global_updates:
+             if candidate is not None and candidate.mode in EDGE_CLOUD_MODES:
+-                key = (
+-                    int(client_by_id[client_id].edge_id),
+-                    candidate.mode,
+-                    _candidate_cloud_update_mechanism(candidate),
++                key = _edge_cloud_group_key(
++                    int(client_by_id[client_id].edge_id), candidate
+                 )
+                 edge_cloud_groups.setdefault(key, []).append(
+                     (client_id, state_diff, sample_count, candidate)
+@@ -4107,24 +4115,24 @@ def _run_lenet5_policy(
+                     global_reason = f"{mode} candidate uses HE, which is outside History-EMA J"
+                     mode_reasons[mode] = global_reason
+                     continue
+-                total_cloud_weight = max(
+-                    sum(max(float(weight), 0.0) for weight in global_aggregation_weights),
+-                    1e-12,
++                # Store each joint Cloud submission unit with its actual sample
++                # mass I_i. For LIIEIIIC this is one Edge-level group output, not
++                # E_B separate contributions. First estimate the per-Mode mean;
++                # candidate profiles later mix these means using their Cloud
++                # sample-mass proportions. This avoids applying I_i twice.
++                mode_parts.setdefault(mode, []).append(
++                    (flatten_update(state_diff), max(float(global_aggregation_weights[cloud_idx]), 0.0))
+                 )
+-                cloud_weight = (
+-                    max(float(global_aggregation_weights[cloud_idx]), 0.0) / total_cloud_weight
+-                    if cloud_idx < len(global_aggregation_weights) else 0.0
+-                )
+-                # Preserve the actual Cloud sample-weight mass I_i. Do not
+-                # renormalize each Mode's subset to sum to one in mixed rounds.
+-                mode_parts.setdefault(mode, []).append((flatten_update(state_diff), cloud_weight))
+-            mode_contributions_for_history_j = {
+-                mode: train_config.server_step * sum(
+-                    (vector * weight for vector, weight in items),
++            mode_contributions_for_history_j = {}
++            for mode, items in mode_parts.items():
++                mode_mass = sum(weight for _vector, weight in items)
++                if mode_mass <= 0.0:
++                    continue
++                mode_mean = sum(
++                    (vector * (weight / mode_mass) for vector, weight in items),
+                     torch.zeros_like(items[0][0]),
+                 )
+-                for mode, items in mode_parts.items() if items
+-            }
++                mode_contributions_for_history_j[mode] = train_config.server_step * mode_mean
+             if history_pre_cloud_state is not None:
+                 history_post_cloud_state = _snapshot_trainable_parameters(global_end, global_edge)
+                 global_delta = {
+diff --git a/dynfed/selection.py b/dynfed/selection.py
+index 28ab824..9733e45 100644
+--- a/dynfed/selection.py
++++ b/dynfed/selection.py
+@@ -230,6 +230,8 @@ class SelectionConfig:
+     corrected_admission_policy: bool = False
+     # Appended to preserve positional construction of legacy SelectionConfig.
+     history_ema_j_history: Any | None = field(default=None, compare=False, hash=False, repr=False)
++    history_ema_j_decay: float = 0.9
++    history_ema_j_eps: float = 1e-12
+ 
+     def __post_init__(self) -> None:
+         if self.trusted_lie_joint_sample_dp:
+@@ -267,6 +269,10 @@ class SelectionConfig:
+             raise ValueError("online_upper_bound requires online_bound_manifest_path; no fallback")
+         if self.online_bound_round < 0:
+             raise ValueError("online_bound_round must be nonnegative")
++        if not 0.0 <= float(self.history_ema_j_decay) < 1.0:
++            raise ValueError("history_ema_j_decay must be in [0, 1)")
++        if not math.isfinite(float(self.history_ema_j_eps)) or self.history_ema_j_eps <= 0.0:
++            raise ValueError("history_ema_j_eps must be finite and positive")
+ 
+ 
+ def enable_static_pair_admission(
+@@ -355,6 +361,9 @@ class Candidate:
+     sample_label_grad_noise_multiplier: float | None = None
+     sample_optimizer_noise_multiplier: float | None = None
+     risk_hard_gate: bool = False  # V370 opt-in; do not retroactively change legacy runs
++    # Explicitly tags candidates created under History-EMA J; runtime privacy
++    # boundaries must not depend on an ambient environment variable.
++    history_ema_j: bool = False
+ 
+     @property
+     def feasible(self) -> bool:
+@@ -386,6 +395,7 @@ def candidate_mechanisms_for_object(candidate: Candidate, obj: str) -> list[str]
+             candidate.mode,
+             local_block_cycles=1,
+             edge_loops=spec.E_edge_loops,
++            history_ema_j_enabled=getattr(candidate, "history_ema_j", False),
+         )
+         object_by_link = {link_id: event_obj for link_id, event_obj, _count, _eligible in transmissions}
+         return [
+@@ -403,10 +413,7 @@ def candidate_link_mechanism(
+     *,
+     fallback_object: str = "upd",
+ ) -> str:
+-    if (
+-        candidate.mode == "LIIEIIIC" and link_id == "E_C_upd"
+-        and os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
+-    ):
++    if getattr(candidate, "history_ema_j", False) and candidate.mode == "LIIEIIIC" and link_id == "E_C_upd":
+         return "none"
+     if candidate.link_mechanisms and link_id in candidate.link_mechanisms:
+         return candidate.link_mechanisms[link_id]
+@@ -453,6 +460,7 @@ def resolved_privacy_parameters(config: SelectionConfig) -> dict[str, float | in
+             mode,
+             config.L_block_cycles,
+             spec.E_edge_loops,
++            history_ema_j_enabled=(config.learning_objective == "history_ema_j"),
+         )
+         feature_events = sum(
+             _record_dp_event_count(config, mode, count)
+@@ -1225,7 +1233,7 @@ def enumerate_candidates(
+     if config.corrected_admission_policy and not config.strict_pair_admission:
+         raise ValueError("corrected admission policy requires explicit strict Client-Edge pair manifest")
+ 
+-    history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
++    history_ema_j_enabled = config.learning_objective == "history_ema_j"
+     for mode, spec in MODE_SPECS.items():
+         if history_ema_j_enabled and mode not in {"LIIE", "LIIEIIIC", "LIIC"}:
+             audit_exclusions[mode] = "history_ema_j_three_mode_scope"
+@@ -1374,6 +1382,16 @@ def enumerate_candidates(
+                 device_admitted_specs.append((mode, spec))
+         admitted_mode_specs = device_admitted_specs
+ 
++    method_privacy_requirement = privacy_requirement
++    if config.learning_objective == "history_ema_j":
++        # This method uses upload-boundary DP, not the legacy confidentiality
++        # requirement that forced HE on Cloud links. HE is disabled and the
++        # protected update links are explicit; LIIEIIIC E_C_upd is excluded.
++        method_privacy_requirement = ExposurePrivacyRequirement(
++            plaintext_forbidden_links=frozenset(),
++            dp_required_links=frozenset({"L_E_upd", "L_C_upd"}),
++        )
++
+     for mode, spec in admitted_mode_specs:
+         policy_allow_none = allow_none or policy in {
+             "performance_only",
+@@ -1389,7 +1407,7 @@ def enumerate_candidates(
+                     config.trusted_lie_joint_sample_dp and mode == "LIE"
+                 ),
+             )
+-            if config.privacy_unit == "sample"
++            if config.privacy_unit == "sample" and config.learning_objective != "history_ema_j"
+             else _mechanism_assignments(
+                 spec,
+                 policy,
+@@ -1397,7 +1415,8 @@ def enumerate_candidates(
+                 policy_allow_none,
+                 trusted_edge_split_execution=config.trusted_edge_split_execution,
+                 update_mechanism_options=config.update_mechanism_options,
+-                privacy_requirement=privacy_requirement,
++                privacy_requirement=method_privacy_requirement,
++                history_ema_j_enabled=config.learning_objective == "history_ema_j",
+             )
+         )
+         audit_counts["mechanism_assignments"][mode] = len(assignments)
+@@ -1574,7 +1593,8 @@ def enumerate_candidates(
+             update_events = sum(
+                 count
+                 for link_id, obj, count, privacy_eligible in _mode_link_transmissions(
+-                    mode, _split_interaction_count(config, samples), spec.E_edge_loops
++                    mode, _split_interaction_count(config, samples), spec.E_edge_loops,
++                    history_ema_j_enabled=(config.learning_objective == "history_ema_j"),
+                 )
+                 if privacy_eligible
+                 and obj == "upd"
+@@ -4961,6 +4981,7 @@ def _candidate_dp_event_counts(
+         candidate.mode,
+         max(int(config.L_block_cycles), 1),
+         edge_loops,
++        history_ema_j_enabled=getattr(candidate, "history_ema_j", False),
+     ):
+         if not privacy_eligible:
+             continue
+@@ -5044,6 +5065,7 @@ def _candidate_has_update_dp(candidate: Candidate) -> bool:
+         candidate.mode,
+         1,
+         edge_loops,
++        history_ema_j_enabled=getattr(candidate, "history_ema_j", False),
+     ):
+         if obj != "upd" or not privacy_eligible:
+             continue
+@@ -6156,13 +6178,14 @@ def _mechanism_assignments(
+     trusted_edge_split_execution: bool = False,
+     update_mechanism_options: tuple[str, ...] = ("dp", "he3", "dp_he3"),
+     privacy_requirement: ExposurePrivacyRequirement | None = None,
++    history_ema_j_enabled: bool = False,
+ ) -> list[tuple[dict[str, str], dict[str, str]]]:
+     all_transmissions = _mode_link_transmissions(
+         spec.name,
+         local_block_cycles=1,
+         edge_loops=spec.E_edge_loops,
++        history_ema_j_enabled=history_ema_j_enabled,
+     )
+-    history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
+     if history_ema_j_enabled and spec.name == "LIIEIIIC":
+         # The new method protects L_E_upd before Edge aggregation; E_C_upd is
+         # deliberately unprotected and must not be a candidate DP/HE boundary.
+@@ -6450,7 +6473,9 @@ def _estimate_candidate(
+         # Direct client-cloud split executes the remote partition once per
+         # split interaction, just as L-E split modes repeat edge work.
+         cloud_time *= L
+-    link_events = _mode_link_transmissions(mode, L, E)
++    link_events = _mode_link_transmissions(
++        mode, L, E, history_ema_j_enabled=(config.learning_objective == "history_ema_j")
++    )
+     actual_link_mechanisms = dict(link_mechanisms or {})
+     compute_time = E * block_compute if E > 1 else block_compute
+     link_metrics: list[dict[str, Any]] = []
+@@ -6830,6 +6855,7 @@ def _estimate_candidate(
+         feasible_privacy=feasible_privacy,
+         feasible_risk=feasible_risk,
+         risk_hard_gate=False,  # no unvalidated numeric risk admission gate
++        history_ema_j=(config.learning_objective == "history_ema_j"),
+         feasible_time=feasible_time,
+         feasible_edge=feasible_edge,
+         feasible_cloud=feasible_cloud,
+@@ -7108,6 +7134,8 @@ def _mode_link_transmissions(
+     mode: str,
+     local_block_cycles: int,
+     edge_loops: int,
++    *,
++    history_ema_j_enabled: bool = False,
+ ) -> tuple[tuple[str, str, int, bool], ...]:
+     """Return (link id, object, count, privacy eligibility) for a full flow."""
+     L = max(1, int(local_block_cycles))
+@@ -7160,7 +7188,6 @@ def _mode_link_transmissions(
+             ("E_L_upd_final_return", "upd", 1, False),
+         )
+     if mode == "LIIEIIIC":
+-        history_ema_j_enabled = os.environ.get("DYNFL_HISTORY_EMA_J_ENABLED", "").strip() == "1"
+         return (
+             ("L_E_upd", "upd", E, True),
+             ("E_L_upd_loop_return", "upd", E, False),
+diff --git a/experiments/run_fmnist_lenet5.py b/experiments/run_fmnist_lenet5.py
+index 7b7e30f..ee04e24 100644
+--- a/experiments/run_fmnist_lenet5.py
++++ b/experiments/run_fmnist_lenet5.py
+@@ -177,6 +177,8 @@ def parse_args() -> argparse.Namespace:
+         "--online-bound-manifest-path", default=None,
+         help="Legacy online_upper_bound certificate manifest; not used by history_ema_j.",
+     )
++    parser.add_argument("--history-ema-j-decay", type=float, default=0.9)
++    parser.add_argument("--history-ema-j-eps", type=float, default=1e-12)
+     parser.add_argument("--dp-delta", type=float, default=1e-5)
+     parser.add_argument("--dp-update-mode", default="upd_only", choices=["upd_only", "off"])
+     parser.add_argument("--dp-release-calibration", default="tex_packet", choices=["tex_packet", "legacy_aggregate"])
+@@ -494,6 +496,8 @@ def main() -> None:
+         cloud_dp_plan=args.cloud_dp_plan,
+         update_protection_goal=args.update_protection_goal,
+         learning_objective=args.learning_objective,
++        history_ema_j_decay=args.history_ema_j_decay,
++        history_ema_j_eps=args.history_ema_j_eps,
+         uncapped_local_batches=args.uncapped_local_batches,
+         corrected_admission_policy=args.corrected_admission_policy,
+         online_bound_manifest_path=args.online_bound_manifest_path,
+diff --git a/experiments/run_paper_config.py b/experiments/run_paper_config.py
+index b3ecf52..5e7778f 100644
+--- a/experiments/run_paper_config.py
++++ b/experiments/run_paper_config.py
+@@ -207,10 +207,16 @@ def build_command(
+         "cloud_fusion_xi": optimization["cloud_fusion_xi"],
+         "cloud_fusion_eps": optimization["cloud_fusion_eps"],
+         "learning_objective": learning["objective"],
++        "history_ema_j_decay": learning.get("history_ema_j_decay", 0.9),
++        "history_ema_j_eps": learning.get("history_ema_j_eps", 1e-12),
+         "online_bound_manifest_path": learning.get("online_bound_manifest_path"),
+         "seed": seed,
+         "output_root": config["output_root"],
+     }
++    if learning.get("objective") == "history_ema_j":
++        # History-EMA J has a fixed packet-DP protocol; the legacy Cloud DP-plan
++        # selector (packet/aggregate/Pareto) is not part of this method.
++        values.pop("cloud_dp_plan", None)
+     for name, value in values.items():
+         if value is not None:
+             _append_value(command, name, value)
+@@ -278,12 +284,6 @@ def main() -> None:
+         config["he"]["require_real_he"] = args.he_execution == "real"
+     if args.output_root is not None:
+         config["output_root"] = args.output_root
+-    learning_config = config.get("learning", {})
+-    if isinstance(learning_config, dict) and learning_config.get("history_ema_j_enabled") is True:
+-        os.environ["DYNFL_HISTORY_EMA_J_ENABLED"] = "1"
+-        os.environ["DYNFL_HISTORY_EMA_J_DECAY"] = str(
+-            learning_config.get("history_ema_j_decay", 0.9)
+-        )
+     validate_config(config)
+     seeds = args.seeds or [int(seed) for seed in config["seeds"]]
+     policies = args.policies or list(config["policies"])
+@@ -331,7 +331,7 @@ def validate_config(config: dict) -> None:
+     he = config["he"]
+     learning = config.get("learning", {})
+     history_ema_j_enabled = (
+-        isinstance(learning, dict) and learning.get("history_ema_j_enabled") is True
++        isinstance(learning, dict) and learning.get("objective") == "history_ema_j"
+     )
+     if not history_ema_j_enabled:
+         expected = {
+@@ -370,7 +370,7 @@ def validate_config(config: dict) -> None:
+     privacy = config["privacy"]
+     learning = config.get("learning")
+     history_ema_j_enabled = (
+-        isinstance(learning, dict) and learning.get("history_ema_j_enabled") is True
++        isinstance(learning, dict) and learning.get("objective") == "history_ema_j"
+     )
+     if str(privacy.get("unit", "sample")).strip().lower() != "sample":
+         raise ValueError(
+@@ -415,6 +415,12 @@ def validate_config(config: dict) -> None:
+             raise ValueError("History-EMA J must not depend on an online-bound certificate")
+         if he.get("backend") != "none" or he.get("execution") != "real":
+             raise ValueError("History-EMA J requires HE disabled: backend='none', execution='real'")
++        decay = float(learning.get("history_ema_j_decay", 0.9))
++        eps = float(learning.get("history_ema_j_eps", 1e-12))
++        if not 0.0 <= decay < 1.0:
++            raise ValueError("learning.history_ema_j_decay must be in [0, 1)")
++        if not math.isfinite(eps) or eps <= 0.0:
++            raise ValueError("learning.history_ema_j_eps must be finite and positive")
+     else:
+         if objective != "online_upper_bound":
+             raise ValueError(
+diff --git a/tests/test_history_ema_j.py b/tests/test_history_ema_j.py
+index 1930177..123271f 100644
+--- a/tests/test_history_ema_j.py
++++ b/tests/test_history_ema_j.py
+@@ -84,7 +84,7 @@ def test_history_state_round_trip(tmp_path):
+     assert torch.equal(history.mode_ema["LIIC"], loaded.mode_ema["LIIC"])
+ 
+ 
+-def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypatch):
++def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp():
+     import random
+ 
+     from dynfed.selection import Candidate, SelectionConfig, _mode_link_transmissions, enumerate_candidates
+@@ -94,8 +94,9 @@ def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypa
+         _candidate_uses_secure_aggregate_update_dp,
+     )
+ 
+-    monkeypatch.setenv("DYNFL_HISTORY_EMA_J_ENABLED", "1")
+-    transmissions = _mode_link_transmissions("LIIEIIIC", local_block_cycles=1, edge_loops=3)
++    transmissions = _mode_link_transmissions(
++        "LIIEIIIC", local_block_cycles=1, edge_loops=3, history_ema_j_enabled=True
++    )
+     ec = next(row for row in transmissions if row[0] == "E_C_upd")
+     assert ec[3] is False
+ 
+@@ -104,7 +105,7 @@ def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypa
+         time=1.0, accuracy=0.5, risk=0.1, epsilon_used=1.0,
+         communication_volume=1.0, feasible_resource=True, feasible_privacy=True,
+         feasible_risk=True, feasible_time=True,
+-        link_mechanisms={"L_E_upd": "dp", "E_C_upd": "dp"},
++        link_mechanisms={"L_E_upd": "dp", "E_C_upd": "dp"}, history_ema_j=True,
+     )
+     assert _candidate_cloud_update_mechanism(candidate) == "none"
+     assert _candidate_uses_secure_aggregate_update_dp(candidate) is False
+@@ -114,7 +115,7 @@ def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypa
+         time=1.0, accuracy=0.5, risk=0.1, epsilon_used=1.0,
+         communication_volume=1.0, feasible_resource=True, feasible_privacy=True,
+         feasible_risk=True, feasible_time=True,
+-        link_mechanisms={"L_C_upd": "dp"},
++        link_mechanisms={"L_C_upd": "dp"}, history_ema_j=True,
+     )
+     assert _candidate_uses_local_packet_update_dp(liic) is True
+     assert _candidate_uses_secure_aggregate_update_dp(liic) is False
+@@ -123,6 +124,7 @@ def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypa
+         num_clients=10, num_edges=2, privacy_unit="sample", allow_he=False,
+         update_mechanism_options=("dp",), update_protection_goal="packet_protection",
+         require_cloud_participation=False, require_edge_cloud_coverage=False,
++        learning_objective="history_ema_j",
+     )
+     candidates = enumerate_candidates(
+         config=cfg, client_id=0, edge_factor=1.0, compute_factor=1.0, samples=500,
+@@ -130,6 +132,27 @@ def test_history_ema_j_protocol_disables_ec_protection_and_aggregate_dp(monkeypa
+         policy="full_dynfl", connected_edge_id=0,
+     )
+     assert {c.mode for c in candidates} <= {"LIIE", "LIIEIIIC", "LIIC"}
++    assert all(c.history_ema_j for c in candidates)
++    liiie = next((c for c in candidates if c.mode == "LIIEIIIC"), None)
++    assert liiie is not None, "History-EMA J must retain LIIEIIIC in the Sample-DP configuration"
++    assert liiie.link_mechanisms.get("L_E_upd") == "dp"
++    assert liiie.link_mechanisms.get("E_C_upd") is None
++
++
++def test_liieiiic_joint_group_key_is_edge_mode_not_edge_loop_count():
++    from dynfed.selection import Candidate
++    from dynfed.fmnist_lenet5_dynamic import _edge_cloud_group_key
++
++    common = dict(
++        mode="LIIEIIIC", mechanisms={"upd": "dp"}, time=1.0, accuracy=0.5,
++        risk=0.1, epsilon_used=1.0, communication_volume=1.0,
++        feasible_resource=True, feasible_privacy=True, feasible_risk=True,
++        feasible_time=True, history_ema_j=True,
++    )
++    first = Candidate(**common, link_mechanisms={"L_E_upd": "dp", "E_C_upd": "dp"})
++    second = Candidate(**common, link_mechanisms={"L_E_upd": "dp", "E_C_upd": "none"})
++    assert _edge_cloud_group_key(2, first) == _edge_cloud_group_key(2, second)
++    assert _edge_cloud_group_key(2, first) != _edge_cloud_group_key(3, first)
+ 
+ 
+ def test_history_ema_j_is_active_selection_objective_without_certificate():
+@@ -181,4 +204,51 @@ def test_history_ema_j_config_has_no_certificate_dependency():
+     config = json.loads(path.read_text(encoding="utf-8"))
+     assert config["learning"]["objective"] == "history_ema_j"
+     assert "online_bound_manifest_path" not in config["learning"]
++    assert "history_ema_j_enabled" not in config["learning"]
+     validate_config(config)
++    from experiments.run_paper_config import build_command
++    command = build_command(config, seed=2026, policies=list(config["policies"]), rounds=None)
++    assert "--learning-objective" in command and command[command.index("--learning-objective") + 1] == "history_ema_j"
++    assert "--online-bound-manifest-path" not in command
++    assert "--cloud-dp-plan" not in command
++    assert "--he-backend" in command and command[command.index("--he-backend") + 1] == "none"
++
++
++def test_history_ema_j_config_does_not_require_environment_switch(monkeypatch):
++    import random
++    from dynfed.selection import SelectionConfig, enumerate_candidates, paper_client_privacy_requirement
++
++    monkeypatch.delenv("DYNFL_HISTORY_EMA_J_ENABLED", raising=False)
++    cfg = SelectionConfig(
++        num_clients=10, num_edges=2, privacy_unit="sample", allow_he=False,
++        update_mechanism_options=("dp",), learning_objective="history_ema_j",
++    )
++    candidates = enumerate_candidates(
++        config=cfg, client_id=0, edge_factor=1.0, compute_factor=1.0, samples=500,
++        remaining_epsilon=8.0, round_idx=0, rng=random.Random(2),
++        policy="full_dynfl", connected_edge_id=0,
++        privacy_requirement=paper_client_privacy_requirement(),
++    )
++    assert candidates
++    assert all(candidate.history_ema_j for candidate in candidates)
++    assert {candidate.mode for candidate in candidates} == {"LIIE", "LIIEIIIC", "LIIC"}
++    liiie = next((c for c in candidates if c.mode == "LIIEIIIC"), None)
++    assert liiie is not None, "History-EMA J must retain LIIEIIIC in the Sample-DP configuration"
++    assert liiie.link_mechanisms.get("L_E_upd") == "dp"
++    assert liiie.link_mechanisms.get("E_C_upd") is None
++
++
++def test_history_ema_j_mode_observation_is_mean_not_global_mass_scaled():
++    # Candidate-profile J applies sample mass once, after retrieving each Mode mean.
++    history = HistoryEMAJ(decay=0.5)
++    history.observe(
++        round_index=0, global_update=[1.0, 1.0],
++        mode_updates={"LIIC": [2.0, 0.0], "LIIEIIIC": [0.0, 4.0]},
++        global_history_eligible=True,
++    )
++    score, source = history.predict_profile_j(
++        {0: "LIIC", 1: "LIIEIIIC"}, {0: 3.0, 1: 1.0}
++    )
++    expected = normalized_squared_deviation([1.5, 1.0], history.global_ema)
++    assert source == "history_ema_j"
++    assert score == pytest.approx(expected)
