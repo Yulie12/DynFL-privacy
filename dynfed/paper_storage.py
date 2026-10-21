@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import torch
+from contextlib import contextmanager
 
 
 def digest(value):
@@ -65,3 +66,33 @@ def save_checkpoint(path, value):
     temporary = path.with_suffix(".sha256.tmp")
     temporary.write_text(file_digest(path), encoding="ascii")
     os.replace(temporary, path.with_suffix(".sha256"))
+
+
+@contextmanager
+def exclusive_run(destination):
+    """Kernel-held byte lock releases on process death; no stale PID deletion."""
+    destination=Path(destination)
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    path=destination.parent/("."+destination.name+".runlock")
+    with path.open("a+b") as handle:
+        if path.stat().st_size == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError as error:
+            raise RuntimeError("run is already active; concurrent resume is forbidden") from error
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+            else:
+                fcntl.flock(handle.fileno(),fcntl.LOCK_UN)

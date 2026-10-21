@@ -75,4 +75,13 @@ PID和完成情况。每个完成场景会审计并统计均值/标准差，全�
 桥接训练、旧配置、旧实验与旧测试已从活动源码移除。删除清单见
 `docs/CLEANUP_MANIFEST.md`；删除前工作副本保存在
 `out/before_paper_cleanup_20261021/source_before_cleanup.zip`。
-论文、数据和已有实验结果保留。新实现不兼容旧检查点，当前不提供断点续训入口。
+论文、数据和已有实验结果保留。旧协议检查点不兼容；shared_init_v1支持轮级与本地DP步级
+事务恢复，使用run_paper.py --resume，禁止将旧账本重置后拼接新结果。
+
+## shared_init_v1正式准备
+
+核心方法为latency_only、joint_no_ema、proposed；共享两轮真实计费初始化，无EMA联合臂
+只将gamma_d设为0，gamma_C保持.9。独立候选日志、故障/恢复边界、最终策略审核见
+`docs/FORMAL_PREPARATION_ZH.md`。未预登记的100客户端100轮运行会被拒绝。
+`python experiments/prepare_formal.py --output NEW_OUTPUT`只预登记，不启动训练。
+当前不要启动正式矩阵；待验证及耗时估算完成后另行申请。

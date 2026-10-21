@@ -9,6 +9,9 @@ from pathlib import Path
 import time
 import random
 import traceback
+import os
+from datetime import datetime, timezone
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import numpy as np
 import torch
 from .paper_config import MODES, CORE_POLICIES, effective_config
@@ -19,7 +22,7 @@ from .paper_barrier import VersionBarrier
 from .paper_search import select
 from .paper_timeline import mode_masses
 from .paper_acceptance import validate_units
-from .paper_storage import atomic_json, atomic_torch, digest, tensor_digest, source_identity, save_checkpoint, load_checkpoint, file_digest
+from .paper_storage import atomic_json, atomic_torch, digest, tensor_digest, source_identity, save_checkpoint, load_checkpoint, file_digest, exclusive_run
 
 
 def write_json(path, data):
@@ -56,9 +59,17 @@ def system_traces(config, seed):
     return result
 
 
+def configure_runtime(config):
+    torch.set_num_threads(config.torch_threads)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
+
+
 def _run_policy(config, policy, seed, data, partition, traces, destination,
                 resume=False, stop_after_round=None):
     config = effective_config(config, policy, seed)
+    configure_runtime(config)
     if policy in CORE_POLICIES and (config.clients < 3 or config.rounds <= config.shared_init_rounds):
         raise ValueError("shared comparison requires at least three clients and post-initialization rounds")
     destination = Path(destination)
@@ -317,6 +328,7 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
                         "cuda_rng": torch.cuda.get_rng_state_all() if config.device == "cuda" else [],
                         "numpy_rng": np.random.get_state(), "python_rng": random.getstate()})
         write_json(destination/"run_status.json", {"status": "running", "completed_rounds": round_index+1,
+                   "pid":os.getpid(),"updated_utc":datetime.now(timezone.utc).isoformat(),
                    "total_rounds": config.rounds, "last_checkpoint": checkpoint_path.name,
                    "checkpoint_sha256": file_digest(checkpoint_path), "run_id": run_id})
         print(f"{policy} seed={seed} round={round_index+1}/{config.rounds} "
@@ -359,7 +371,7 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
     return summary
 
 
-def run_policy(config, policy, seed, data, partition, traces, destination, resume=False, stop_after_round=None):
+def _run_policy_attempt(config, policy, seed, data, partition, traces, destination, resume=False, stop_after_round=None):
     destination = Path(destination)
     # A complete run is immutable; return it only after validating identity in _run_policy.
     if destination.exists() and not resume:
@@ -373,7 +385,8 @@ def run_policy(config, policy, seed, data, partition, traces, destination, resum
         status = json.loads((destination/"run_status.json").read_text(encoding="utf-8")) if (destination/"run_status.json").exists() else {}
         attempts.append({"status": "interrupted" if isinstance(error, (KeyboardInterrupt, InterruptedError)) else "failed",
                          "wall_sec": time.perf_counter()-attempt_started, "error": traceback.format_exc()})
-        status.update(status=attempts[-1]["status"], attempts=attempts, error=traceback.format_exc())
+        status.update(status=attempts[-1]["status"], attempts=attempts, error=traceback.format_exc(),
+                      pid=os.getpid(),updated_utc=datetime.now(timezone.utc).isoformat())
         if destination.exists() and old_status.get("status") != "completed":
             write_json(destination/"run_status.json", status)
         raise
@@ -387,6 +400,11 @@ def run_policy(config, policy, seed, data, partition, traces, destination, resum
     return result
 
 
+def run_policy(config, policy, seed, data, partition, traces, destination, resume=False, stop_after_round=None):
+    with exclusive_run(destination):
+        return _run_policy_attempt(config,policy,seed,data,partition,traces,destination,resume,stop_after_round)
+
+
 def run(config, output, resume=False):
     output = Path(output)
     if config.clients == 100 and config.rounds == 100 and not (output/"preregistration.json").exists():
@@ -397,7 +415,7 @@ def run(config, output, resume=False):
             raise RuntimeError("scenario configuration mismatch")
     else:
         write_json(output / "config.json", config.to_dict())
-    torch.set_num_threads(config.torch_threads)
+    configure_runtime(config)
     root = Path(__file__).resolve().parents[1]
     identity = source_identity()
     if (output/"source_manifest.json").exists():
@@ -408,7 +426,10 @@ def run(config, output, resume=False):
         write_json(output / "source_manifest.json", identity)
     write_json(output / "runtime.json", {"torch": torch.__version__, "device": config.device,
                                         "gpu": torch.cuda.get_device_name(0) if config.device == "cuda" else None,
-                                        "frozen_feature_cache": config.model == "resnet18_head"})
+                                        "frozen_feature_cache": config.model == "resnet18_head",
+                                        "deterministic_algorithms":torch.are_deterministic_algorithms_enabled(),
+                                        "cudnn_deterministic":torch.backends.cudnn.deterministic,
+                                        "CUBLAS_WORKSPACE_CONFIG":os.environ.get("CUBLAS_WORKSPACE_CONFIG")})
     summaries = []
     for seed in config.seeds:
         preparation_started = time.perf_counter()

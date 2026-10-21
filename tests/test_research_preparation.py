@@ -199,3 +199,51 @@ def test_cli_non_dry_run_reports_configuration_before_dispatch(tmp_path,monkeypa
     cli.main()
     assert len(calls)==1 and calls[0][0].rounds==6
     assert '"pid"' in capsys.readouterr().out
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),reason="CUDA is unavailable")
+def test_cuda_lenet_shared_initialization_and_step_recovery(tmp_path,monkeypatch):
+    from dynfed.paper_data import LeNet5
+    config=PaperConfig(clients=3,edges=1,rounds=3,train_limit=9,test_limit=3,batch_size=2,
+                       local_steps=2,seeds=(42,),policies=CORE_POLICIES,device="cuda",evaluation_budget=12)
+    generator=torch.Generator().manual_seed(5)
+    data=(torch.randn(9,1,28,28,generator=generator),torch.arange(9)%3,
+          torch.randn(3,1,28,28,generator=generator),torch.arange(3))
+    def model(cfg,seed,features=False):
+        torch.manual_seed(seed)
+        return LeNet5().to(cfg.device)
+    monkeypatch.setattr(runner,"make_training_model",model)
+    case=(config,data,[[0,1,2],[3,4,5],[6,7,8]],runner.system_traces(config,42))
+    states=[]
+    for policy in CORE_POLICIES:
+        execute(case,tmp_path/policy,policy)
+        states.append(load_checkpoint(tmp_path/policy/"checkpoint_round_002.pt"))
+    for state in states[1:]:
+        for key,value in states[0]["model"].items():torch.testing.assert_close(value,state["model"][key],rtol=0,atol=0)
+    original=runner.local_train
+    fail=[True]
+    def interrupted(*args,**kwargs):
+        callback=kwargs["progress_callback"]
+        def persist(progress):
+            callback(progress)
+            if fail[0]:
+                fail[0]=False
+                raise InterruptedError("CUDA committed-step crash")
+        kwargs["progress_callback"]=persist
+        return original(*args,**kwargs)
+    monkeypatch.setattr(runner,"local_train",interrupted)
+    with pytest.raises(InterruptedError):execute(case,tmp_path/"resumed")
+    execute(case,tmp_path/"resumed",resume=True)
+    a=load_checkpoint(tmp_path/"proposed"/"checkpoint_round_003.pt")
+    b=load_checkpoint(tmp_path/"resumed"/"checkpoint_round_003.pt")
+    assert a["ledgers"]==b["ledgers"]
+    for key,value in a["model"].items():torch.testing.assert_close(value,b["model"][key],rtol=0,atol=0)
+
+
+def test_concurrent_resume_lock_is_released_after_failure(tmp_path):
+    from dynfed.paper_storage import exclusive_run
+    path=tmp_path/"unit"
+    with exclusive_run(path):
+        with pytest.raises(RuntimeError,match="already active"):
+            with exclusive_run(path):pass
+    with exclusive_run(path):pass

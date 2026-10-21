@@ -1,5 +1,16 @@
 # 五步研究流程记录
 
+## 用户确认共享初始化后的工程准备（2026-10-21）
+
+已按用户明确设计实现三种核心方法及两轮真实计费共享初始化；独立no-EMA联合臂命名
+joint_no_ema，保留相同gamma_C=.9，替换旧deviation_only。详细规范见FORMAL_PREPARATION_ZH.md。
+代码检查点30feb35，CLI非dry-run作用域错误修复a8517fe；44项测试通过。
+首次Fashion-MNIST启动在训练前失败，原stdout/stderr保留，未产生训练或DP消耗；
+新目录shared_init_smoke_fmnist_v2完成24/24小规模运行且逐单元审计通过。
+CIFAR-10验证PID24148已启动（6客户端2Edge、6轮、3种子、8策略、冻结分类头），
+输出shared_init_smoke_cifar10_v1；这不是正式矩阵，完成状态待核实后追加。
+本轮未修改论文公式、未启动正式矩阵、未推送。候选不能强制相同的原因及恢复边界已记录。
+
 ## 完整研究任务的新起点（2026-10-21，Asia/Singapore）
 
 已按附件要求实际完成第一阶段检查，报告为 `STATE_AUDIT_20261021_ZH.md`。
