@@ -22,7 +22,7 @@ from .paper_barrier import VersionBarrier
 from .paper_search import select
 from .paper_timeline import mode_masses
 from .paper_acceptance import validate_units
-from .paper_storage import atomic_json, atomic_torch, digest, tensor_digest, source_identity, save_checkpoint, load_checkpoint, file_digest, exclusive_run
+from .paper_storage import atomic_json, atomic_torch, digest, tensor_digest, source_identity, save_checkpoint, load_checkpoint, file_digest, exclusive_run, validate_preregistration
 
 
 def write_json(path, data):
@@ -418,6 +418,7 @@ def run(config, output, resume=False):
     configure_runtime(config)
     root = Path(__file__).resolve().parents[1]
     identity = source_identity()
+    validate_preregistration(config,output,identity)
     if (output/"source_manifest.json").exists():
         registered = json.loads((output/"source_manifest.json").read_text(encoding="utf-8"))
         if registered["source_hash"] != identity["source_hash"]:

@@ -30,6 +30,40 @@ def source_identity():
     return {"git_revision": revision, "sha256": sources, "source_hash": digest(sources)}
 
 
+def validate_preregistration(config, output, source):
+    from .paper_config import effective_config
+    output=Path(output)
+    path=output/"preregistration.json"
+    if not path.exists():
+        return
+    registration=json.loads(path.read_text(encoding="utf-8"))
+    entries=registration["units"]
+    expected={(seed,policy) for seed in config.seeds for policy in config.policies}
+    if len(entries)!=len(expected) or {(e["seed"],e["policy"]) for e in entries}!=expected:
+        raise RuntimeError("preregistration strategy-seed set mismatch")
+    inputs={}
+    for entry in entries:
+        actual=effective_config(config,entry["policy"],entry["seed"])
+        if digest(actual.to_dict())!=entry["config_hash"] or digest(entry["config"])!=entry["config_hash"]:
+            raise RuntimeError("preregistered configuration mismatch")
+        if entry["source_hash"]!=source["source_hash"]:
+            raise RuntimeError("preregistered source mismatch")
+        if Path(entry["output"]).resolve()!=(output/f"seed_{entry['seed']}"/entry["policy"]).resolve():
+            raise RuntimeError("preregistered output directory mismatch")
+        for name,checksum in entry["dataset_file_hashes"].items():
+            if name in inputs and inputs[name]!=checksum:
+                raise RuntimeError("inconsistent registered data hashes")
+            inputs[name]=checksum
+    for name,checksum in inputs.items():
+        if file_digest(name)!=checksum:
+            raise RuntimeError("preregistered dataset/weight file changed")
+    index=output.parent/"registration_hashes.json"
+    if index.exists():
+        for name,checksum in json.loads(index.read_text(encoding="utf-8")).items():
+            if file_digest(output.parent/name)!=checksum:
+                raise RuntimeError("preregistration manifest integrity mismatch")
+
+
 def atomic_json(path, value):
     path = Path(path)
     temporary = path.with_name(path.name+".tmp")

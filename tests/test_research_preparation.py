@@ -247,3 +247,23 @@ def test_concurrent_resume_lock_is_released_after_failure(tmp_path):
         with pytest.raises(RuntimeError,match="already active"):
             with exclusive_run(path):pass
     with exclusive_run(path):pass
+
+
+def test_preregistration_is_checked_before_training(toy,tmp_path):
+    from dynfed.paper_storage import source_identity,digest,file_digest,atomic_json,validate_preregistration
+    cfg=toy[0]
+    source=source_identity()
+    data=tmp_path/"data_fixture.bin"
+    data.write_bytes(b"registered input")
+    output=tmp_path/"case"
+    output.mkdir()
+    entries=[]
+    for policy in cfg.policies:
+        effective=effective_config(cfg,policy,42)
+        entries.append({"seed":42,"policy":policy,"config":effective.to_dict(),"config_hash":digest(effective.to_dict()),
+                        "source_hash":source["source_hash"],"output":str(output/"seed_42"/policy),
+                        "dataset_file_hashes":{str(data):file_digest(data)}})
+    atomic_json(output/"preregistration.json",{"units":entries})
+    validate_preregistration(cfg,output,source)
+    data.write_bytes(b"changed input")
+    with pytest.raises(RuntimeError,match="file changed"):validate_preregistration(cfg,output,source)
