@@ -37,7 +37,6 @@ def main():
                          batch_size=8, local_steps=1, evaluation_budget=64)
     config = replace(config, **overrides)
     if args.dry_run:
-        import json
         print(json.dumps(config.to_dict(), indent=2))
         return
     output = args.output or ROOT / config.output_root / datetime.now().strftime("%Y%m%d_%H%M%S")

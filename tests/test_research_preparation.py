@@ -189,3 +189,13 @@ def test_registration_contains_independent_hashed_units(tmp_path,monkeypatch):
     arms={entry["policy"]:entry for entry in units if entry["dataset"]=="fmnist" and entry["seed"]==42}
     assert (arms["joint_no_ema"]["config"]["gamma_d"],arms["joint_no_ema"]["config"]["gamma_c"])==(0.,.9)
     assert arms["joint_no_ema"]["config_hash"]!=arms["proposed"]["config_hash"]
+
+
+def test_cli_non_dry_run_reports_configuration_before_dispatch(tmp_path,monkeypatch,capsys):
+    import experiments.run_paper as cli
+    calls=[]
+    monkeypatch.setattr(cli,"run",lambda config,path,resume=False:calls.append((config,path,resume)))
+    monkeypatch.setattr("sys.argv",["run_paper.py","--pilot","--rounds","6","--seeds","42","--output",str(tmp_path/"run")])
+    cli.main()
+    assert len(calls)==1 and calls[0][0].rounds==6
+    assert '"pid"' in capsys.readouterr().out
