@@ -13,6 +13,15 @@
 5. 论文：已修正数学语义、算法伪代码和不受支持的旧结论。仅当全部正式运行完成并
    审计通过后，自动生成正式数字表格。未完成时保持待测占位；pilot表明确标记规模。
 
+## 本轮验证结果
+
+- v5中Fashion-MNIST和CIFAR-10的5轮、3种子、8策略试运行均完成并通过审计。
+- 6组20轮EMA消融、4组异步触发敏感性实验均完成并通过审计。
+- 无平滑对照的pilot准确率为30.87±5.95%，默认0.9/0.9为30.00±6.32%。
+  这些小样本结果不支持EMA必然更优；不同gamma_C下的偏差目标也不同，不能直接作统一误差排名。
+- 正式CIFAR-10矩阵已开始，随后执行Fashion-MNIST。正式均值/标准差仍待全部运行和审计完成。
+- 已生成带明确pilot标签的论文表格；独立TeX构建通过，未实施的候选排序检验和NSGA-II已明确注明。
+
 工作区 `out/research_campaign_v5/campaign_status.json` 是当前阶段状态入口；
 `out/research_campaign_v5.stdout.log` / `.stderr.log`记录首次后台输出；续跑输出为
 `out/research_campaign_v5.resume.stdout.log` / `.resume.stderr.log`。

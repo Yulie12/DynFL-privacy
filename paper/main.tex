@@ -1249,12 +1249,13 @@ for different smoothing parameters and system conditions.
 Because only the selected distribution is executed in an ordinary
 round, the updates of other candidates are not observed. To examine
 whether the estimator correctly ranks several candidates, a
-separate small scale experiment starts each candidate from the same
-model checkpoint and system state. Candidate executions are kept
-independent, and their results are compared only after execution.
-This test measures whether smaller predicted costs correspond to
-smaller observed deviations. It does not assume that a smaller
-update deviation guarantees higher test accuracy.
+separate small scale experiment would need to start each candidate
+from the same model checkpoint and system state, keep candidate
+executions independent, and compare their results only after execution.
+This counterfactual ranking test is not implemented in the current
+experiment campaign; selected-profile prediction errors alone do not
+establish correct ranking of unexecuted candidates. Nor does a smaller
+update deviation guarantee higher test accuracy.
 
 \subsection{Comparison with Baselines}
 \label{sec:main_comparison}
@@ -1266,8 +1267,9 @@ distribution, random feasible mode selection, and a method that
 selects modes using only system time. A method that uses only
 $\widehat J_{\mathrm{learn}}^t$ is included to examine the
 contribution of the second objective. An alternative Pareto search,
-such as NSGA-II, can be included under the same evaluation budget
-and with the same two objectives.
+such as NSGA-II, would require the same evaluation budget and the
+same two objectives. It is not implemented or included in the current
+reported comparisons.
 
 \textbf{Fair comparison.}
 All methods use the same dataset partitions, initial parameters,
@@ -1333,7 +1335,7 @@ explain differences between policies.
 \centering
 \caption{Planned reconfiguration experiment. Entries are pending.}
 \label{tab:mode_selection_ablation}
-\small
+\footnotesize
 \begin{tabular}{lrrr}
 \toprule
 \textbf{Policy} & \textbf{Final acc. (\%)} &

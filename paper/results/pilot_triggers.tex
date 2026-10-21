@@ -1,0 +1,20 @@
+\begin{table*}[t]
+\centering
+\scriptsize
+\caption{Asynchronous-only trigger sensitivity (pilot only), using 6 clients, 2 Edges, 20 rounds and three paired seeds. These service policies are explicit experimental assumptions.}
+\label{tab:verified_pilot_triggers}
+\begin{tabular}{lrrrr}
+\toprule
+Service policy & Method & Test acc. (\%) & System time (s) & Pending units \\
+\midrule
+tick 0.25 s & fixed $FL_E$ & $23.33\pm6.70$ & $5.04\pm0.00$ & $0.00\pm0.00$ \\
+tick 0.25 s & proposed & $28.60\pm4.87$ & $9.87\pm0.51$ & $2.00\pm0.00$ \\
+tick 1 s & fixed $FL_E$ & $31.27\pm8.08$ & $20.04\pm0.00$ & $0.00\pm0.00$ \\
+tick 1 s & proposed & $30.00\pm6.32$ & $10.66\pm1.60$ & $1.67\pm0.58$ \\
+tick 4 s & fixed $FL_E$ & $31.27\pm8.08$ & $80.04\pm0.00$ & $0.00\pm0.00$ \\
+tick 4 s & proposed & $29.13\pm4.67$ & $10.40\pm0.91$ & $1.00\pm1.00$ \\
+first arrival & fixed $FL_E$ & $23.87\pm2.04$ & $3.05\pm0.56$ & $1.00\pm0.00$ \\
+first arrival & proposed & $29.87\pm4.16$ & $9.59\pm0.84$ & $1.67\pm0.58$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
