@@ -1,0 +1,30 @@
+{
+  "branch": "feature/history-ema-j-shadow",
+  "manifest_removed_files": 234,
+  "all_manifest_files_archived": true,
+  "all_manifest_files_removed": true,
+  "active_module_imports": [
+    "dynfed.__init__",
+    "dynfed.paper_config",
+    "dynfed.paper_data",
+    "dynfed.paper_history",
+    "dynfed.paper_privacy",
+    "dynfed.paper_runner",
+    "dynfed.paper_search",
+    "dynfed.paper_timeline"
+  ],
+  "archives": {
+    "source_before_cleanup.zip": {
+      "entries": 235,
+      "bytes": 662909,
+      "sha256": "c1abb247ef839c56862df05fe1d5507957947ca7d6c9465143f22b3b02c29a72",
+      "crc": "passed"
+    },
+    "unused_seal_vendor.zip": {
+      "entries": 448,
+      "bytes": 1086483,
+      "sha256": "c6d50224f46b6feafbc3164e3c3fbc4b9e2bc9836481bb0ba6777c8f0e56b63c",
+      "crc": "passed"
+    }
+  }
+}

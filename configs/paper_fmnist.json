@@ -1,0 +1,21 @@
+{
+  "dataset": "fmnist",
+  "model": "lenet5",
+  "data_root": "experiments/data/fmnist/FashionMNIST/raw",
+  "device": "cpu",
+  "clients": 100,
+  "edges": 10,
+  "rounds": 100,
+  "seeds": [42, 43, 44],
+  "policies": ["proposed", "fixed_fl_e", "fixed_fl_ec", "fixed_fl_c", "fixed_mixed", "random_feasible", "latency_only", "deviation_only"],
+  "local_steps": 2,
+  "edge_stages": 3,
+  "epsilon": 8.0,
+  "delta": 1e-5,
+  "gamma_d": 0.9,
+  "gamma_c": 0.9,
+  "selection_period": 5,
+  "evaluation_budget": 256,
+  "archive_size": 16,
+  "output_root": "out/paper_fmnist"
+}

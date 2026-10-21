@@ -1,6 +1,4 @@
-"""CPU-friendly simulators for dynamic cloud-edge-end federated learning."""
+"""Implementation of the three-mode protocol specified by paper/main.tex."""
+from .paper_config import PaperConfig
 
-from .config import ExperimentConfig
-from .training import run_experiment
-
-__all__ = ["ExperimentConfig", "run_experiment"]
+__all__ = ["PaperConfig"]

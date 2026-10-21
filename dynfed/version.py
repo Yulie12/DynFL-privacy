@@ -1,2 +1,0 @@
-CURRENT_EXECUTION_REVISION = "paper_flow_v31_mode_specific_privacy"
-CURRENT_UPDATE_PARAMETER_SCOPE = "trainable_parameters_v1"
