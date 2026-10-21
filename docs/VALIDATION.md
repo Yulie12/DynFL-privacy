@@ -4,7 +4,7 @@ The current implementation contains only the paper three-mode protocol.
 All old tests were removed together with their superseded implementations;
 the replacement tests assert the paper equations and execution semantics.
 
-- `python -m pytest -q`: 15 tests passed, including an analytic distinction
+- Historical checkpoint `cecf7819`: 15 tests passed, including an analytic distinction
   between EMA(deviation) and EMA(raw update), sample weights, missing estimates,
   early/late asynchronous admission, sequential Edge feedback, initialization,
   fixed-mode SKIP, conservative lifetime RDP, exact small search and a numerical
@@ -23,9 +23,20 @@ These are execution and numerical-conformance checks, not published accuracy
 results. Formal 100-round, three-seed comparisons and CIFAR-10 training have not
 been completed. Frozen ResNet-18 requires locally cached pretrained weights.
 
-Explicit convention requiring a corresponding note in the paper: if no
-synchronous Cloud units exist, the first pending asynchronous arrival triggers
-a Cloud aggregation event. Otherwise FL_E never delays the synchronous cutoff.
+The subsequent mathematical audit supersedes the checkpoint's first-arrival
+default. The main configuration now uses an explicit exogenous periodic clock;
+first arrival is a sensitivity alternative. The clock is an experimental
+assumption, not a derived property. Pending Cloud events take priority over
+client activation waits. Random selection obeys the matched selection period.
+Current verification has 22 passing tests, including vectorized/reference
+DP-SGD equivalence, independent smoothing coefficients, missing observations,
+periodic empty windows and these scheduling/fairness cases.
+
+Campaign sources and runtime configuration are recorded per run. The first
+multiseed trial (`out/research_trial_fmnist_v2`) completed 24 runs and audits.
+`out/research_studies_v3` completed the first EMA/clock sensitivity study and
+CIFAR-10 trial. Final experiments use the subsequent frozen corrected source;
+preliminary v2/v3 outputs must not be silently pooled with those final runs.
 
 The paper's optional NSGA-II comparison was removed with the old implementation;
 bounded search is currently checked against exhaustive enumeration on small

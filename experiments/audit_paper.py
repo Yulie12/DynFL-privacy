@@ -12,6 +12,33 @@ from dynfed.paper_timeline import mode_masses
 from dynfed.paper_runner import write_json
 
 
+def independent_equations(before, units, gamma_d, gamma_c, epsilon_j):
+    """Direct equation-by-equation recomputation, independent of History.observe."""
+    reference = before["reference"]
+    deviations = {mode: value.clone() for mode, value in before["deviations"].items()}
+    if not units:
+        return reference, deviations, None, None
+    total = sum(unit.samples for unit in units)
+    cloud = sum((unit.update.double()*unit.samples for unit in units),
+                torch.zeros_like(units[0].update).double())/total
+    prediction, j_obs = None, None
+    if reference is not None:
+        modes = {unit.mode for unit in units}
+        if modes.issubset(deviations):
+            prediction = reference+sum((deviations[unit.mode]*(unit.samples/total) for unit in units),
+                                       torch.zeros_like(reference))
+        j_obs = float((cloud-reference).square().sum()/(reference.square().sum()+epsilon_j))
+        for mode in modes:
+            group = [unit for unit in units if unit.mode == mode]
+            mean = sum((unit.update.double()*unit.samples for unit in group),
+                       torch.zeros_like(cloud))/sum(unit.samples for unit in group)
+            observed_deviation = mean-reference
+            deviations[mode] = (observed_deviation if mode not in deviations else
+                                gamma_d*deviations[mode]+(1-gamma_d)*observed_deviation)
+    after = cloud if reference is None else gamma_c*reference+(1-gamma_c)*cloud
+    return after, deviations, prediction, j_obs
+
+
 def audit(root):
     root = Path(root)
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
@@ -32,6 +59,18 @@ def audit(root):
             late = 0
             for round_index, snapshot_path in enumerate(sorted(folder.glob("history_round_*.pt"))):
                 snapshot = torch.load(snapshot_path, map_location="cpu", weights_only=False)
+                round_index = snapshot.get("round_index", round_index)
+                if "history_before" in snapshot:
+                    state = snapshot["history_before"]
+                    history = History(config["gamma_d"], config["gamma_c"], config["epsilon_j"],
+                                      reference=state["reference"], deviations=state["deviations"],
+                                      mode_observations=state.get("mode_observations", {}))
+                    manual_ref, manual_dev, manual_pred, _ = independent_equations(
+                        state, snapshot["accepted"], config["gamma_d"], config["gamma_c"], config["epsilon_j"])
+                    torch.testing.assert_close(manual_ref, snapshot["history_after"]["reference"])
+                    for mode in manual_dev:
+                        torch.testing.assert_close(manual_dev[mode], snapshot["history_after"]["deviations"][mode])
+                    torch.testing.assert_close(manual_pred, snapshot["predicted_before_execution"])
                 units = snapshot["accepted"]
                 pending = snapshot["pending"]
                 assert not ({u.identity for u in units} & {u.identity for u in pending})
@@ -49,19 +88,39 @@ def audit(root):
                 if units:
                     assert abs(sum(observation["weights"])-1) < 1e-12
                     torch.testing.assert_close(observation["cloud_delta"], snapshot["delta"])
+                    if "model_before" in snapshot:
+                        torch.testing.assert_close(snapshot["model_after"].double()-snapshot["model_before"].double(),
+                                                   snapshot["delta"], rtol=1e-4, atol=2e-7)
                 torch.testing.assert_close(history.reference, snapshot["history_after"]["reference"])
                 assert set(history.deviations) == set(snapshot["history_after"]["deviations"])
                 for mode in history.deviations:
                     torch.testing.assert_close(history.deviations[mode], snapshot["history_after"]["deviations"][mode])
-            with (folder / "privacy_receipts.csv").open(encoding="utf-8-sig") as handle:
-                receipts = list(csv.DictReader(handle))
+            receipts = []
+            if (folder / "privacy_receipts.csv").exists():
+                with (folder / "privacy_receipts.csv").open(encoding="utf-8-sig") as handle:
+                    receipts = list(csv.DictReader(handle))
             actual_steps = sum(int(row["executed_events"]) for row in receipts)
+            # All accepted unit identities/weights are checked even when large
+            # runs save detailed tensor snapshots only at selected rounds.
+            all_units = []
+            if (folder / "cloud_units.csv").exists():
+                with (folder / "cloud_units.csv").open(encoding="utf-8-sig") as handle:
+                    all_units = list(csv.DictReader(handle))
+            identities = [row["identity"] for row in all_units]
+            assert len(set(identities)) == len(identities)
+            for index in {row["accepted_round"] for row in all_units}:
+                group = [row for row in all_units if row["accepted_round"] == index]
+                total = sum(int(row["samples"]) for row in group)
+                assert all(abs(float(row["weight"])-int(row["samples"])/total) < 1e-12 for row in group)
+                assert all(float(row["arrival"]) <= float(row["cutoff"])+1e-12 for row in group)
             assert actual_steps == summary["executed_local_steps"]
             assert all(int(row["executed_events"]) == config["local_steps"] for row in receipts)
             assert all(float(row["epsilon_after"]) <= config["epsilon"] + 1e-8 for row in receipts)
             assert summary["max_epsilon"] <= config["epsilon"] + 1e-8
             report.append({"policy": summary["policy"], "seed": summary["seed"],
-                           "accepted_units": len(seen), "cross_round_async_units": late,
+                           "accepted_units": len(all_units),
+                           "cross_round_async_units": sum(int(row["generated_round"]) < int(row["accepted_round"]) for row in all_units),
+                           "tensor_snapshots": len(list(folder.glob("history_round_*.pt"))),
                            "actual_dp_sgd_steps": actual_steps, "status": "passed"})
     if not report:
         raise ValueError("no completed runs to audit")

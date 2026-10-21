@@ -1,14 +1,16 @@
 """Real DP-SGD training with the single paper protocol."""
 from dataclasses import replace
+import copy
 import csv
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 import time
 import numpy as np
 import torch
 from .paper_config import MODES
-from .paper_data import assign, evaluate, load_data, local_train, make_model, partitions, vector
+from .paper_data import assign, evaluate, load_data, local_train, make_training_model, frozen_features, partitions, vector
 from .paper_history import History
 from .paper_privacy import Ledger
 from .paper_search import select
@@ -26,6 +28,14 @@ def write_csv(path, rows):
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def activation_start(now, busy, clients, pending):
+    # A queued Cloud event must not be skipped merely because all clients are
+    # still waiting for their own Edge returns.
+    if not pending and busy and all(busy.get(client, 0) > now+1e-12 for client in clients):
+        return min(busy.values())
+    return now
 
 
 def system_traces(config, seed):
@@ -51,7 +61,7 @@ def system_traces(config, seed):
 
 def run_policy(config, policy, seed, data, partition, traces, destination):
     destination.mkdir(parents=True, exist_ok=False)
-    model = make_model(config, seed)
+    model = make_training_model(config, seed, features=config.model == "resnet18_head")
     initial = vector(model)
     payload_mb = initial.numel() * initial.element_size() / 1e6
     torch.save(model.state_dict(), destination / "initial_model.pt")
@@ -69,8 +79,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         round_start = logical_time
         # Activation only waits for each client's own required model return.
         # FL_E availability is independent of its still-pending Cloud upload.
-        if busy and all(busy.get(client, 0) > logical_time + 1e-12 for client in samples):
-            logical_time = min(busy.values())
+        logical_time = activation_start(logical_time, busy, samples, pending)
         trace = traces[round_index]
         pools, sigmas = {}, {}
         for client in range(config.clients):
@@ -99,6 +108,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         prior_phase = search["phase"]
         profile, schedule = chosen.profile, chosen.schedule
         predicted, predicted_j, prediction_status = history.predict(mode_masses(schedule.accepted))
+        history_before = copy.deepcopy(history.state_dict())
         before = vector(model)
         realized = {}
         steps = 0
@@ -133,6 +143,8 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         accepted = [realized.get(unit.identity, unit) for unit in schedule.accepted]
         pending = [realized.get(unit.identity, unit) for unit in schedule.pending]
         observation = history.observe(accepted)
+        if observation.get("predicted_j") is not None and abs(predicted_j-observation["predicted_j"]) > 1e-10:
+            raise RuntimeError("pre-execution and recorded predictions differ")
         if accepted:
             assign(model, before.double() + observation["cloud_delta"])
             for unit, weight in zip(accepted, observation["weights"]):
@@ -155,12 +167,16 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         previous.update({client: mode for client, mode in profile.items() if mode != "SKIP"})
         # Save vectors so predictions can be independently recomputed from the
         # exact pre-execution reference, with no test data in selection.
-        torch.save({"reference_before": observation.get("reference_before"),
+        if round_index < 2 or (round_index+1) % config.snapshot_interval == 0 or round_index+1 == config.rounds:
+            torch.save({"round_index": round_index, "history_before": history_before,
+                    "reference_before": observation.get("reference_before"),
                     "predicted_before_execution": predicted,
                     "delta": observation.get("cloud_delta"),
+                    "model_before": before,
+                    "model_after": vector(model),
                     "history_after": history.state_dict(),
                     "accepted": accepted, "pending": pending},
-                   destination / f"history_round_{round_index:03d}.pt")
+                       destination / f"history_round_{round_index:03d}.pt")
         write_json(destination / f"timeline_round_{round_index:03d}.json", schedule.events)
         row = {"round": round_index+1, "test_accuracy": accuracy, "test_loss": loss,
                "system_time": logical_time, "round_duration": logical_time-round_start,
@@ -197,6 +213,8 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
                "executed_local_steps": sum(row["executed_local_steps"] for row in rows),
                "communication_mb": sum(row["communication_mb"] for row in rows),
                "mode_changes": sum(row["mode_changes"] for row in rows),
+               "history_observations": history.mode_observations,
+               "all_modes_observed": set(history.deviations) == set(MODES),
                "max_epsilon": max(ledger.epsilon() for ledger in ledgers.values()),
                "pending_at_end": len(pending), "wall_sec": time.perf_counter()-started}
     write_json(destination / "summary.json", summary)
@@ -209,9 +227,20 @@ def run(config, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / "config.json", config.to_dict())
+    torch.set_num_threads(config.torch_threads)
+    root = Path(__file__).resolve().parents[1]
+    source_hashes = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                     for folder in ("dynfed", "experiments") for path in (root/folder).glob("*.py")}
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    write_json(output / "source_manifest.json", {"git_revision": revision, "sha256": source_hashes})
+    write_json(output / "runtime.json", {"torch": torch.__version__, "device": config.device,
+                                        "gpu": torch.cuda.get_device_name(0) if config.device == "cuda" else None,
+                                        "frozen_feature_cache": config.model == "resnet18_head"})
     summaries = []
     for seed in config.seeds:
         data = load_data(config, seed)
+        if config.model == "resnet18_head":
+            data = frozen_features(config, seed, data)
         partition = partitions(data[1].numpy(), config.clients, config.edges, config.dirichlet_alpha, seed)
         traces = system_traces(config, seed)
         seed_dir = output / f"seed_{seed}"

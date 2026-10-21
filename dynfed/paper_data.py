@@ -84,6 +84,11 @@ def make_model(config, seed):
     torch.manual_seed(seed)
     if config.model == "lenet5":
         return LeNet5().to(config.device)
+    return make_backbone(config, seed)
+
+
+def make_backbone(config, seed):
+    torch.manual_seed(seed)
     from torchvision.models import resnet18, ResNet18_Weights
     weights = ResNet18_Weights.DEFAULT
     filename = weights.url.rsplit("/", 1)[-1]
@@ -96,6 +101,36 @@ def make_model(config, seed):
         parameter.requires_grad_(False)
     model.fc = nn.Linear(model.fc.in_features, 10)
     return model.to(config.device)
+
+
+@torch.no_grad()
+def frozen_features(config, seed, data):
+    """Exact public frozen feature extractor; no fitted statistics or test labels.
+
+    Keeping its evaluation-mode outputs is algebraically identical to redoing
+    the same frozen forward pass for every DP-SGD example.
+    """
+    backbone = make_backbone(config, seed)
+    backbone.fc = nn.Identity()
+    backbone.eval()
+    def features(x):
+        return torch.cat([backbone(x[start:start+256].to(config.device)).cpu()
+                          for start in range(0, len(x), 256)])
+    x, y, test_x, test_y = data
+    result = features(x), y, features(test_x), test_y
+    del backbone
+    return result
+
+
+def make_training_model(config, seed, features=False):
+    if not features:
+        return make_model(config, seed)
+    # Recreate exactly the classifier initialization of make_model, including
+    # RNG consumption by construction of the frozen backbone.
+    backbone = make_backbone(config, seed)
+    head = copy.deepcopy(backbone.fc)
+    del backbone
+    return head.to(config.device)
 
 
 def vector(model):
@@ -133,15 +168,41 @@ def local_train(model, base, x, y, indices, config, sigma, ledger, seed):
     for _ in range(config.local_steps):
         selected = rng.permutation(indices)[:config.batch_size]
         summed = [torch.zeros_like(parameter) for parameter in params]
-        for index in selected:
-            logits = worker(x[index:index+1].to(config.device))
-            loss = nn.functional.cross_entropy(logits, y[index:index+1].to(config.device))
-            gradients = torch.autograd.grad(loss, params)
-            norm = torch.sqrt(sum(gradient.square().sum() for gradient in gradients))
-            scale = (config.clip_norm / (norm + 1e-12)).clamp(max=1.0)
-            for accumulator, gradient in zip(summed, gradients):
-                accumulator.add_(gradient.detach() * scale)
-            losses.append(float(loss.detach()))
+        if config.gradient_backend == "vectorized" and isinstance(worker, nn.Linear):
+            # Exact per-example softmax-cross-entropy gradients for the frozen
+            # ResNet head, avoiding autodiff graph construction at every client.
+            with torch.no_grad():
+                features = x[selected].to(config.device)
+                targets = y[selected].to(config.device)
+                residual = worker(features).softmax(1) - nn.functional.one_hot(targets, worker.out_features)
+                weight_grad = residual[:, :, None] * features[:, None, :]
+                ordered = [weight_grad] + ([residual] if worker.bias is not None else [])
+                norms = torch.sqrt(sum(g.flatten(1).square().sum(1) for g in ordered))
+                scales = (config.clip_norm/(norms+1e-12)).clamp(max=1)
+                summed = [(g * scales.reshape((-1,) + (1,)*(g.ndim-1))).sum(0) for g in ordered]
+        elif config.gradient_backend == "vectorized":
+            from torch.func import functional_call, grad, vmap
+            named = dict(worker.named_parameters())
+            buffers = dict(worker.named_buffers())
+            def example_loss(parameters, features, target):
+                logits = functional_call(worker, (parameters, buffers), (features.unsqueeze(0),))
+                return nn.functional.cross_entropy(logits, target.unsqueeze(0))
+            gradients = vmap(grad(example_loss), in_dims=(None, 0, 0))(
+                named, x[selected].to(config.device), y[selected].to(config.device))
+            ordered = [gradients[name] for name, parameter in worker.named_parameters() if parameter.requires_grad]
+            norms = torch.sqrt(sum(g.flatten(1).square().sum(1) for g in ordered))
+            scales = (config.clip_norm/(norms+1e-12)).clamp(max=1)
+            summed = [(g * scales.reshape((-1,) + (1,)*(g.ndim-1))).sum(0).detach() for g in ordered]
+        else:
+            for index in selected:
+                logits = worker(x[index:index+1].to(config.device))
+                loss = nn.functional.cross_entropy(logits, y[index:index+1].to(config.device))
+                gradients = torch.autograd.grad(loss, params)
+                norm = torch.sqrt(sum(gradient.square().sum() for gradient in gradients))
+                scale = (config.clip_norm / (norm + 1e-12)).clamp(max=1.0)
+                for accumulator, gradient in zip(summed, gradients):
+                    accumulator.add_(gradient.detach() * scale)
+                losses.append(float(loss.detach()))
         with torch.no_grad():
             for parameter, accumulator in zip(params, summed):
                 noise = torch.randn(parameter.shape, device=config.device, generator=generator)

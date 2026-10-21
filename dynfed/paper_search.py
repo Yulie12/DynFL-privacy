@@ -67,12 +67,12 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
         special = {client: fixed[policy] if fixed[policy] in pools[client] else "SKIP" for client in clients}
     elif policy == "fixed_mixed":
         special = {client: MODES[client % 3] if MODES[client % 3] in pools[client] else "SKIP" for client in clients}
-    elif policy == "random_feasible":
-        rng = random.Random(config.seeds[0] * 1000003 + round_index)
-        special = {client: rng.choice(pools[client]) for client in clients}
     elif (not initializing and not force_reselect and previous and round_index % config.selection_period != 0
           and all(previous.get(client) in pools[client] for client in clients)):
         special = dict(previous)
+    elif policy == "random_feasible":
+        rng = random.Random(config.seeds[0] * 1000003 + round_index)
+        special = {client: rng.choice(pools[client]) for client in clients}
     if special is not None:
         chosen = evaluate(special)
         phase = "fixed" if policy.startswith("fixed_") else "reuse_or_random"

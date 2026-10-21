@@ -35,6 +35,11 @@ class PaperConfig:
     selection_period: int = 5
     evaluation_budget: int = 256
     archive_size: int = 16
+    async_trigger: str = "periodic"
+    cloud_tick_sec: float = 1.0
+    gradient_backend: str = "vectorized"
+    torch_threads: int = 1
+    snapshot_interval: int = 1
     exhaustive_limit: int = 100000
     dirichlet_alpha: float = 0.5
     client_heterogeneity: float = 2.0
@@ -59,7 +64,7 @@ class PaperConfig:
     def __post_init__(self):
         for name in ("clients", "edges", "rounds", "train_limit", "test_limit", "batch_size",
                      "local_steps", "edge_stages", "selection_period", "evaluation_budget",
-                     "archive_size", "exhaustive_limit", "edge_group_capacity"):
+                     "archive_size", "exhaustive_limit", "edge_group_capacity", "torch_threads", "snapshot_interval"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -68,7 +73,7 @@ class PaperConfig:
         for name in ("epsilon", "clip_norm", "learning_rate", "epsilon_j", "dirichlet_alpha",
                      "local_step_sec", "end_edge_mb_s", "end_cloud_mb_s", "edge_cloud_mb_s",
                      "required_memory_mb", "client_memory_mb", "client_heterogeneity",
-                     "required_compute", "client_compute_capacity"):
+                     "required_compute", "client_compute_capacity", "cloud_tick_sec"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         for name in ("end_edge_delay", "end_cloud_delay", "edge_cloud_delay",
@@ -87,6 +92,10 @@ class PaperConfig:
             raise ValueError("supported tasks: fmnist/lenet5, cifar10/resnet18_head")
         if self.device not in {"cpu", "cuda"}:
             raise ValueError("device must be cpu or cuda")
+        if self.async_trigger not in {"periodic", "first_arrival"}:
+            raise ValueError("async_trigger must be periodic or first_arrival")
+        if self.gradient_backend not in {"vectorized", "reference"}:
+            raise ValueError("gradient_backend must be vectorized or reference")
 
     def to_dict(self):
         return asdict(self)

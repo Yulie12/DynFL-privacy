@@ -1,5 +1,6 @@
 """Common absolute timeline, with persistent asynchronous FL_E Cloud units."""
 from dataclasses import dataclass, field
+import math
 import torch
 
 
@@ -32,8 +33,8 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
     """Plan exact sequential Edge stages and a Cloud acceptance cutoff.
 
     FL_E never contributes a dependency to a synchronous Cloud cutoff or return
-    maximum. In an FL_E-only iteration, the earliest asynchronous arrival is an
-    explicit event-driven Cloud trigger. Late units remain in pending.
+    maximum. Without synchronous units the EXOGENOUS trigger is a configured
+    periodic tick; earliest arrival exists only as a sensitivity alternative.
     """
     previous = previous or {}
     groups = {}
@@ -89,19 +90,21 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
     synchronous = bool(sync_arrivals)
     if synchronous:
         cutoff = max(sync_arrivals)
+    elif config.async_trigger == "periodic":
+        cutoff = (math.floor((start + 1e-12) / config.cloud_tick_sec) + 1) * config.cloud_tick_sec
     elif candidates:
         cutoff = max(start, min(unit.arrival for unit in candidates))
     else:
         cutoff = None
     accepted = [] if cutoff is None else [unit for unit in candidates if unit.arrival <= cutoff + 1e-12]
     deferred = [unit for unit in candidates if unit not in accepted]
-    finish = (start if cutoff is None else cutoff + config.cloud_aggregation_sec
+    finish = (start if cutoff is None else cutoff + (config.cloud_aggregation_sec if accepted else 0.0)
               + max(sync_returns, default=0.0))
     for client, mode in profile.items():
         if mode in {"FL_C", "FL_EC"}:
             completion[client] = finish
     events.append({"event": "cloud_acceptance", "cutoff": cutoff, "finish": finish,
-                   "trigger": "synchronous" if synchronous else "earliest_async_arrival",
+                   "trigger": "synchronous" if synchronous else config.async_trigger,
                    "accepted": [unit.identity for unit in accepted],
                    "pending": [unit.identity for unit in deferred]})
     return Schedule(units, accepted, deferred, cutoff, finish, synchronous, completion, events)

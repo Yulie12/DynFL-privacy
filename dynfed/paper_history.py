@@ -12,6 +12,7 @@ class History:
     epsilon_j: float = 1e-12
     reference: torch.Tensor | None = None
     deviations: dict[str, torch.Tensor] = field(default_factory=dict)
+    mode_observations: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         if not 0 <= self.gamma_d < 1 or not 0 <= self.gamma_c < 1:
@@ -73,6 +74,7 @@ class History:
                 previous = self.deviations.get(mode)
                 self.deviations[mode] = (deviation.clone() if previous is None else
                                         self.gamma_d * previous + (1 - self.gamma_d) * deviation)
+                self.mode_observations[mode] = self.mode_observations.get(mode, 0) + 1
         self.reference = (cloud.clone() if prior is None else
                           self.gamma_c * prior + (1 - self.gamma_c) * cloud)
         return {"cloud_update": True, "predicted_j": predicted_j, "observed_j": observed_j,
@@ -86,4 +88,5 @@ class History:
     def state_dict(self):
         return {"schema": "paper.deviation_history.v1", "gamma_d": self.gamma_d,
                 "gamma_c": self.gamma_c, "epsilon_j": self.epsilon_j,
-                "reference": self.reference, "deviations": self.deviations}
+                "reference": self.reference, "deviations": self.deviations,
+                "mode_observations": self.mode_observations}

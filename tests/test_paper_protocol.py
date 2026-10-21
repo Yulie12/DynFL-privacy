@@ -53,6 +53,7 @@ def test_no_cloud_and_missing_history_are_unassigned():
 
 def fixture_config():
     return PaperConfig(clients=3, edges=1, rounds=5, train_limit=30, test_limit=10,
+                       async_trigger="first_arrival",
                        local_steps=1, edge_stages=3, edge_aggregation_sec=0.2,
                        cloud_aggregation_sec=0.3, end_edge_delay=0, end_cloud_delay=0,
                        edge_cloud_delay=0, switch_sec=0)
@@ -200,3 +201,60 @@ def test_all_sync_infeasible_but_pending_async_can_still_update_cloud():
     assert result.cutoff == 5
     assert result.accepted == [pending]
     assert result.units == []
+
+
+def test_periodic_cloud_trigger_is_exogenous_and_can_produce_no_update():
+    cfg = replace(fixture_config(), async_trigger="periodic", cloud_tick_sec=1.0)
+    result = plan(cfg, {0:"FL_E"}, traces(), {0:1}, 1, 0, 0)
+    assert result.cutoff == 1.0
+    assert result.finish == 1.0
+    assert not result.accepted
+    assert len(result.pending) == 1
+    # Same tick even if the upload arrival changes: it is not derived from an
+    # outcome of the selected mode profile.
+    different = traces()
+    different[0]["step_sec"] = 20
+    later = plan(cfg, {0:"FL_E"}, different, {0:1}, 1, 0, 0)
+    assert later.cutoff == result.cutoff
+
+
+@pytest.mark.parametrize("gamma_d,gamma_c", [(0.,0.),(.5,.9),(.9,.5)])
+def test_history_order_and_prediction_with_different_smoothing(gamma_d, gamma_c):
+    h = History(gamma_d=gamma_d, gamma_c=gamma_c)
+    h.observe([unit("r0", "FL_C", 2)])
+    h.observe([unit("r1", "FL_C", 6)])
+    old_reference = gamma_c*2+(1-gamma_c)*6
+    prior_prediction = old_reference+4
+    predicted, j, _ = h.predict({"FL_C":1})
+    assert predicted.item() == pytest.approx(prior_prediction)
+    observation = h.observe([unit("r2", "FL_C", 9)])
+    assert observation["predicted_j"] == pytest.approx(j)
+    expected_d = gamma_d*4+(1-gamma_d)*(9-old_reference)
+    assert h.deviations["FL_C"].item() == pytest.approx(expected_d)
+    assert h.reference.item() == pytest.approx(gamma_c*old_reference+(1-gamma_c)*9)
+
+
+def test_vectorized_dp_sgd_matches_reference_example_gradients():
+    from dynfed.paper_data import local_train, vector
+    torch.manual_seed(12)
+    model = torch.nn.Linear(2, 2)
+    x, y = torch.randn(3,2), torch.tensor([0,1,0])
+    cfg = replace(fixture_config(), batch_size=3, local_steps=2)
+    actual, _ = local_train(model, vector(model), x, y, [0,1,2], cfg, 2., Ledger(100.,1e-5), 23)
+    expected, _ = local_train(model, vector(model), x, y, [0,1,2],
+                              replace(cfg, gradient_backend="reference"), 2., Ledger(100.,1e-5), 23)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_pending_cloud_event_has_priority_over_client_activation_wait():
+    from dynfed.paper_runner import activation_start
+    assert activation_start(.25, {0:.8}, [0], [unit("late", "FL_E", 1, arrival=.4)]) == .25
+    assert activation_start(.25, {0:.8}, [0], []) == .8
+
+
+def test_random_baseline_honors_the_same_selection_period():
+    config = fixture_config()
+    previous = {0:"FL_C", 1:"FL_E"}
+    chosen, _ = select(config, "random_feasible", {0:("FL_C","FL_E"), 1:("FL_C","FL_E")},
+                       History(), traces(), {0:1,1:1}, .01, 0, 1, previous, [])
+    assert chosen.profile == previous

@@ -123,7 +123,6 @@ to estimate the Cloud update under different
 collaboration mode distributions. The estimated
 deviation and system latency are jointly considered
 in the multiobjective optimization.
-The estimated learning error and system latency are jointly considered as optimization objectives.
 Feasible collaboration profiles are filtered by Pareto dominance and selected using the Chebyshev ideal point criterion.
 Experiments on CIFAR-10 with ResNet-18 and Fashion-MNIST with LeNet-5 evaluate dynamic collaboration under heterogeneous resource and data conditions.
 \end{abstract}
@@ -164,9 +163,9 @@ privacy protection requirements.
 \begin{itemize}
     \item A dynamic collaboration configuration space for cloud-edge-end federated learning is formulated, which enables execution and aggregation configurations to be selected according to current system conditions.
 
-    \item A joint learning error model is constructed, which accounts for algorithmic deviation, aggregation deviation, and update perturbation. Together with system latency, the estimated learning error forms an optimization problem with two objectives under resource and protection constraints. Feasible configurations are compared using Pareto dominance, and the final configuration is selected using the Chebyshev ideal point criterion.
+    \item A historical update-deviation estimator is constructed from accepted Cloud units. Its normalized deviation and modeled system time form two objectives under resource and lifetime privacy constraints. Feasible configurations are compared using Pareto dominance and the Chebyshev ideal point criterion. The estimator is not asserted to bound optimization error or predict loss reduction.
 
-    \item
+    \item A reproducible evaluation protocol separates estimator error, real test performance, modeled communication time, and measured selection overhead, using paired random seeds and explicit Cloud acceptance rules.
 \end{itemize}
 
 The remainder of this paper is organized as follows.
@@ -705,6 +704,11 @@ denote the corresponding client sets.
 Clients operating in \(FL_E\) are excluded
 from both sets because they do not wait for
 Cloud aggregation.
+Equation~\eqref{eq:system_round_latency} is used only when at least one
+synchronous $FL_{EC}$ or $FL_C$ unit exists. With no synchronous unit,
+an empty-set maximum does not specify a Cloud aggregation trigger.
+Such an execution requires an additional Cloud service policy, specified
+in the experimental setup. This is a modeling boundary, not a latency guarantee.
 Return delays are evaluated using
 (\ref{eq:comm_latency}), with absent
 return paths excluded from the maximum.
@@ -784,7 +788,9 @@ v_g^{\tau-1}
 \label{eq:global_ema}
 \end{equation}
 The first available Cloud update is used to initialize
-the reference.
+the reference. If no Cloud unit is accepted, the previous reference is
+retained. The first accepted update initializes only this reference;
+a mode deviation cannot be computed before a prior reference exists.
 
 Let $u_{k,\mathrm{DP}}^\tau$ denote the update of unit $k$
 accepted by the Cloud at round $\tau$ after the required
@@ -795,6 +801,10 @@ The deviation of unit $k$ from the historical reference is
 d_k^\tau=u_{k,\mathrm{DP}}^\tau-v_g^{\tau-1}.
 \label{eq:unit_deviation}
 \end{equation}
+The reference in this expression is frozen before executing round
+$\tau$. Deviations and prediction errors are recorded before updating
+either EMA. A delayed $FL_E$ unit retains the increment produced at its
+generation round; it is not silently rebased as a newly trained update.
 Let $\mathcal K_m^\tau$ denote the Cloud units of mode
 $m\in\mathcal H$ included at round $\tau$.
 If this set is not empty, the weighted mean deviation of
@@ -1008,7 +1018,7 @@ $D_\infty$ & Normalized Tchebycheff score. \\
 \small
 \begin{algorithmic}[1]
 \REQUIRE Round $t$, strategy period $S_P$,
-system state, privacy ledger, historical estimates
+system state, privacy ledger, historical estimates, and pending asynchronous units
 \ENSURE Selected mode distribution
 $\mathbf h^{t,\ast}$ or \textsc{skip}
 
@@ -1019,9 +1029,10 @@ $\mathcal F_i^t$ using
 using the Cloud admission rules
 
 \IF{$\mathcal F_{\mathrm{sys}}^t=\emptyset$}
-    \STATE \textbf{return} \textsc{skip}
+    \STATE Set new assignments to \textsc{skip}; process pending Cloud events
 \ELSIF{$t>1$,
 $\operatorname{mod}(t-1,S_P)\neq0$,
+history initialization has finished,
 and $\mathbf h^{t-1,\ast}\in\mathcal F_{\mathrm{sys}}^t$}
     \STATE $\mathbf h^{t,\ast}
     \leftarrow\mathbf h^{t-1,\ast}$
@@ -1049,6 +1060,9 @@ and $\mathbf h^{t-1,\ast}\in\mathcal F_{\mathrm{sys}}^t$}
         using latency and mode coverage
     \ENDIF
 \ENDIF
+\STATE Execute training and apply the explicit Cloud acceptance policy
+\STATE Record predictions and observed deviations against the frozen reference
+\STATE Update observed mode-deviation EMAs, then the global EMA; retain unavailable histories
 \STATE \textbf{return} $\mathbf h^{t,\ast}$
 \end{algorithmic}
 \end{algorithm}
@@ -1087,6 +1101,21 @@ to the Cloud. In $FL_E$, an Edge group sends its update asynchronously;
 the update contributes to the Cloud aggregation that accepts it.
 Only accepted units are included when Cloud weights and historical
 mode deviations are calculated.
+
+\textbf{Asynchronous-only service policy.}
+The synchronization formula does not determine when the Cloud aggregates
+if all active clients use $FL_E$. For this case the main implementation
+uses a separately configured, exogenous Cloud service clock with period
+$\tau_C=1$~s. The next absolute tick after the current start time defines
+the acceptance cutoff. Only units already arrived at that cutoff are
+aggregated; an empty cutoff produces no Cloud update and late units remain
+queued. This is an experimental scheduling assumption, not a property
+derived from the synchronization formula. For mixed profiles, the original
+synchronous cutoff remains in force and $FL_E$ adds no waiting dependency.
+Cumulative system time includes elapsed asynchronous observation windows
+and client activation waits. Sensitivity runs compare
+$\tau_C\in\{0.25,1,4\}$~s and a first-arrival trigger; their outcomes are
+reported separately before drawing scheduler-independent conclusions.
 
 Sample level DP is applied during local training and privacy costs
 are accumulated using the ledger in Sec.~\ref{sec:privacy_model}.
@@ -1233,6 +1262,7 @@ $T_{\mathrm{sys}}$ because it is not part of the current round
 latency model. When a target accuracy is not reached, this is
 reported without assigning an artificial completion time.
 
+\IfFileExists{results/formal_main.tex}{\input{results/formal_main.tex}}{%
 \begin{table*}[t]
 \centering
 \caption{Planned comparison measures. All result cells will be
@@ -1257,6 +1287,7 @@ Update deviation only & -- & -- & -- & -- & -- \\
 \bottomrule
 \end{tabular}
 \end{table*}
+}
 
 \subsection{Ablation Study}
 \label{sec:ablation_result}
@@ -1301,6 +1332,12 @@ loss of detail caused by sharing one statistical estimate across
 Edges. Prediction error, system time, and test accuracy are
 reported separately.
 
+\IfFileExists{results/pilot_ema.tex}{\input{results/pilot_ema.tex}}{}
+The pilot EMA comparison is reported separately from full-scale runs.
+Setting both smoothing coefficients to zero keeps the latest valid
+observations; it does not remove the historical objective. These
+measurements do not establish a universal advantage of smoothing.
+
 \subsubsection{Resource, Network, and Privacy Conditions}
 \label{subsec:constraint_ablation}
 
@@ -1312,6 +1349,8 @@ privacy consumption, and training time are recorded. The
 number of $FL_{EC}$ stages $E_B$ is varied in a separate
 experiment because it changes both training work and the
 number of protected local steps.
+
+\IfFileExists{results/pilot_triggers.tex}{\input{results/pilot_triggers.tex}}{}
 
 \subsection{Search Space Reduction and Selection Cost}
 \label{sec:exp_search_cost}
@@ -1358,20 +1397,19 @@ predicted learning cost alone.
 
 \section{Conclusion}
 \label{sec:conclusion}
-This paper presented a dynamic cloud-edge-end collaboration reconfiguration
-framework for federated learning under resource and privacy constraints. The
-unified collaboration space represents execution placement, aggregation
-topology, transmitted objects, and return paths as the dynamic decision, while a
-mode-specific exposure contract determines where DP and HE are required. The
-joint model evaluates latency, communication, candidate-specific DP distortion,
-encrypted aggregation overhead, and estimated convergence error cost. The constrained multiobjective formulation is solved by bounded Pareto
-search and ideal point Tchebycheff selection.
+This paper studies three-mode cloud-edge-end collaboration using historical
+update deviation and modeled system time as selection objectives. Accepted
+Cloud units determine both sample weights and historical statistics. Local
+sample-level DP-SGD is composed using a conservative Gaussian RDP ledger.
+Bounded Pareto search and normalized Chebyshev selection provide an
+approximate search procedure; completeness of its Pareto front is not claimed.
 
-The current framework uses profiled computation and link rates in its logical
-latency model, while the training process and CKKS aggregation are executed on
-one host. Future work will combine online profiling with physical
-cloud-edge-end deployment and will further reduce reconfiguration overhead
-through parallel profile evaluation, distributed search, and warm starts.
+The implementation executes training on one host and models the three-tier
+timeline using configurable compute and link parameters. It does not execute
+a CKKS or secure-aggregation protocol. Historical deviation is an empirical
+selection signal, not a proved bound on loss reduction or test accuracy.
+Physical distributed deployment, measured resource profiling, and validation
+of asynchronous service policies remain outside the current experiments.
 
 \appendix
 \bibliographystyle{elsarticle-num}

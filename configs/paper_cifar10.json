@@ -3,6 +3,7 @@
   "model": "resnet18_head",
   "data_root": "data",
   "device": "cuda",
+  "snapshot_interval": 10,
   "train_limit": 50000,
   "test_limit": 10000,
   "clients": 100,

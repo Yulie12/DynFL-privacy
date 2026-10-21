@@ -38,9 +38,10 @@ python experiments/audit_paper.py out/paper_fmnist/YOUR_RUN
   Gaussian RDP，不声称采样放大。校准包含剩余轮数与 `FL_EC` 全部阶段；执行后
   记录实际机制次数。没有额外上传包噪声或 HE 协议。
 
-论文未明确的全 `FL_E` 情况采用如下约定：由最早异步到达事件触发 Cloud 聚合；
-这属于异步事件等待，不是等待所有 `FL_E` 上传的同步屏障。有同步模式时，
-Cloud 截止时间和返回最大值均不依赖 `FL_E`。
+论文的同步公式不能推出全 `FL_E` 的Cloud触发规则。主配置显式采用外生周期时钟
+（`async_trigger=periodic`, `cloud_tick_sec=1`）；空tick没有Cloud更新。
+`first_arrival`仅作为敏感性对照，不宣称为理论性质。有同步模式时，
+Cloud截止时间和返回最大值均不依赖 `FL_E`。细节见 `docs/MATHEMATICAL_AUDIT_ZH.md`。
 
 `required_compute/client_compute_capacity` 使用一致的归一化计算资源单位；内存以 MB
 配置；每个 Edge 的可同时激活客户端数由 `edge_group_capacity` 配置。时延是模型
@@ -60,8 +61,11 @@ Cloud接受单元与样本权重、逐轮绝对时间线、历史参考/偏差/�
 并检查初始模型配对、无重复接受、DP执行次数和预算上限。
 
 论文的候选检查点独立重放排名、按 Edge 历史消融尚未实现。可选 NSGA-II 未保留；
-小规模搜索对照提供严格受组合数上限控制的穷举。正式100轮实验及CIFAR-10训练仍需
-在适合的计算环境执行。逐样本训练优先实现可核查的隐私机制，当前性能未优化。
+小规模搜索对照提供严格受组合数上限控制的穷举。正式矩阵使用
+`python experiments/research_campaign.py --phase all --output OUTPUT`：
+先执行多种子试运行和消融，再执行两任务正式矩阵。`campaign_status.json`记录阶段、
+PID和完成情况。每个完成场景会审计并统计均值/标准差，全部正式运行完成后才导出论文
+正式表格；pilot使用独立标记的表格。向量化/分类头解析梯度保持同一DP-SGD机制。
 
 ## 清理
 

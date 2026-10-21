@@ -33,9 +33,10 @@ def summarize(root, target):
             raise ValueError("duplicate seeds for one policy: summarize a single scenario directory")
         aggregate = {"policy": policy, "seeds": len(rows), "reached_target_seeds": sum(row["target_reached"] for row in rows)}
         for key in ("final_test_accuracy", "final_test_loss", "system_time", "selection_sec",
-                    "admission_fraction", "cloud_update_fraction", "communication_mb", "max_epsilon"):
-            values = [row[key] for row in rows]
-            aggregate[key + "_mean"] = statistics.mean(values)
+                    "admission_fraction", "cloud_update_fraction", "communication_mb", "max_epsilon",
+                    "mode_changes", "prediction_mae"):
+            values = [row[key] for row in rows if row.get(key) is not None]
+            aggregate[key + "_mean"] = statistics.mean(values) if values else None
             aggregate[key + "_std"] = statistics.stdev(values) if len(values) > 1 else None
         aggregates.append(aggregate)
     # Paired differences against proposed, only for seeds present in both arms.
