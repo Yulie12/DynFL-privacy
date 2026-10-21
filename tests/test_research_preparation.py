@@ -42,6 +42,7 @@ def test_shared_initialization_is_identical_and_charged(toy,tmp_path):
         assert result["initialization_rounds"] == 2
         assert result["initialization_steps"] == 20
         assert result["initialization_max_epsilon"] > 0
+        assert result["initialization_local_training_wall_sec"] > 0
         assert result["initialization_system_time"] > 0
         assert result["initialization_system_time"]+result["selection_phase_system_time"] == pytest.approx(result["system_time"])
         states.append(load_checkpoint(tmp_path/policy/"checkpoint_round_002.pt"))
@@ -267,3 +268,9 @@ def test_preregistration_is_checked_before_training(toy,tmp_path):
     validate_preregistration(cfg,output,source)
     data.write_bytes(b"changed input")
     with pytest.raises(RuntimeError,match="file changed"):validate_preregistration(cfg,output,source)
+
+
+def test_changed_runtime_cannot_resume_checkpoint(toy,tmp_path,monkeypatch):
+    with pytest.raises(InterruptedError):execute(toy,tmp_path/"run",stop_after_round=2)
+    monkeypatch.setattr(runner.np,"__version__","changed-runtime")
+    with pytest.raises(RuntimeError,match="identity mismatch"):execute(toy,tmp_path/"run",resume=True)

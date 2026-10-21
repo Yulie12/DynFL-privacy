@@ -40,7 +40,8 @@ def summarize(root, target):
                     "mode_changes", "prediction_mae", "initialization_system_time", "initialization_steps",
                     "initialization_max_epsilon", "selection_phase_system_time", "selection_phase_steps",
                     "initialization_test_accuracy", "post_initialization_accuracy_change", "mean_selection_round_duration",
-                    "selection_fraction_FL_E", "selection_fraction_FL_EC", "selection_fraction_FL_C"):
+                    "selection_fraction_FL_E", "selection_fraction_FL_EC", "selection_fraction_FL_C",
+                    "initialization_local_training_wall_sec", "local_training_wall_sec", "attempt_wall_sec"):
             values = [row[key] for row in rows if row.get(key) is not None]
             aggregate[key + "_mean"] = statistics.mean(values) if values else None
             aggregate[key + "_std"] = statistics.stdev(values) if len(values) > 1 else None

@@ -10,6 +10,7 @@ import time
 import random
 import traceback
 import os
+import sys
 from datetime import datetime, timezone
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import numpy as np
@@ -76,7 +77,13 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
     destination.mkdir(parents=True, exist_ok=resume)
     identity = {"config_hash": digest(config.to_dict()), "source_hash": source_identity()["source_hash"],
                 "partition_hash": digest(partition), "traces_hash": digest(traces),
-                "data_hashes": [tensor_digest(value) for value in data]}
+                "data_hashes": [tensor_digest(value) for value in data],
+                "runtime": {"python":sys.executable,"python_version":sys.version,"numpy":np.__version__,
+                            "torch":torch.__version__,"cuda":torch.version.cuda,
+                            "cudnn":torch.backends.cudnn.version(),"threads":torch.get_num_threads(),
+                            "deterministic":torch.are_deterministic_algorithms_enabled(),
+                            "cublas_workspace":os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+                            "gpu":torch.cuda.get_device_name(0) if config.device=="cuda" else None}}
     run_id = digest(identity)
     identity_path = destination/"run_identity.json"
     if identity_path.exists():
@@ -194,17 +201,23 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
                         ledgers[client] = copy.deepcopy(block["ledger"])
                     if block is not None and block["status"] == "complete":
                         updated = block["updated"]
+                        local_wall_sec = block["local_wall_sec"]
                     else:
+                        local_started = time.perf_counter()
+                        local_offset = 0. if block is None else block["local_wall_sec"]
                         def persist_step(progress):
                             atomic_torch(block_path, {"identity": block_id, "status": "partial",
-                                                       "ledger": copy.deepcopy(ledgers[client]), "progress": progress})
+                                                       "ledger": copy.deepcopy(ledgers[client]), "progress": progress,
+                                                       "local_wall_sec":local_offset+time.perf_counter()-local_started})
                         try:
                             updated, _ = local_train(model, edge_model, x, y, partition[client], config,
                                                      sigma, ledgers[client], worker_seed,
                                                      resume_state=None if block is None else block["progress"],
                                                      progress_callback=persist_step)
+                            local_wall_sec = local_offset+time.perf_counter()-local_started
                             atomic_torch(block_path, {"identity": block_id, "status": "complete",
-                                                      "ledger": copy.deepcopy(ledgers[client]), "updated": updated})
+                                                      "ledger": copy.deepcopy(ledgers[client]), "updated": updated,
+                                                      "local_wall_sec":local_wall_sec})
                         finally:
                             durable = torch.load(block_path, map_location="cpu", weights_only=False) if block_path.exists() else None
                             durable_events = count_before if durable is None else durable["ledger"].events
@@ -220,6 +233,7 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
                     steps += observed
                     receipts.append({"round": round_index, "client": client, "mode": unit.mode,
                                      "stage": stage+1, "sigma": sigma, "executed_events": observed,
+                                     "local_wall_sec":local_wall_sec,
                                      "epsilon_after": ledgers[client].epsilon()})
                     local.append((updated, samples[client]))
                 mass = sum(count for _, count in local)
@@ -361,6 +375,9 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
     summary["initialization_test_accuracy"] = init_rows[-1]["test_accuracy"] if init_rows else None
     summary["post_initialization_accuracy_change"] = (rows[-1]["test_accuracy"]-init_rows[-1]["test_accuracy"]) if init_rows else None
     summary["mean_selection_round_duration"] = (sum(row["round_duration"] for row in selection_rows)/len(selection_rows)) if selection_rows else None
+    summary["initialization_local_training_wall_sec"] = sum(row["local_wall_sec"] for row in receipts
+              if policy in CORE_POLICIES and row["round"] < config.shared_init_rounds)
+    summary["local_training_wall_sec"] = sum(row["local_wall_sec"] for row in receipts)
     selection_decisions = [row for row in decisions if not (policy in CORE_POLICIES and row["round"] < config.shared_init_rounds)]
     for mode in MODES:
         summary["selection_fraction_"+mode] = sum(row["mode"] == mode for row in selection_decisions)/max(1,len(selection_decisions))
