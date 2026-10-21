@@ -3,6 +3,8 @@
   "model": "resnet18_head",
   "data_root": "data",
   "device": "cuda",
+  "protocol": "global_barrier_100",
+  "cloud_quorum": 1.0,
   "snapshot_interval": 10,
   "train_limit": 50000,
   "test_limit": 10000,

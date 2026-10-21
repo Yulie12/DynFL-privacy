@@ -35,8 +35,10 @@ class PaperConfig:
     selection_period: int = 5
     evaluation_budget: int = 256
     archive_size: int = 16
-    async_trigger: str = "periodic"
-    cloud_tick_sec: float = 1.0
+    protocol: str = "global_barrier_100"
+    cloud_quorum: float = 1.0
+    acknowledgement_mb: float = 0.000064
+    model_install_sec: float = 0.001
     gradient_backend: str = "vectorized"
     torch_threads: int = 1
     snapshot_interval: int = 1
@@ -73,11 +75,11 @@ class PaperConfig:
         for name in ("epsilon", "clip_norm", "learning_rate", "epsilon_j", "dirichlet_alpha",
                      "local_step_sec", "end_edge_mb_s", "end_cloud_mb_s", "edge_cloud_mb_s",
                      "required_memory_mb", "client_memory_mb", "client_heterogeneity",
-                     "required_compute", "client_compute_capacity", "cloud_tick_sec"):
+                     "required_compute", "client_compute_capacity", "acknowledgement_mb"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         for name in ("end_edge_delay", "end_cloud_delay", "edge_cloud_delay",
-                     "edge_aggregation_sec", "cloud_aggregation_sec", "switch_sec"):
+                     "edge_aggregation_sec", "cloud_aggregation_sec", "switch_sec", "model_install_sec"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if not 0 < self.delta < 1 or not 0 <= self.gamma_d < 1 or not 0 <= self.gamma_c < 1:
@@ -92,8 +94,8 @@ class PaperConfig:
             raise ValueError("supported tasks: fmnist/lenet5, cifar10/resnet18_head")
         if self.device not in {"cpu", "cuda"}:
             raise ValueError("device must be cpu or cuda")
-        if self.async_trigger not in {"periodic", "first_arrival"}:
-            raise ValueError("async_trigger must be periodic or first_arrival")
+        if self.protocol != "global_barrier_100" or self.cloud_quorum != 1.0:
+            raise ValueError("only global_barrier_100 with cloud_quorum=1.0 is implemented; 90% is deferred")
         if self.gradient_backend not in {"vectorized", "reference"}:
             raise ValueError("gradient_backend must be vectorized or reference")
 

@@ -247,7 +247,9 @@ In Edge-based Federated Learning ($FL_E$),
 clients perform local training and submit their updates 
 to the Edge for aggregation. The aggregated Edge update 
 is then asynchronously propagated to the Cloud, without 
-requiring clients to wait for Cloud-side aggregation. In 
+requiring clients to wait for Cloud-side aggregation to finish their local
+Edge chain. All clients nevertheless wait for the global version barrier
+before starting the next round. In
 Edge--Cloud Federated Learning ($FL_{EC}$), a group of 
 clients associated with the same Edge participates in a 
 multi-stage collaborative process. The Edge performs $E_B$ 
@@ -308,12 +310,12 @@ T_L(L_B)
 \end{aligned}
 \label{eq:mode_flows}
 \end{equation}
-All Edge replicas are initialized from the same initial model. A continuing
-$FL_E$ group starts from its Edge's latest available local replica, updated
-only after the corresponding Edge feedback completes; it does not implicitly
-receive a new Cloud model. $FL_C$ and $FL_{EC}$ dispatch from the available
-Cloud checkpoint, with $FL_{EC}$ using its intermediate Edge models at later
-stages. Unit increments are measured relative to their actual dispatch model.
+All modes start a round from the same Cloud model version, installed and
+acknowledged by every client before training starts. $FL_{EC}$ uses intermediate
+Edge models within its multi-stage local collaboration. $FL_E$ may finish its
+Edge collaboration chain without waiting for Cloud aggregation, but cannot
+start the next round before the global broadcast barrier. Unit increments
+are measured relative to the common round-start model.
 Model preparation at a mode switch is included in the reconfiguration-time
 estimate; this bootstrap overhead has not been measured on a physical network.
 Here, The arrows indicate the direction of information flow.
@@ -440,46 +442,15 @@ learning error, subject to the lifetime
 privacy budget in Sec.~\ref{sec:privacy_model}.
 \subsubsection{Path and Round Latency on a Common Timeline}
 
-Figure~\ref{fig:system_timeline} provides two 
-complementary views of collaboration latency. 
-Fig.~\ref{fig:system_timeline}(a) illustrates the 
-client-side execution and communication sequence 
-of $FL_{EC}$, including the $E_B$ sequential Edge 
-aggregation stages and the intermediate return 
-transmissions from the Edge to the clients. 
-After the final Edge aggregation stage, 
-the resulting update is forwarded to the Cloud. 
-Fig.~\ref{fig:system_timeline}(b) illustrates 
-the system-level synchronization process for 
-$FL_{EC}$ and $FL_C$. It shows how the final 
-Edge updates and direct client updates determine 
-the Cloud aggregation completion time, 
-followed by the required return transmissions. 
-For clarity, panel (b) uses $E_B=1$ as an 
-illustrative example, while the latency 
-formulation supports general $E_B$. 
-The asynchronous Cloud upload in $FL_E$ 
-is omitted from panel (b) because it does not 
-impose a waiting dependency on the 
-Cloud-synchronized round.
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\textwidth]{common_timeline.png}
-\caption{Client-side and system-level latency timelines.
- (a) Client-side execution and communication path 
- for $FL_{EC}$, showing the $E_B$ sequential 
- Edge aggregation stages. 
- (b) System-level synchronization 
- timeline for $FL_{EC}$ and $FL_C$, 
- illustrated with $E_B=1$ for clarity. 
- Cloud aggregation waits for the final 
- $FL_{EC}$ Edge updates and direct $FL_C$ 
- client updates, followed by the required 
- return transmissions. The asynchronous 
- Cloud upload in $FL_E$ is omitted because 
- it does not delay the Cloud-synchronized round.}
-\label{fig:system_timeline}
-\end{figure*}
+The client-side execution sequence of $FL_{EC}$ contains $E_B$ sequential
+Edge aggregation stages and intermediate return transmissions to the clients.
+After the final Edge aggregation stage, the resulting update is forwarded
+to the Cloud.
+The global state sequence is: fix the expected unit set, execute local
+collaboration, wait for all expected units, aggregate at the Cloud,
+broadcast the model, collect every client ACK, and release the next round.
+The former timeline illustration that excluded $FL_E$ from the Cloud
+barrier is not used in this revised protocol.
 
 \textbf{Transmission latency.}
 For a payload \(b\) transmitted from tier \(u\)
@@ -628,8 +599,8 @@ For \(FL_E\), the aggregated Edge update is
 forwarded to the Cloud asynchronously after
 the single Edge aggregation stage. This
 transmission does not require clients to wait
-for Cloud aggregation and is excluded from
-the Cloud synchronization latency.
+for Cloud aggregation to finish their local Edge chain. Its arrival is,
+however, required by the current 100\% Cloud update-unit quorum.
 
 For \(FL_{EC}\), the final Edge update is
 forwarded to the Cloud after the \(E_B\)-th
@@ -655,90 +626,40 @@ T_i^{\mathrm{stage},t}(FL_C)
 T_{L,C,b}^{\mathrm{link},t}(FL_C).
 \end{equation}
 
-Cloud aggregation waits for the direct client
-updates from $FL_C$ and the final Edge updates
-from $FL_{EC}$. 
-Let $\mathcal G_{EC}^t
-=\{g\mid\mathcal G_{g,FL_{EC}}^t
-\neq\emptyset\}$ denote the Edge servers
-with active $FL_{EC}$ groups. The Cloud aggregation
-completion time is
+Let $\mathcal K_{\mathrm{exp}}^t$ be the Cloud update-unit set fixed before
+training: one unit for each nonempty (Edge, mode) group and one for each
+$FL_C$ client. With a 100\% unit-count quorum, all these units must arrive.
+Using round-relative arrival times $a_{k,C}^t$, Cloud aggregation completes at
 \begin{equation}
-\begin{aligned}
-f_C^t
-={}&
-\max\Bigg\{
-\max_{i\in\mathcal D_C^t} a_{i,C}^t,\,
-\max_{g\in\mathcal G_{EC}^t} a_{g,C}^t
-\Bigg\}\\
-&+T_C^{\mathrm{agg},t},
+f_C^t=\max_{k\in\mathcal K_{\mathrm{exp}}^t}a_{k,C}^t+T_C^{\mathrm{agg},t}.
 \label{eq:cloud_agg_finish}
-\end{aligned}
 \end{equation}
-where $\mathcal D_C^t$ denotes the set of
-$FL_C$ clients. The asynchronous uploads
-of $FL_E$ do not affect the Cloud
-synchronization time.
+For an empty expected set, there is no aggregation or new Cloud version.
+No unit is carried into a later round.
 
-The system round latency is measured with
-respect to the Cloud aggregation round.
-Clients operating in \(FL_E\) are excluded
-from this Cloud synchronization latency
-because they do not wait for Cloud aggregation.
-When required, return transmissions begin
-after Cloud aggregation completes.
-The system round latency is therefore
+After aggregation, the Cloud broadcasts the resulting version to every
+configured client, including clients marked \textsc{skip}. Let $D_i^t$ be
+the model downlink time, $A_i^t$ the ACK uplink time, $I_i^t$ the installation
+time, and $L_i^t$ the completion of any required local Edge return (zero
+when no such return is outstanding). The client acknowledgement reaches
+the Cloud at
 \begin{equation}
-\begin{aligned}
-T_{\mathrm{sys}}(\mathbf h^t)
-={}&f_C^t+\max\Bigg\{
-\max_{i\in\mathcal D_{EC}^t}
-\Big(
-T_{C,E,b}^{\mathrm{link},t}(h_i^t)
-+
-T_{E,L,b}^{\mathrm{link},t}(h_i^t)
-\Big),\\
-&\qquad
-\max_{i\in\mathcal D_C^t}
-T_{C,L,b}^{\mathrm{link},t}(h_i^t)
-\Bigg\}.
-\end{aligned}
+b_i^t=\max\{f_C^t+D_i^t,L_i^t\}+I_i^t+A_i^t.
 \label{eq:system_round_latency}
 \end{equation}
-
-Here, $\mathcal D_{EC}^t=\{i\mid h_i^t=FL_{EC}\}$
-and $\mathcal D_C^t=\{i\mid h_i^t=FL_C\}$
-denote the corresponding client sets.
-Clients operating in \(FL_E\) are excluded
-from both sets because they do not wait for
-Cloud aggregation.
-Equation~\eqref{eq:system_round_latency} is used only when at least one
-synchronous $FL_{EC}$ or $FL_C$ unit exists. With no synchronous unit,
-an empty-set maximum does not specify a Cloud aggregation trigger.
-Such an execution requires an additional Cloud service policy, specified
-in the experimental setup. This is a modeling boundary, not a latency guarantee.
-For optimization over profiles that may contain no synchronous unit, we
-therefore distinguish synchronization time from the following explicitly
-extended round-observation time. Let $s_t$ be the absolute start time after
-any activation wait, $\mathcal S^t=\mathcal D_C^t\cup\mathcal D_{EC}^t$,
-and $\zeta_C^t$ the cutoff supplied by the external Cloud service policy.
-Then
+Edge-mode clients receive the broadcast through their Edge; direct-mode
+and skipped clients use the direct Cloud link in the current logical model.
+Each client transfer is modeled independently, without shared-link contention.
+The full round duration and next-round start are
 \begin{equation}
-T_{\mathrm{round}}^t(\mathbf h)=
-\begin{cases}
-T_{\mathrm{sys}}(\mathbf h), & \mathcal S^t\ne\emptyset,\\
-\zeta_C^t-s_t+\mathbb I(\mathcal K^t\ne\emptyset)T_C^{\mathrm{agg},t},
-& \mathcal S^t=\emptyset.
-\end{cases}
+T_{\mathrm{round}}^t(\mathbf h)=\max_{i\in\mathcal D}b_i^t,
+\qquad s_{t+1}=s_t+T_{\mathrm{round}}^t(\mathbf h).
 \label{eq:extended_round_time}
 \end{equation}
-For a periodic service clock, $\zeta_C^t=\min\{j\tau_C:j\tau_C>s_t\}$.
-This second branch is a definition of the experimental observation window,
-not a consequence of the synchronization equation. Reported cumulative
-time additionally includes activation waits between such windows.
-Return delays are evaluated using
-(\ref{eq:comm_latency}), with absent
-return paths excluded from the maximum.
+All clients must acknowledge the same version before the next round starts.
+Thus $FL_E$ is locally asynchronous, not cross-round asynchronous. The current
+implementation assumes successful delivery; disconnected-client recovery is
+not modeled. A 90\% quorum and its cancellation semantics are deferred.
 
 The client-side latency for each collaboration
 mode is defined as
@@ -759,6 +680,8 @@ f_C^t
 \end{cases}
 \label{eq:client_latency}
 \end{equation}
+This mode-specific path latency is distinct from permission to start the
+next round; that permission is governed by the all-client ACK barrier.
 
 \subsubsection{Historical Global Update Deviation Modeling}
 \label{sec:learning_cost}
@@ -783,9 +706,8 @@ after $E_B$ stages, while each $FL_C$ client
 contributes its own update directly. 
 For $FL_E$, each Edge group sends its
 aggregated update to the Cloud asynchronously.
-The update is included in the Cloud aggregation
-that accepts it, without delaying the current
-synchronization.
+The update must arrive before the current round's 100\% quorum is satisfied;
+only the local Edge chain can finish before Cloud aggregation.
 
 Let $n_i$ denote the number of training samples
 of client $i$, and let $\mathcal M_k^t$ denote
@@ -830,8 +752,8 @@ d_k^\tau=u_{k,\mathrm{DP}}^\tau-v_g^{\tau-1}.
 \end{equation}
 The reference in this expression is frozen before executing round
 $\tau$. Deviations and prediction errors are recorded before updating
-either EMA. A delayed $FL_E$ unit retains the increment produced at its
-generation round; it is not silently rebased as a newly trained update.
+either EMA. All accepted units belong to the current round and their
+increments are relative to its common Cloud version.
 Let $\mathcal K_m^\tau$ denote the Cloud units of mode
 $m\in\mathcal H$ included at round $\tau$.
 If this set is not empty, the weighted mean deviation of
@@ -1045,9 +967,10 @@ $D_\infty$ & Normalized Tchebycheff score. \\
 \small
 \begin{algorithmic}[1]
 \REQUIRE Round $t$, strategy period $S_P$,
-system state, privacy ledger, historical estimates, and pending asynchronous units
+system state, privacy ledger, historical estimates, and acknowledged Cloud version
 \ENSURE Selected mode distribution
 $\mathbf h^{t,\ast}$ or \textsc{skip}
+\STATE Require completion of the previous all-client version barrier
 
 \STATE Determine privacy feasible modes
 $\mathcal F_i^t$ using
@@ -1056,7 +979,7 @@ $\mathcal F_i^t$ using
 using the Cloud admission rules
 
 \IF{$\mathcal F_{\mathrm{sys}}^t=\emptyset$}
-    \STATE Set new assignments to \textsc{skip}; process pending Cloud events
+    \STATE Set new assignments to \textsc{skip}; retain the Cloud version
 \ELSIF{$t>1$,
 $\operatorname{mod}(t-1,S_P)\neq0$,
 history initialization has finished,
@@ -1090,6 +1013,7 @@ and $\mathbf h^{t-1,\ast}\in\mathcal F_{\mathrm{sys}}^t$}
 \STATE Execute training and apply the explicit Cloud acceptance policy
 \STATE Record predictions and observed deviations against the frozen reference
 \STATE Update observed mode-deviation EMAs, then the global EMA; retain unavailable histories
+\STATE Broadcast the Cloud version; block the next round until every client ACK is received
 \STATE \textbf{return} $\mathbf h^{t,\ast}$
 \end{algorithmic}
 \end{algorithm}
@@ -1129,20 +1053,16 @@ the update contributes to the Cloud aggregation that accepts it.
 Only accepted units are included when Cloud weights and historical
 mode deviations are calculated.
 
-\textbf{Asynchronous-only service policy.}
-The synchronization formula does not determine when the Cloud aggregates
-if all active clients use $FL_E$. For this case the main implementation
-uses a separately configured, exogenous Cloud service clock with period
-$\tau_C=1$~s. The next absolute tick after the current start time defines
-the acceptance cutoff. Only units already arrived at that cutoff are
-aggregated; an empty cutoff produces no Cloud update and late units remain
-queued. This is an experimental scheduling assumption, not a property
-derived from the synchronization formula. For mixed profiles, the original
-synchronous cutoff remains in force and $FL_E$ adds no waiting dependency.
-Cumulative system time includes elapsed asynchronous observation windows
-and client activation waits. Sensitivity runs compare
-$\tau_C\in\{0.25,1,4\}$~s and a first-arrival trigger; their outcomes are
-reported separately before drawing scheduler-independent conclusions.
+\textbf{Full-quorum global barrier.}
+The current protocol waits for 100\% of the predetermined Cloud update units,
+then aggregates and broadcasts the new version to all clients. Every client
+must install and acknowledge that version before another round starts.
+The logical simulation explicitly includes downlink, installation, and ACK
+time (default ACK size 64 bytes and installation time 1 ms). These are
+configurable modeling assumptions, not measurements of a physical deployment.
+There is no periodic clock or cross-round update queue. A 90\% threshold is
+reserved for a later experiment, after defining treatment of unfinished work.
+Results from the superseded periodic protocol are excluded from this version.
 
 Sample level DP is applied during local training and privacy costs
 are accumulated using the ledger in Sec.~\ref{sec:privacy_model}.
@@ -1362,14 +1282,15 @@ Edges. Prediction error, system time, and test accuracy are
 reported separately.
 
 \IfFileExists{results/pilot_ema.tex}{\input{results/pilot_ema.tex}}{}
-The pilot EMA comparison is reported separately from full-scale runs.
+EMA comparisons must be rerun under the full-quorum global barrier;
+superseded periodic-protocol results are not reported here.
 Setting both smoothing coefficients to zero keeps the latest valid
 observations; it does not remove the historical objective. These
 measurements do not establish a universal advantage of smoothing.
 Changing $\gamma_C$ also changes the reference defining $J_{\mathrm{obs}}$.
 Consequently, MAE across different $\gamma_C$ values is not an error
 comparison against one fixed prediction target. Controls with a common
-$\gamma_C$ are reported separately, alongside test accuracy and system time.
+$\gamma_C$ are required alongside test accuracy and system time.
 
 \subsubsection{Resource, Network, and Privacy Conditions}
 \label{subsec:constraint_ablation}
@@ -1383,7 +1304,8 @@ number of $FL_{EC}$ stages $E_B$ is varied in a separate
 experiment because it changes both training work and the
 number of protected local steps.
 
-\IfFileExists{results/pilot_triggers.tex}{\input{results/pilot_triggers.tex}}{}
+A 90\% unit-count quorum is planned only as a subsequent control, after
+the full-quorum flow and unfinished-task handling have been validated.
 
 \subsection{Search Space Reduction and Selection Cost}
 \label{sec:exp_search_cost}

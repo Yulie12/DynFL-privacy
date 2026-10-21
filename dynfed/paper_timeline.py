@@ -1,6 +1,5 @@
-"""Common absolute timeline, with persistent asynchronous FL_E Cloud units."""
+"""100% current-round Cloud quorum followed by an all-client version barrier."""
 from dataclasses import dataclass, field
-import math
 import torch
 
 
@@ -28,20 +27,22 @@ class Schedule:
     synchronous: bool
     client_finish: dict[int, float]
     events: list[dict]
+    acknowledgement_finish: dict[int, float]
 
 
 def plan(config, profile, traces, samples, payload_mb, start, round_index,
          previous=None, pending=()):
-    """Plan exact sequential Edge stages and a Cloud acceptance cutoff.
+    """FL_E finishes its local chain independently, but cannot start a new round.
 
-    FL_E never contributes a dependency to a synchronous Cloud cutoff or return
-    maximum. Without synchronous units the EXOGENOUS trigger is a configured
-    periodic tick; earliest arrival exists only as a sensitivity alternative.
+    Units are fixed before execution; all must arrive, then all configured
+    clients (including SKIP clients) must receive the model and return an ACK.
+    Network times are simulated, not physical transport acknowledgements.
     """
+    if pending:
+        raise ValueError("cross-round pending units are forbidden by global_barrier_100")
     previous = previous or {}
     groups = {}
     units, events, completion = [], [], {}
-    sync_arrivals, sync_returns = [], []
     for client, mode in sorted(profile.items()):
         if mode == "SKIP":
             continue
@@ -53,8 +54,6 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
             unit = Unit(f"r{round_index}:FL_C:c{client}", mode, trace["edge"], (client,),
                         samples[client], arrival, generated_round=round_index)
             units.append(unit)
-            sync_arrivals.append(arrival)
-            sync_returns.append(payload_mb / trace["lc_rate"] + config.end_cloud_delay)
         else:
             groups.setdefault((trace["edge"], mode), []).append(client)
     for (edge, mode), members in sorted(groups.items()):
@@ -79,37 +78,38 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
                     sum(samples[client] for client in members), arrival,
                     generated_round=round_index)
         units.append(unit)
-        if mode == "FL_EC":
-            sync_arrivals.append(arrival)
-            sync_returns.extend(payload_mb / ec_rate + config.edge_cloud_delay
-                                + payload_mb / traces[client]["le_rate"] + config.end_edge_delay
-                                for client in members)
-        else:
+        if mode == "FL_E":
             for client in members:
                 completion[client] = last_finish + payload_mb / traces[client]["le_rate"] + config.end_edge_delay
             events.append({"event": "async_upload", "identity": unit.identity, "arrival": arrival})
-    candidates = list(pending) + units
-    synchronous = bool(sync_arrivals)
-    if synchronous:
-        cutoff = max(sync_arrivals)
-    elif config.async_trigger == "periodic":
-        cutoff = (math.floor((start + 1e-12) / config.cloud_tick_sec) + 1) * config.cloud_tick_sec
-    elif candidates:
-        cutoff = max(start, min(unit.arrival for unit in candidates))
-    else:
-        cutoff = None
-    accepted = [] if cutoff is None else [unit for unit in candidates if unit.arrival <= cutoff + 1e-12]
-    deferred = [unit for unit in candidates if unit not in accepted]
-    finish = (start if cutoff is None else cutoff + (config.cloud_aggregation_sec if accepted else 0.0)
-              + max(sync_returns, default=0.0))
-    for client, mode in profile.items():
-        if mode in {"FL_C", "FL_EC"}:
-            completion[client] = finish
-    events.append({"event": "cloud_acceptance", "cutoff": cutoff, "finish": finish,
-                   "trigger": "synchronous" if synchronous else config.async_trigger,
-                   "accepted": [unit.identity for unit in accepted],
-                   "pending": [unit.identity for unit in deferred]})
-    return Schedule(units, accepted, deferred, cutoff, finish, synchronous, completion, events)
+    cutoff = max((unit.arrival for unit in units), default=start)
+    cloud_finish = cutoff + (config.cloud_aggregation_sec if units else 0.)
+    events.append({"event": "cloud_acceptance", "cutoff": cutoff, "finish": cloud_finish,
+                   "trigger": "all_expected_units", "quorum": config.cloud_quorum,
+                   "expected": [unit.identity for unit in units],
+                   "accepted": [unit.identity for unit in units], "pending": []})
+    acknowledgements = {}
+    for client in range(config.clients):
+        trace = traces[client]
+        mode = profile.get(client, "SKIP")
+        if mode in {"FL_E", "FL_EC"}:
+            down = (payload_mb/trace["ec_rate"] + config.edge_cloud_delay
+                    + payload_mb/trace["le_rate"] + config.end_edge_delay)
+            up = (config.acknowledgement_mb/trace["le_rate"] + config.end_edge_delay
+                  + config.acknowledgement_mb/trace["ec_rate"] + config.edge_cloud_delay)
+        else:
+            down = payload_mb/trace["lc_rate"] + config.end_cloud_delay
+            up = config.acknowledgement_mb/trace["lc_rate"] + config.end_cloud_delay
+        received = max(cloud_finish+down, completion.get(client, start))
+        acknowledged = received + config.model_install_sec + up
+        acknowledgements[client] = acknowledged
+        events.append({"event": "model_ack", "client": client, "round": round_index,
+                       "broadcast_start": cloud_finish, "received": received,
+                       "finish": acknowledged, "mode": mode})
+    finish = max(acknowledgements.values(), default=cloud_finish)
+    events.append({"event": "global_barrier", "round": round_index,
+                   "clients": list(range(config.clients)), "finish": finish})
+    return Schedule(units, list(units), [], cutoff, finish, True, completion, events, acknowledgements)
 
 
 def mode_masses(units):

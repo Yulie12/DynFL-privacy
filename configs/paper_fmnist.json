@@ -3,6 +3,8 @@
   "model": "lenet5",
   "data_root": "experiments/data/fmnist/FashionMNIST/raw",
   "device": "cuda",
+  "protocol": "global_barrier_100",
+  "cloud_quorum": 1.0,
   "snapshot_interval": 10,
   "clients": 100,
   "edges": 10,

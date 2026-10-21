@@ -1,5 +1,9 @@
 # Clean paper implementation validation (2026-10-21)
 
+Current protocol: `global_barrier_100`; see `GLOBAL_BARRIER_100_ZH.md` for
+the replacement barrier tests and real-training smoke runs. The records below
+describe historical protocols and must not validate the new state machine.
+
 The current implementation contains only the paper three-mode protocol.
 All old tests were removed together with their superseded implementations;
 the replacement tests assert the paper equations and execution semantics.

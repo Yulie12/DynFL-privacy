@@ -7,7 +7,7 @@ from experiments.audit_paper import reconstruct_dispatches
 
 def test_dispatch_reconstruction_uses_start_not_end_of_window(tmp_path):
     config = PaperConfig(clients=1, edges=1, rounds=2, train_limit=2,
-                         test_limit=1, local_steps=1, cloud_tick_sec=1.)
+                         test_limit=1, local_steps=1)
     folder = tmp_path / "fixed_fl_e"
     folder.mkdir()
     with (folder / "client_decisions.csv").open("w", newline="", encoding="utf-8") as handle:

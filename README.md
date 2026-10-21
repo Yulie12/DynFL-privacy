@@ -29,10 +29,10 @@ python experiments/audit_paper.py out/paper_fmnist/YOUR_RUN
   模式平均偏差，更新偏差 EMA，最后更新全局 EMA。第一轮只建立全局参考。
   缺失估计与无 Cloud 更新的代价为 `None`。
 - `dynfed/paper_timeline.py`：逐阶段递推 `FL_EC` 训练、上传、聚合、反馈。
-  `FL_E` 只等待本 Edge 返回，异步 Cloud 上传进入跨轮队列；只有截止时刻前到达的
-  单元被接受。所有权重与历史使用同一接受集合。
-  其下一次训练使用该Edge已完成反馈的副本，不隐式读取新的Cloud模型；反馈可用时刻
-  与生成增量的基模型来源均记录并审计。
+  本轮预先确定更新单元集合，100%到达后Cloud聚合。`FL_E`局部链路可以提前完成，
+  但不得跨全局屏障启动下一轮；无跨轮队列。所有模式从同一已确认Cloud版本训练。
+- `dynfed/paper_barrier.py`：Cloud广播至全部客户端（含SKIP），收齐同版本ACK后才
+  放行下一轮。拒绝缺失、重复、过时ACK或提前启动。
 - `dynfed/paper_search.py`：缺历史时优先覆盖可行的缺失模式，再比较时延；历史
   可用时启动双目标搜索与归一化 Chebyshev 选择。单次搜索有明确评价次数上限。
 - `dynfed/paper_privacy.py` / `paper_data.py`：本地逐样本联合梯度裁剪和 Gaussian
@@ -40,10 +40,10 @@ python experiments/audit_paper.py out/paper_fmnist/YOUR_RUN
   Gaussian RDP，不声称采样放大。校准包含剩余轮数与 `FL_EC` 全部阶段；执行后
   记录实际机制次数。没有额外上传包噪声或 HE 协议。
 
-论文的同步公式不能推出全 `FL_E` 的Cloud触发规则。主配置显式采用外生周期时钟
-（`async_trigger=periodic`, `cloud_tick_sec=1`）；空tick没有Cloud更新。
-`first_arrival`仅作为敏感性对照，不宣称为理论性质。有同步模式时，
-Cloud截止时间和返回最大值均不依赖 `FL_E`。细节见 `docs/MATHEMATICAL_AUDIT_ZH.md`。
+当前唯一协议是 `protocol=global_barrier_100, cloud_quorum=1.0`，不再使用周期时钟。
+90%阈值留作后续对照，当前配置明确拒绝它，防止伪实现。广播与ACK是单机逻辑网络事件，
+并非物理分布式通信；假设所有客户端最终可达，不实现失联恢复。
+默认ACK为64字节、模型安装为1ms，均为可配置假设，非实测参数。
 
 `required_compute/client_compute_capacity` 使用一致的归一化计算资源单位；内存以 MB
 配置；每个 Edge 的可同时激活客户端数由 `edge_group_capacity` 配置。时延是模型
@@ -56,8 +56,8 @@ Cloud截止时间和返回最大值均不依赖 `FL_E`。细节见 `docs/MATHEMA
 向 Cloud 仅提交一次；`FL_C` 每客户端提交一次。
 
 输出包括原始配置、划分/trace 与哈希、初始模型、逐轮指标、决策、DP回执、
-Cloud接受单元与样本权重、逐轮绝对时间线、历史参考/偏差/预测向量和最终待接收队列。
-总轮数结束时仍未接受的上传保持 pending，不能计入历史或最终全局模型。
+Cloud接受单元与样本权重、逐轮绝对时间线、历史参考/偏差/预测向量、逐客户端ACK和版本。
+每轮100%接受本轮预定单元；最终不存在跨轮pending。审计拒绝旧协议输出。
 汇总提供各 seed 记录、均值/标准差、配对差异；未达到准确率目标时保持空值。
 审计脚本从逐轮保存的接受单元重新计算偏差 EMA、全局 EMA、预测向量和 Cloud 权重，
 并检查初始模型配对、无重复接受、DP执行次数和预算上限。

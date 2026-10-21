@@ -53,7 +53,6 @@ def test_no_cloud_and_missing_history_are_unassigned():
 
 def fixture_config():
     return PaperConfig(clients=3, edges=1, rounds=5, train_limit=30, test_limit=10,
-                       async_trigger="first_arrival",
                        local_steps=1, edge_stages=3, edge_aggregation_sec=0.2,
                        cloud_aggregation_sec=0.3, end_edge_delay=0, end_cloud_delay=0,
                        edge_cloud_delay=0, switch_sec=0)
@@ -63,45 +62,43 @@ def traces():
     return [{"edge": 0, "step_sec": 1.0, "le_rate": 1.0, "lc_rate": 1.0, "ec_rate": 1.0} for _ in range(3)]
 
 
-def test_late_fl_e_does_not_delay_synchronous_round_and_enters_later():
+def test_slow_fl_e_is_required_by_100_percent_quorum():
     cfg, trace = fixture_config(), traces()
     trace[0]["step_sec"] = 100
     first = plan(cfg, {0:"FL_E", 1:"FL_C"}, trace, {0:3, 1:1}, 1, 0, 0)
-    assert first.cutoff == 2
-    assert first.finish == pytest.approx(3.3)
-    assert [u.mode for u in first.accepted] == ["FL_C"]
-    assert [u.mode for u in first.pending] == ["FL_E"]
+    assert first.cutoff == pytest.approx(102.2)
+    assert first.finish > first.cutoff+cfg.cloud_aggregation_sec
+    assert {u.mode for u in first.accepted} == {"FL_C", "FL_E"}
+    assert not first.pending
     assert first.client_finish[0] == pytest.approx(102.2)
-    pending = replace(first.pending[0], update=torch.tensor([7.0], dtype=torch.float64))
-    later = plan(cfg, {1:"FL_C"}, trace, {1:1}, 1, 102, 1, pending=[pending])
-    assert pending in later.accepted
-    assert sum(u.samples for u in later.accepted) == 4
-    assert pending.generated_round == 0
 
 
-def test_early_fl_e_is_accepted_but_adds_no_sync_return_dependency():
+def test_early_fl_e_local_completion_is_distinct_from_global_barrier():
     cfg, trace = fixture_config(), traces()
     trace[1]["step_sec"] = 5
     result = plan(cfg, {0:"FL_E", 1:"FL_C"}, trace, {0:1, 1:1}, 1, 0, 0)
     assert len(result.accepted) == 2
     assert result.cutoff == 6
-    assert result.finish == pytest.approx(7.3)
+    assert result.finish == pytest.approx(8.3+cfg.model_install_sec+2*cfg.acknowledgement_mb)
+    assert result.client_finish[0] < result.finish
 
 
 def test_fl_ec_stages_follow_sequential_edge_feedback():
-    result = plan(fixture_config(), {0:"FL_EC"}, traces(), {0:1}, 1, 0, 0)
+    cfg = fixture_config()
+    result = plan(cfg, {0:"FL_EC"}, traces(), {0:1}, 1, 0, 0)
     stages = [event for event in result.events if event["event"] == "edge_stage"]
     assert [e["finish"] for e in stages] == pytest.approx([2.2, 5.4, 8.6])
     assert result.cutoff == pytest.approx(9.6)
-    assert result.finish == pytest.approx(11.9)
+    assert result.finish == pytest.approx(11.9+cfg.model_install_sec+2*cfg.acknowledgement_mb)
     assert len(result.units) == 1
 
 
-def test_all_edge_mode_has_explicit_event_trigger():
+def test_all_edge_mode_uses_full_quorum_and_all_client_barrier():
     result = plan(fixture_config(), {0:"FL_E"}, traces(), {0:1}, 1, 10, 0)
-    assert result.synchronous is False
+    assert result.synchronous is True
     assert result.cutoff == pytest.approx(13.2)
-    assert result.finish == pytest.approx(13.5)
+    assert result.finish == pytest.approx(15.5+fixture_config().model_install_sec+2*fixture_config().acknowledgement_mb)
+    assert len(result.acknowledgement_finish) == fixture_config().clients
 
 
 def test_initialization_collects_all_feasible_modes_before_pareto():
@@ -195,27 +192,22 @@ def test_exhaustive_search_matches_complete_small_front():
     assert chosen.learning is not None
 
 
-def test_all_sync_infeasible_but_pending_async_can_still_update_cloud():
+def test_cross_round_pending_units_are_rejected():
     pending = unit("old", "FL_E", 3, arrival=5)
-    result = plan(fixture_config(), {0:"SKIP"}, traces(), {0:1}, 1, 2, 1, pending=[pending])
-    assert result.cutoff == 5
-    assert result.accepted == [pending]
-    assert result.units == []
+    with pytest.raises(ValueError, match="cross-round"):
+        plan(fixture_config(), {0:"SKIP"}, traces(), {0:1}, 1, 2, 1, pending=[pending])
 
 
-def test_periodic_cloud_trigger_is_exogenous_and_can_produce_no_update():
-    cfg = replace(fixture_config(), async_trigger="periodic", cloud_tick_sec=1.0)
+def test_slowest_current_unit_determines_cutoff_not_an_external_clock():
+    cfg = fixture_config()
     result = plan(cfg, {0:"FL_E"}, traces(), {0:1}, 1, 0, 0)
-    assert result.cutoff == 1.0
-    assert result.finish == 1.0
-    assert not result.accepted
-    assert len(result.pending) == 1
-    # Same tick even if the upload arrival changes: it is not derived from an
-    # outcome of the selected mode profile.
+    assert result.cutoff == pytest.approx(3.2)
+    assert len(result.accepted) == 1
+    assert not result.pending
     different = traces()
     different[0]["step_sec"] = 20
     later = plan(cfg, {0:"FL_E"}, different, {0:1}, 1, 0, 0)
-    assert later.cutoff == result.cutoff
+    assert later.cutoff > result.cutoff
 
 
 @pytest.mark.parametrize("gamma_d,gamma_c", [(0.,0.),(.5,.9),(.9,.5)])
@@ -246,10 +238,9 @@ def test_vectorized_dp_sgd_matches_reference_example_gradients():
     torch.testing.assert_close(actual, expected)
 
 
-def test_pending_cloud_event_has_priority_over_client_activation_wait():
-    from dynfed.paper_runner import activation_start
-    assert activation_start(.25, {0:.8}, [0], [unit("late", "FL_E", 1, arrival=.4)]) == .25
-    assert activation_start(.25, {0:.8}, [0], []) == .8
+def test_90_percent_is_explicitly_not_supported_yet():
+    with pytest.raises(ValueError, match="90% is deferred"):
+        replace(fixture_config(), cloud_quorum=.9)
 
 
 def test_random_baseline_honors_the_same_selection_period():

@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def checked(path):
     path = Path(path)
     config = json.loads((path / "config.json").read_text(encoding="utf-8"))
+    if config.get("protocol") != "global_barrier_100":
+        raise ValueError("old protocol results must not be inserted into the global-barrier paper")
     analysis = json.loads((path / "analysis.json").read_text(encoding="utf-8"))
     audits = json.loads((path / "audit.json").read_text(encoding="utf-8"))
     expected = len(config["seeds"])*len(config["policies"])
@@ -59,19 +61,6 @@ def export_studies(campaign):
                  "only the latest observation. Entries are mean and sample standard deviation.",
                  "tab:verified_pilot_ema", [r"$\gamma_d/\gamma_C$", r"Test acc. (\%)", "Prediction MAE", "System time (s)", "Mode changes"], rows)
     (destination/"pilot_ema.tex").write_text(text, encoding="utf-8")
-    rows = []
-    for name in ("periodic_tick_0.25", "periodic_tick_1", "periodic_tick_4", "first_arrival"):
-        config, analysis = checked(campaign/name)
-        trigger = "first arrival" if config["async_trigger"] == "first_arrival" else f"tick {config['cloud_tick_sec']:g} s"
-        for policy in ("fixed_fl_e", "proposed"):
-            records = [row for row in analysis["runs"] if row["policy"] == policy]
-            rows.append([trigger, "fixed $FL_E$" if policy == "fixed_fl_e" else "proposed",
-                         pm(records,"final_test_accuracy",100), pm(records,"system_time"), pm(records,"pending_at_end")])
-        provenance[name] = str((campaign/name).resolve())
-    (destination/"pilot_triggers.tex").write_text(table(
-        "Asynchronous-only trigger sensitivity (pilot only), using 6 clients, 2 Edges, "
-        "20 rounds and three paired seeds. These service policies are explicit experimental assumptions.",
-        "tab:verified_pilot_triggers", ["Service policy", "Method", r"Test acc. (\%)", "System time (s)", "Pending units"], rows), encoding="utf-8")
     (destination/"pilot_provenance.json").write_text(json.dumps(provenance,indent=2),encoding="utf-8")
 
 

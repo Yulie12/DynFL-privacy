@@ -47,16 +47,13 @@ def reconstruct_dispatches(folder, seed_dir, config, partition, payload_mb):
     traces = json.loads((seed_dir/"traces.json").read_text(encoding="utf-8"))
     cfg = PaperConfig(**config)
     samples = {client:len(indices) for client,indices in enumerate(partition)}
-    now, previous, busy, pending = 0., {}, {}, []
+    now, previous, pending = 0., {}, []
     reconstructed = {}
     for index in range(config["rounds"]):
-        if not pending and busy and all(busy.get(client,0) > now+1e-12 for client in samples):
-            now = min(busy.values())
         profile = {int(row["client"]):row["mode"] for row in decisions if int(row["round"]) == index}
         schedule = plan(cfg, profile, traces[index], samples, payload_mb, now, index, previous, pending)
         reconstructed[index] = (now, schedule)
         previous.update({client:mode for client,mode in profile.items() if mode != "SKIP"})
-        busy.update(schedule.client_finish)
         now, pending = schedule.finish, schedule.pending
     return reconstructed
 
@@ -64,6 +61,8 @@ def reconstruct_dispatches(folder, seed_dir, config, partition, payload_mb):
 def audit(root):
     root = Path(root)
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+    if config.get("protocol") != "global_barrier_100":
+        raise ValueError("old-protocol outputs cannot validate the global 100% barrier")
     report = []
     for seed_dir in sorted(root.glob("seed_*")):
         partition = json.loads((seed_dir / "partition.json").read_text(encoding="utf-8"))
@@ -79,7 +78,6 @@ def audit(root):
             history = History(config["gamma_d"], config["gamma_c"], config["epsilon_j"])
             seen = set()
             late = 0
-            prior_edge_generations = []
             initial_vector = None
             reconstructed = None
             for round_index, snapshot_path in enumerate(sorted(folder.glob("history_round_*.pt"))):
@@ -111,17 +109,12 @@ def audit(root):
                 for generation in snapshot.get("generation_records", []):
                     unit = generation["unit"]
                     torch.testing.assert_close(unit.update, generation["end"].double()-generation["base"].double())
-                    assert unit.base_source.startswith("edge:" if unit.mode == "FL_E" else "cloud:")
-                    if unit.mode == "FL_E" and config.get("snapshot_interval", 1) == 1:
-                        candidates = [item for item in prior_edge_generations
-                                      if item["unit"].edge == unit.edge and item["edge_ready"] <= dispatch_time+1e-12]
-                        parent = max(candidates, key=lambda item: (item["edge_ready"],item["unit"].identity)) if candidates else None
-                        expected = initial_vector if parent is None else parent["end"]
-                        torch.testing.assert_close(generation["base"], expected)
-                    elif unit.mode != "FL_E":
-                        torch.testing.assert_close(generation["base"], snapshot["model_before"])
-                prior_edge_generations.extend(item for item in snapshot.get("generation_records", [])
-                                              if item["unit"].mode == "FL_E")
+                    assert unit.base_source == f"cloud:v{snapshot['dispatch_version']}"
+                    assert unit.base_round == snapshot["dispatch_version"]
+                    torch.testing.assert_close(generation["base"], snapshot["model_before"])
+                assert not pending
+                assert set(snapshot["client_versions"]) == set(range(config["clients"]))
+                assert set(snapshot["client_versions"].values()) == {snapshot["cloud_version"]}
                 assert not ({u.identity for u in units} & {u.identity for u in pending})
                 for unit in units:
                     assert unit.identity not in seen, "Cloud unit accepted twice"
@@ -163,7 +156,32 @@ def audit(root):
                 assert all(abs(float(row["weight"])-int(row["samples"])/total) < 1e-12 for row in group)
                 assert all(float(row["arrival"]) <= float(row["cutoff"])+1e-12 for row in group)
                 if group and "base_source" in group[0]:
-                    assert all(row["base_source"].startswith("edge:" if row["mode"] == "FL_E" else "cloud:") for row in group)
+                    assert all(row["base_source"].startswith("cloud:") for row in group)
+                assert all(row["generated_round"] == row["accepted_round"] for row in group)
+            with (folder/"round_metrics.csv").open(encoding="utf-8-sig") as handle:
+                metrics = list(csv.DictReader(handle))
+            previous_finish, previous_version = 0., 0
+            for index, metric in enumerate(metrics):
+                events = json.loads((folder/f"timeline_round_{index:03d}.json").read_text(encoding="utf-8"))
+                acks = [event for event in events if event["event"] == "model_ack"]
+                cloud = next(event for event in events if event["event"] == "cloud_acceptance")
+                assert set(cloud["expected"]) == set(cloud["accepted"]) and not cloud["pending"]
+                if reconstructed is not None:
+                    expected_start, expected_schedule = reconstructed[index]
+                    assert abs(float(metric["dispatch_time"])-expected_start) < 1e-10
+                    assert abs(cloud["cutoff"]-expected_schedule.cutoff) < 1e-10
+                    assert set(cloud["expected"]) == {unit.identity for unit in expected_schedule.units}
+                    assert all(abs(event["finish"]-expected_schedule.acknowledgement_finish[event["client"]]) < 1e-10
+                               for event in acks)
+                assert len(cloud["accepted"]) == int(metric["expected_cloud_units"])
+                assert len(acks) == config["clients"] and {event["client"] for event in acks} == set(range(config["clients"]))
+                assert all(event["received"] >= cloud["finish"] and event["finish"] >= event["received"] for event in acks)
+                assert all(event["version"] == int(metric["cloud_version"]) for event in acks)
+                assert int(metric["dispatch_version"]) == previous_version
+                assert int(metric["cloud_version"]) == previous_version+bool(cloud["accepted"])
+                assert float(metric["dispatch_time"]) >= previous_finish-1e-12
+                assert abs(float(metric["system_time"])-max(event["finish"] for event in acks)) < 1e-10
+                previous_finish, previous_version = float(metric["system_time"]), int(metric["cloud_version"])
             assert actual_steps == summary["executed_local_steps"]
             assert all(int(row["executed_events"]) == config["local_steps"] for row in receipts)
             assert all(float(row["epsilon_after"]) <= config["epsilon"] + 1e-8 for row in receipts)

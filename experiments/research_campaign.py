@@ -32,11 +32,6 @@ def stages(phase):
         for gamma_d, gamma_c in ((0.,.9), (.9,0.)):
             cases.append((f"ema_{gamma_d:g}_{gamma_c:g}", "pilot_ablation",
                           replace(trial, gamma_d=gamma_d, gamma_c=gamma_c)))
-        for tick in (.25, 1., 4.):
-            cases.append((f"periodic_tick_{tick:g}", "trigger_sensitivity",
-                          replace(trial, policies=("fixed_fl_e", "proposed"), cloud_tick_sec=tick)))
-        cases.append(("first_arrival", "trigger_sensitivity",
-                      replace(trial, policies=("fixed_fl_e", "proposed"), async_trigger="first_arrival")))
         cases.append(("cifar_trial", "multiseed_trial",
                       replace(cifar, clients=6, edges=2, rounds=5, train_limit=600, test_limit=100,
                               local_steps=1, batch_size=8, evaluation_budget=64, snapshot_interval=1)))

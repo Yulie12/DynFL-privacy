@@ -13,7 +13,7 @@ from .paper_config import MODES
 from .paper_data import assign, evaluate, load_data, local_train, make_training_model, frozen_features, partitions, vector
 from .paper_history import History
 from .paper_privacy import Ledger
-from .paper_model_state import EdgeModels
+from .paper_barrier import VersionBarrier
 from .paper_search import select
 from .paper_timeline import mode_masses
 
@@ -29,14 +29,6 @@ def write_csv(path, rows):
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-
-
-def activation_start(now, busy, clients, pending):
-    # A queued Cloud event must not be skipped merely because all clients are
-    # still waiting for their own Edge returns.
-    if not pending and busy and all(busy.get(client, 0) > now+1e-12 for client in clients):
-        return min(busy.values())
-    return now
 
 
 def system_traces(config, seed):
@@ -64,13 +56,13 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
     destination.mkdir(parents=True, exist_ok=False)
     model = make_training_model(config, seed, features=config.model == "resnet18_head")
     initial = vector(model)
-    edge_models = EdgeModels(initial, config.edges)
+    barrier = VersionBarrier(range(config.clients))
     payload_mb = initial.numel() * initial.element_size() / 1e6
     torch.save(model.state_dict(), destination / "initial_model.pt")
     history = History(config.gamma_d, config.gamma_c, config.epsilon_j)
     ledgers = {client: Ledger(config.epsilon, config.delta) for client in range(config.clients)}
     samples = {client: len(indices) for client, indices in enumerate(partition)}
-    previous, pending, busy = {}, [], {}
+    previous, pending = {}, []
     prior_phase = None
     logical_time = 0.0
     rows, decisions, receipts, cloud_units = [], [], [], []
@@ -79,18 +71,15 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
     started = time.perf_counter()
     for round_index in range(config.rounds):
         round_start = logical_time
-        # Activation only waits for each client's own required model return.
-        # FL_E availability is independent of its still-pending Cloud upload.
-        logical_time = activation_start(logical_time, busy, samples, pending)
+        barrier.require_ready(logical_time)
         dispatch_time = logical_time
-        edge_models.advance(logical_time)
+        dispatch_version = barrier.version
         trace = traces[round_index]
         pools, sigmas = {}, {}
         for client in range(config.clients):
             pool = []
             if (trace[client]["memory_mb"] >= config.required_memory_mb
-                    and trace[client]["compute_capacity"] >= config.required_compute
-                    and busy.get(client, 0) <= logical_time + 1e-12):
+                    and trace[client]["compute_capacity"] >= config.required_compute):
                 for mode in MODES:
                     stages = config.edge_stages if mode == "FL_EC" else 1
                     events = stages * config.local_steps
@@ -120,10 +109,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         steps = 0
         for unit in schedule.units:
             edge_finish = None
-            if unit.mode == "FL_E":
-                unit_base, base_round, base_source = edge_models.dispatch(unit.edge)
-            else:
-                unit_base, base_round, base_source = before.clone(), round_index, f"cloud:r{round_index}"
+            unit_base, base_round, base_source = before.clone(), dispatch_version, f"cloud:v{dispatch_version}"
             edge_model = unit_base.clone()
             stages = config.edge_stages if unit.mode == "FL_EC" else 1
             for stage in range(stages):
@@ -155,7 +141,6 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
             if unit.mode == "FL_E":
                 edge_finish = next(event["finish"] for event in schedule.events
                                    if event["event"] == "edge_stage" and event["mode"] == "FL_E" and event["edge"] == unit.edge)
-                edge_models.defer(unit.edge, edge_finish, edge_model, round_index, unit.identity)
             if save_snapshot:
                 generation_records.append({"unit": realized[unit.identity], "base": unit_base,
                                            "end": edge_model, "edge_ready": edge_finish})
@@ -174,8 +159,17 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
                                     "cutoff": schedule.cutoff})
             if abs(sum(observation["weights"])-1) > 1e-12:
                 raise RuntimeError("accepted unit weights do not sum to one")
-        busy.update(schedule.client_finish)
+        if pending or {unit.identity for unit in accepted} != {unit.identity for unit in schedule.units}:
+            raise RuntimeError("100% quorum did not accept exactly the current-round units")
+        barrier.begin(dispatch_version + bool(accepted))
+        for event in schedule.events:
+            if event["event"] == "model_ack":
+                event["version"] = barrier.version
+                barrier.acknowledge(event["client"], barrier.version, event["finish"])
+            elif event["event"] == "global_barrier":
+                event["version"] = barrier.version
         logical_time = schedule.finish
+        barrier.require_ready(logical_time)
         accuracy, loss = evaluate(model, test_x, test_y, config)
         mode_changes = sum(client in previous and previous[client] != mode and mode != "SKIP"
                            for client, mode in profile.items())
@@ -190,6 +184,8 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         if save_snapshot:
             torch.save({"round_index": round_index, "history_before": history_before,
                     "dispatch_time": dispatch_time,
+                    "dispatch_version": dispatch_version, "cloud_version": barrier.version,
+                    "client_versions": dict(barrier.client_versions),
                     "generation_records": generation_records,
                     "reference_before": observation.get("reference_before"),
                     "predicted_before_execution": predicted,
@@ -203,6 +199,9 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         row = {"round": round_index+1, "test_accuracy": accuracy, "test_loss": loss,
                "system_time": logical_time, "round_duration": logical_time-round_start,
                "synchronous": schedule.synchronous, "cutoff": schedule.cutoff,
+               "dispatch_time": dispatch_time, "dispatch_version": dispatch_version,
+               "cloud_version": barrier.version, "acknowledged_clients": len(barrier.acks),
+               "expected_cloud_units": len(schedule.units),
                "selection_sec": search["selection_sec"], "selection_phase": search["phase"],
                "evaluated_profiles": search["evaluated_profiles"],
                "feasible_combinations": search["feasible_combinations"],
@@ -214,9 +213,11 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
                "admitted_clients": sum(mode != "SKIP" for mode in profile.values()),
                "cloud_units": len(accepted), "pending_units": len(pending),
                "executed_local_steps": steps, "mode_changes": mode_changes,
-               "communication_mb": sum(payload_mb * (2 if unit.mode == "FL_C" else
-                    2*config.edge_stages*len(unit.clients)+2 if unit.mode == "FL_EC" else
-                    2*len(unit.clients)+1) for unit in schedule.units),
+               "communication_mb": (sum(payload_mb * (1 if unit.mode == "FL_C" else
+                    (2*config.edge_stages-1)*len(unit.clients)+1 if unit.mode == "FL_EC" else
+                    2*len(unit.clients)+1) for unit in schedule.units)
+                    + sum((payload_mb+config.acknowledgement_mb)*(2 if profile.get(client) in {"FL_E", "FL_EC"} else 1)
+                          for client in range(config.clients))),
                "max_epsilon": max(ledger.epsilon() for ledger in ledgers.values())}
         rows.append(row)
         write_csv(destination / "round_metrics.csv", rows)
@@ -241,7 +242,8 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
                "pending_at_end": len(pending), "wall_sec": time.perf_counter()-started}
     write_json(destination / "summary.json", summary)
     torch.save({"model": model.state_dict(), "history": history.state_dict(), "pending": pending,
-                "logical_time": logical_time, "busy": busy, "edge_models": edge_models}, destination / "final_state.pt")
+                "logical_time": logical_time, "cloud_version": barrier.version,
+                "client_versions": barrier.client_versions}, destination / "final_state.pt")
     return summary
 
 
