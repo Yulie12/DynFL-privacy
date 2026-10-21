@@ -135,6 +135,15 @@ def test_statistics_gate_rejects_incomplete_or_tampered_ack(toy,tmp_path):
     runner.run(cfg,root)
     assert len(audit(root))==3
     summarize(root,.8)
+    candidate_path=root/"seed_42"/"proposed"/"candidates_round_002.json"
+    original_candidate=candidate_path.read_text(encoding="utf-8")
+    altered=json.loads(original_candidate)
+    old_mode=altered["selected_profile"]["0"]
+    altered["selected_profile"]["0"]="FL_C" if old_mode!="FL_C" else "FL_E"
+    candidate_path.write_text(json.dumps(altered),encoding="utf-8")
+    with pytest.raises(AssertionError,match="differs from actual"):
+        summarize(root,.8)
+    candidate_path.write_text(original_candidate,encoding="utf-8")
     timeline=root/"seed_42"/"proposed"/"timeline_round_002.json"
     value=json.loads(timeline.read_text(encoding="utf-8"))
     value=[event for event in value if not(event["event"]=="model_ack" and event["client"]==2)]

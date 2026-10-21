@@ -255,7 +255,15 @@ def audit(root, required_runs=None):
                         j = float(dev.square().sum()/(state["reference"].square().sum()+config["epsilon_j"]))
                         assert abs(j-candidate["J"]) <= 1e-9*max(1.,abs(j))
                 key = tuple(sorted((int(c),m) for c,m in candidates["selected_profile"].items()))
+                actual_profile = tuple(sorted((int(row["client"]),row["mode"]) for row in decisions_for_audit
+                                              if int(row["round"]) == index))
+                assert key == actual_profile, "selected candidate differs from actual executed distribution"
                 assert key in candidate_map
+                selected_j = candidate_map[key]["J"]
+                if selected_j is None:
+                    assert metric["predicted_j"] == ""
+                else:
+                    assert math.isclose(selected_j,float(metric["predicted_j"]),rel_tol=1e-9,abs_tol=1e-9)
                 if candidates["phase"] == "shared_initialization":
                     assert key == tuple((client,MODES[client%3]) for client in range(config["clients"]))
                 if candidates["phase"] == "latency_only":
