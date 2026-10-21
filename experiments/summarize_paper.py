@@ -43,6 +43,7 @@ def summarize(root, target):
                     "selection_fraction_FL_E", "selection_fraction_FL_EC", "selection_fraction_FL_C",
                     "initialization_local_training_wall_sec", "local_training_wall_sec", "attempt_wall_sec"):
             values = [row[key] for row in rows if row.get(key) is not None]
+            aggregate[key + "_n"] = len(values)
             aggregate[key + "_mean"] = statistics.mean(values) if values else None
             aggregate[key + "_std"] = statistics.stdev(values) if len(values) > 1 else None
         aggregates.append(aggregate)

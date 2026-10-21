@@ -341,10 +341,12 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
                         "torch_rng": torch.get_rng_state(),
                         "cuda_rng": torch.cuda.get_rng_state_all() if config.device == "cuda" else [],
                         "numpy_rng": np.random.get_state(), "python_rng": random.getstate()})
-        write_json(destination/"run_status.json", {"status": "running", "completed_rounds": round_index+1,
+        live_status = json.loads((destination/"run_status.json").read_text(encoding="utf-8"))
+        live_status.update({"status": "running", "completed_rounds": round_index+1,
                    "pid":os.getpid(),"updated_utc":datetime.now(timezone.utc).isoformat(),
                    "total_rounds": config.rounds, "last_checkpoint": checkpoint_path.name,
                    "checkpoint_sha256": file_digest(checkpoint_path), "run_id": run_id})
+        write_json(destination/"run_status.json", live_status)
         print(f"{policy} seed={seed} round={round_index+1}/{config.rounds} "
               f"acc={accuracy:.4f} phase={search['phase']} accepted={len(accepted)} pending={len(pending)}",
               flush=True)
@@ -395,9 +397,21 @@ def _run_policy_attempt(config, policy, seed, data, partition, traces, destinati
         raise FileExistsError(destination)
     old_status = json.loads((destination/"run_status.json").read_text(encoding="utf-8")) if (destination/"run_status.json").exists() else {}
     attempts = list(old_status.get("attempts", []))
+    if old_status.get("status") == "running":
+        attempts.append({"status":"interrupted_unobserved","wall_sec":None,
+                         "started_utc":old_status.get("attempt_started_utc"),
+                         "last_progress_utc":old_status.get("updated_utc"),
+                         "reason":"exclusive lock is free but previous attempt never recorded an exit"})
+    if old_status.get("status") != "completed":
+        destination.mkdir(parents=True,exist_ok=True)
+        initial_status=dict(old_status)
+        initial_status.pop("error",None)
+        initial_status.update(status="running",attempts=attempts,pid=os.getpid(),
+                              attempt_started_utc=datetime.now(timezone.utc).isoformat())
+        write_json(destination/"run_status.json",initial_status)
     attempt_started = time.perf_counter()
     try:
-        result = _run_policy(config, policy, seed, data, partition, traces, destination, resume, stop_after_round)
+        result = _run_policy(config, policy, seed, data, partition, traces, destination, True, stop_after_round)
     except BaseException as error:
         status = json.loads((destination/"run_status.json").read_text(encoding="utf-8")) if (destination/"run_status.json").exists() else {}
         attempts.append({"status": "interrupted" if isinstance(error, (KeyboardInterrupt, InterruptedError)) else "failed",
@@ -409,7 +423,11 @@ def _run_policy_attempt(config, policy, seed, data, partition, traces, destinati
         raise
     if old_status.get("status") != "completed":
         attempts.append({"status": "completed", "wall_sec": time.perf_counter()-attempt_started})
-        result["attempt_wall_sec"] = sum(attempt["wall_sec"] for attempt in attempts)
+        result["known_attempt_wall_sec"] = sum(attempt["wall_sec"] for attempt in attempts if attempt["wall_sec"] is not None)
+        result["unobserved_attempts"] = sum(attempt["wall_sec"] is None for attempt in attempts)
+        result["wall_time_complete"] = not result["unobserved_attempts"]
+        result["attempt_wall_sec"] = result["known_attempt_wall_sec"] if result["wall_time_complete"] else None
+        result["wall_sec"] = result["attempt_wall_sec"]
         write_json(destination/"summary.json", result)
         status = json.loads((destination/"run_status.json").read_text(encoding="utf-8"))
         status.update(status="completed", attempts=attempts, audit_status="not_audited")

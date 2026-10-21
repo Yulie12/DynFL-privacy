@@ -283,3 +283,16 @@ def test_changed_runtime_cannot_resume_checkpoint(toy,tmp_path,monkeypatch):
     with pytest.raises(InterruptedError):execute(toy,tmp_path/"run",stop_after_round=2)
     monkeypatch.setattr(runner.np,"__version__","changed-runtime")
     with pytest.raises(RuntimeError,match="identity mismatch"):execute(toy,tmp_path/"run",resume=True)
+
+
+def test_uncaught_process_exit_does_not_invent_missing_wall_time(toy,tmp_path):
+    with pytest.raises(InterruptedError):execute(toy,tmp_path/"run",stop_after_round=2)
+    status_path=tmp_path/"run"/"run_status.json"
+    status=json.loads(status_path.read_text(encoding="utf-8"))
+    status.update(status="running",attempts=[])
+    status_path.write_text(json.dumps(status),encoding="utf-8")
+    result=execute(toy,tmp_path/"run",resume=True)
+    assert result["wall_time_complete"] is False
+    assert result["unobserved_attempts"]==1 and result["attempt_wall_sec"] is None
+    assert result["known_attempt_wall_sec"]>0
+    assert result["rounds"]==toy[0].rounds
