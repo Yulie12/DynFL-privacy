@@ -28,9 +28,13 @@ default. The main configuration now uses an explicit exogenous periodic clock;
 first arrival is a sensitivity alternative. The clock is an experimental
 assumption, not a derived property. Pending Cloud events take priority over
 client activation waits. Random selection obeys the matched selection period.
-Current verification has 22 passing tests, including vectorized/reference
+Current verification has 24 passing tests, including vectorized/reference
 DP-SGD equivalence, independent smoothing coefficients, missing observations,
 periodic empty windows and these scheduling/fairness cases.
+FL_E now has independent Edge replicas, published only when Edge feedback is
+available. Generation snapshots record the dispatch source and increment base;
+full pilot snapshots independently verify the feedback chain. The v4 campaign
+was stopped after discovering this source inconsistency and is superseded by v5.
 
 Campaign sources and runtime configuration are recorded per run. The first
 multiseed trial (`out/research_trial_fmnist_v2`) completed 24 runs and audits.

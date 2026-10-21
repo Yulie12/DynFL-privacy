@@ -57,8 +57,12 @@ def audit(root):
             history = History(config["gamma_d"], config["gamma_c"], config["epsilon_j"])
             seen = set()
             late = 0
+            prior_edge_generations = []
+            initial_vector = None
             for round_index, snapshot_path in enumerate(sorted(folder.glob("history_round_*.pt"))):
                 snapshot = torch.load(snapshot_path, map_location="cpu", weights_only=False)
+                if initial_vector is None:
+                    initial_vector = snapshot.get("model_before")
                 round_index = snapshot.get("round_index", round_index)
                 if "history_before" in snapshot:
                     state = snapshot["history_before"]
@@ -73,6 +77,20 @@ def audit(root):
                     torch.testing.assert_close(manual_pred, snapshot["predicted_before_execution"])
                 units = snapshot["accepted"]
                 pending = snapshot["pending"]
+                for generation in snapshot.get("generation_records", []):
+                    unit = generation["unit"]
+                    torch.testing.assert_close(unit.update, generation["end"].double()-generation["base"].double())
+                    assert unit.base_source.startswith("edge:" if unit.mode == "FL_E" else "cloud:")
+                    if unit.mode == "FL_E" and config.get("snapshot_interval", 1) == 1:
+                        candidates = [item for item in prior_edge_generations
+                                      if item["unit"].edge == unit.edge and item["edge_ready"] <= snapshot["dispatch_time"]+1e-12]
+                        parent = max(candidates, key=lambda item: (item["edge_ready"],item["unit"].identity)) if candidates else None
+                        expected = initial_vector if parent is None else parent["end"]
+                        torch.testing.assert_close(generation["base"], expected)
+                    elif unit.mode != "FL_E":
+                        torch.testing.assert_close(generation["base"], snapshot["model_before"])
+                prior_edge_generations.extend(item for item in snapshot.get("generation_records", [])
+                                              if item["unit"].mode == "FL_E")
                 assert not ({u.identity for u in units} & {u.identity for u in pending})
                 for unit in units:
                     assert unit.identity not in seen, "Cloud unit accepted twice"
@@ -113,6 +131,8 @@ def audit(root):
                 total = sum(int(row["samples"]) for row in group)
                 assert all(abs(float(row["weight"])-int(row["samples"])/total) < 1e-12 for row in group)
                 assert all(float(row["arrival"]) <= float(row["cutoff"])+1e-12 for row in group)
+                if group and "base_source" in group[0]:
+                    assert all(row["base_source"].startswith("edge:" if row["mode"] == "FL_E" else "cloud:") for row in group)
             assert actual_steps == summary["executed_local_steps"]
             assert all(int(row["executed_events"]) == config["local_steps"] for row in receipts)
             assert all(float(row["epsilon_after"]) <= config["epsilon"] + 1e-8 for row in receipts)

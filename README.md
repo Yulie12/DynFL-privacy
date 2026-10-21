@@ -31,6 +31,8 @@ python experiments/audit_paper.py out/paper_fmnist/YOUR_RUN
 - `dynfed/paper_timeline.py`：逐阶段递推 `FL_EC` 训练、上传、聚合、反馈。
   `FL_E` 只等待本 Edge 返回，异步 Cloud 上传进入跨轮队列；只有截止时刻前到达的
   单元被接受。所有权重与历史使用同一接受集合。
+  其下一次训练使用该Edge已完成反馈的副本，不隐式读取新的Cloud模型；反馈可用时刻
+  与生成增量的基模型来源均记录并审计。
 - `dynfed/paper_search.py`：缺历史时优先覆盖可行的缺失模式，再比较时延；历史
   可用时启动双目标搜索与归一化 Chebyshev 选择。单次搜索有明确评价次数上限。
 - `dynfed/paper_privacy.py` / `paper_data.py`：本地逐样本联合梯度裁剪和 Gaussian

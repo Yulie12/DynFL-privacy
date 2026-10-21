@@ -308,6 +308,14 @@ T_L(L_B)
 \end{aligned}
 \label{eq:mode_flows}
 \end{equation}
+All Edge replicas are initialized from the same initial model. A continuing
+$FL_E$ group starts from its Edge's latest available local replica, updated
+only after the corresponding Edge feedback completes; it does not implicitly
+receive a new Cloud model. $FL_C$ and $FL_{EC}$ dispatch from the available
+Cloud checkpoint, with $FL_{EC}$ using its intermediate Edge models at later
+stages. Unit increments are measured relative to their actual dispatch model.
+Model preparation at a mode switch is included in the reconfiguration-time
+estimate; this bootstrap overhead has not been measured on a physical network.
 Here, The arrows indicate the direction of information flow.
  The label \(\mathrm{upd}\) indicates the transmission
 of a model update to the next aggregation stage.

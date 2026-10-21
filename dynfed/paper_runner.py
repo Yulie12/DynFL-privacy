@@ -13,6 +13,7 @@ from .paper_config import MODES
 from .paper_data import assign, evaluate, load_data, local_train, make_training_model, frozen_features, partitions, vector
 from .paper_history import History
 from .paper_privacy import Ledger
+from .paper_model_state import EdgeModels
 from .paper_search import select
 from .paper_timeline import mode_masses
 
@@ -63,6 +64,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
     destination.mkdir(parents=True, exist_ok=False)
     model = make_training_model(config, seed, features=config.model == "resnet18_head")
     initial = vector(model)
+    edge_models = EdgeModels(initial, config.edges)
     payload_mb = initial.numel() * initial.element_size() / 1e6
     torch.save(model.state_dict(), destination / "initial_model.pt")
     history = History(config.gamma_d, config.gamma_c, config.epsilon_j)
@@ -80,6 +82,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         # Activation only waits for each client's own required model return.
         # FL_E availability is independent of its still-pending Cloud upload.
         logical_time = activation_start(logical_time, busy, samples, pending)
+        edge_models.advance(logical_time)
         trace = traces[round_index]
         pools, sigmas = {}, {}
         for client in range(config.clients):
@@ -111,9 +114,16 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         history_before = copy.deepcopy(history.state_dict())
         before = vector(model)
         realized = {}
+        save_snapshot = round_index < 2 or (round_index+1) % config.snapshot_interval == 0 or round_index+1 == config.rounds
+        generation_records = []
         steps = 0
         for unit in schedule.units:
-            edge_model = before.clone()
+            edge_finish = None
+            if unit.mode == "FL_E":
+                unit_base, base_round, base_source = edge_models.dispatch(unit.edge)
+            else:
+                unit_base, base_round, base_source = before.clone(), round_index, f"cloud:r{round_index}"
+            edge_model = unit_base.clone()
             stages = config.edge_stages if unit.mode == "FL_EC" else 1
             for stage in range(stages):
                 local = []
@@ -139,7 +149,15 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
                 mass = sum(count for _, count in local)
                 edge_model = sum((values * (count/mass) for values, count in local),
                                  torch.zeros_like(before))
-            realized[unit.identity] = replace(unit, update=(edge_model-before).double())
+            realized[unit.identity] = replace(unit, update=edge_model.double()-unit_base.double(),
+                                              base_source=base_source, base_round=base_round)
+            if unit.mode == "FL_E":
+                edge_finish = next(event["finish"] for event in schedule.events
+                                   if event["event"] == "edge_stage" and event["mode"] == "FL_E" and event["edge"] == unit.edge)
+                edge_models.defer(unit.edge, edge_finish, edge_model, round_index, unit.identity)
+            if save_snapshot:
+                generation_records.append({"unit": realized[unit.identity], "base": unit_base,
+                                           "end": edge_model, "edge_ready": edge_finish})
         accepted = [realized.get(unit.identity, unit) for unit in schedule.accepted]
         pending = [realized.get(unit.identity, unit) for unit in schedule.pending]
         observation = history.observe(accepted)
@@ -150,6 +168,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
             for unit, weight in zip(accepted, observation["weights"]):
                 cloud_units.append({"accepted_round": round_index, "identity": unit.identity,
                                     "generated_round": unit.generated_round, "mode": unit.mode,
+                                    "base_source": unit.base_source, "base_round": unit.base_round,
                                     "samples": unit.samples, "weight": weight, "arrival": unit.arrival,
                                     "cutoff": schedule.cutoff})
             if abs(sum(observation["weights"])-1) > 1e-12:
@@ -167,8 +186,10 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         previous.update({client: mode for client, mode in profile.items() if mode != "SKIP"})
         # Save vectors so predictions can be independently recomputed from the
         # exact pre-execution reference, with no test data in selection.
-        if round_index < 2 or (round_index+1) % config.snapshot_interval == 0 or round_index+1 == config.rounds:
+        if save_snapshot:
             torch.save({"round_index": round_index, "history_before": history_before,
+                    "dispatch_time": logical_time,
+                    "generation_records": generation_records,
                     "reference_before": observation.get("reference_before"),
                     "predicted_before_execution": predicted,
                     "delta": observation.get("cloud_delta"),
@@ -219,7 +240,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
                "pending_at_end": len(pending), "wall_sec": time.perf_counter()-started}
     write_json(destination / "summary.json", summary)
     torch.save({"model": model.state_dict(), "history": history.state_dict(), "pending": pending,
-                "logical_time": logical_time, "busy": busy}, destination / "final_state.pt")
+                "logical_time": logical_time, "busy": busy, "edge_models": edge_models}, destination / "final_state.pt")
     return summary
 
 

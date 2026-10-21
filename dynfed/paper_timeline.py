@@ -14,6 +14,8 @@ class Unit:
     arrival: float
     update: torch.Tensor | None = field(default=None, compare=False)
     generated_round: int = 0
+    base_source: str = "cloud"
+    base_round: int = 0
 
 
 @dataclass

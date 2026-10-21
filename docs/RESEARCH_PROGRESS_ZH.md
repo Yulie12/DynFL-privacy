@@ -5,16 +5,16 @@
 2. 数学核验：见 `MATHEMATICAL_AUDIT_ZH.md`。偏差/全局EMA顺序、接受单元权重、
    多阶段真实训练和异步队列一致。全FL_E不能由同步公式推出触发规则，使用显式外生
    时钟并做敏感性实验；首达触发不作为论文已经证明的性质。
-3. 小规模验证：22项测试通过。v2试运行和v3研究仅为初步证据；修正随机策略更新周期
-   和待处理Cloud事件优先级后，以冻结版本重新运行研究矩阵。
+3. 小规模验证：24项测试通过。v2/v3/v4仅保留为审计过程数据；v4发现FL_E缺少独立
+   Edge副本后已停止。已补上反馈可用时刻与基模型来源校验，修正版以新冻结版本重跑。
 4. 正式矩阵：由 `experiments/research_campaign.py --phase all` 持久执行，先完成
    修正版多种子试运行及消融，再执行CIFAR-10和Fashion-MNIST的100客户端、10Edge、
    100轮、3种子、8策略主比较。使用单张GTX1660Ti，完整矩阵需要较长运行时间。
 5. 论文：已修正数学语义、算法伪代码和不受支持的旧结论。仅当全部正式运行完成并
    审计通过后，自动生成正式数字表格。未完成时保持待测占位；pilot表明确标记规模。
 
-工作区 `out/research_campaign_v4/campaign_status.json` 是当前阶段状态入口；
-`out/research_campaign_v4.stdout.log` / `.stderr.log`记录后台输出。
+工作区 `out/research_campaign_v5/campaign_status.json` 是当前阶段状态入口；
+`out/research_campaign_v5.stdout.log` / `.stderr.log`记录后台输出。
 各场景完成后生成 `audit.json`、`analysis.json`、`aggregate.csv`、`paired.csv`。
 完整配置与源码SHA256用于核查结果来源。详细张量按首两轮、每10轮和末轮保存；
 全部轮次都保存标量指标、接受单元、权重、DP回执与时间线。
