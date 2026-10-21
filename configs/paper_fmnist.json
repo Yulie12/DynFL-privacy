@@ -17,8 +17,10 @@
   "delta": 1e-5,
   "gamma_d": 0.9,
   "gamma_c": 0.9,
-  "selection_period": 5,
-  "evaluation_budget": 256,
+  "shared_init_rounds": 10,
+  "experiment_version": "staged_eight_v1",
+  "selection_period": 1,
+  "evaluation_budget": 8,
   "archive_size": 16,
   "output_root": "out/paper_fmnist"
 }

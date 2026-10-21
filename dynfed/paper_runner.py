@@ -39,6 +39,86 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+def history_identity(state):
+    """Content identity for the one frozen history shared by all round candidates."""
+    return digest({
+        "schema": state["schema"],
+        "gamma_d": state["gamma_d"],
+        "gamma_c": state["gamma_c"],
+        "epsilon_j": state["epsilon_j"],
+        "reference": None if state["reference"] is None else tensor_digest(state["reference"]),
+        "deviations": {mode: tensor_digest(value) for mode, value in sorted(state["deviations"].items())},
+        "mode_observations": state["mode_observations"],
+    })
+
+
+def write_selection_exports(destination, rows, decisions):
+    """Rebuild staged-search tables only from durable per-round artifacts."""
+    destination = Path(destination)
+    extreme, ratios, pareto, rounds = [], [], [], []
+    for path in sorted(destination.glob("candidates_round_*.json")):
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if report.get("search_protocol") != "fixed_eight_ratios_v1":
+            continue
+        round_number = int(path.stem.rsplit("_", 1)[1]) + 1
+        rounds.append({
+            "round": round_number,
+            "history_id": report.get("history_id"),
+            "phase": report["phase"],
+            "selected_candidate": report.get("selected_candidate"),
+            "selected_profile": report["selected_profile"],
+            "pareto_front_size": report["pareto_front_size"],
+            "assignment_rule": report.get("assignment_rule"),
+            "rejected_candidates": report.get("rejected_candidates", []),
+            "candidates": report["candidates"],
+        })
+        for candidate in report["candidates"]:
+            row = {
+                "round": round_number, "history_id": report.get("history_id"),
+                "candidate": candidate["name"], "T": candidate["T"], "J": candidate["J"],
+                "status": candidate["status"], "pareto": candidate["pareto"],
+                "pareto_rank": candidate["pareto_rank"],
+                "chebyshev_score": candidate["chebyshev_score"],
+                "selected": candidate["name"] == report.get("selected_candidate"),
+                "FL_E_count": candidate["target_counts"]["FL_E"],
+                "FL_EC_count": candidate["target_counts"]["FL_EC"],
+                "FL_C_count": candidate["target_counts"]["FL_C"],
+                "FL_E_ratio": candidate["ratios"]["FL_E"],
+                "FL_EC_ratio": candidate["ratios"]["FL_EC"],
+                "FL_C_ratio": candidate["ratios"]["FL_C"],
+                "dominated_by": ";".join(candidate["dominated_by"]),
+            }
+            (extreme if candidate["name"].startswith("Extreme-") else ratios).append(row)
+            if candidate["pareto"]:
+                pareto.append(row)
+    write_csv(destination / "extreme_candidates.csv", extreme)
+    write_csv(destination / "ratio_candidates.csv", ratios)
+    write_csv(destination / "pareto_front.csv", pareto)
+    by_round = {}
+    for decision in decisions:
+        by_round.setdefault(decision["round"] + 1, []).append(decision)
+    mode_rows = []
+    for round_number, items in sorted(by_round.items()):
+        active = [item for item in items if item["mode"] in MODES]
+        counts = {mode: sum(item["mode"] == mode for item in active) for mode in MODES}
+        total = len(active)
+        metric = rows[round_number - 1]
+        mode_rows.append({
+            "round": round_number, "phase": metric["selection_phase"],
+            "selected_candidate": next((entry["selected_candidate"] for entry in rounds
+                                         if entry["round"] == round_number), None),
+            "active_clients": total,
+            **{mode + "_count": counts[mode] for mode in MODES},
+            **{mode + "_ratio": counts[mode] / total if total else 0.0 for mode in MODES},
+        })
+    write_csv(destination / "mode_ratios.csv", mode_rows)
+    write_json(destination / "search_audit.json", {
+        "schema": "paper.staged_eight_search_audit.v1",
+        "source": "candidates_round_*.json",
+        "rounds": rounds,
+    })
+
+
 def system_traces(config, seed):
     rng = np.random.default_rng(seed)
     hetero = config.client_heterogeneity
@@ -157,21 +237,26 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
             eligible = [client for client in members if any(mode in pools[client] for mode in ("FL_E", "FL_EC"))]
             for client in eligible[config.edge_group_capacity:]:
                 pools[client] = tuple(mode for mode in pools[client] if mode == "FL_C") or ("SKIP",)
+        history_before = copy.deepcopy(history.state_dict())
+        frozen_history_id = history_identity(history_before)
         plan_path = destination/f"plan_round_{round_index:03d}.pt"
         if plan_path.exists():
             saved_plan = torch.load(plan_path, map_location="cpu", weights_only=False)
             if saved_plan["run_id"] != run_id:
                 raise RuntimeError("cached selection belongs to a different run")
             chosen, search = saved_plan["chosen"], saved_plan["search"]
+            if search.get("history_id", frozen_history_id) != frozen_history_id:
+                raise RuntimeError("cached selection was scored from a different frozen history")
         else:
             chosen, search = select(config, policy, pools, history, trace, samples, payload_mb,
                                     logical_time, round_index, previous, pending,
                                     force_reselect=prior_phase in {"history_initialization", "shared_initialization"})
+            search["history_id"] = frozen_history_id
             atomic_torch(plan_path, {"run_id": run_id, "chosen": chosen, "search": search})
+        search.setdefault("history_id", frozen_history_id)
         prior_phase = search["phase"]
         profile, schedule = chosen.profile, chosen.schedule
         predicted, predicted_j, prediction_status = history.predict(mode_masses(schedule.accepted))
-        history_before = copy.deepcopy(history.state_dict())
         write_json(destination/f"candidates_round_{round_index:03d}.json", search)
         atomic_torch(destination/f"decision_history_{round_index:03d}.pt", history_before)
         before = vector(model)
@@ -329,6 +414,8 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
         write_csv(destination / "client_decisions.csv", decisions)
         write_csv(destination / "privacy_receipts.csv", receipts)
         write_csv(destination / "cloud_units.csv", cloud_units)
+        if config.experiment_version == "staged_eight_v1" and policy in CORE_POLICIES:
+            write_selection_exports(destination, rows, decisions)
         if policy in CORE_POLICIES and round_index+1 == config.shared_init_rounds and set(history.deviations) != set(MODES):
             raise RuntimeError("shared initialization failed to produce all three histories")
         checkpoint_path = destination/f"checkpoint_round_{round_index+1:03d}.pt"

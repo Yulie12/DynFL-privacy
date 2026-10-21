@@ -8,6 +8,18 @@ from .paper_config import MODES, CORE_POLICIES, POLICIES
 from .paper_timeline import mode_masses, plan
 
 
+EIGHT_CANDIDATES = (
+    ("Extreme-E", (10, 0, 0)),
+    ("Extreme-EC", (0, 10, 0)),
+    ("Extreme-C", (0, 0, 10)),
+    ("P1", (8, 1, 1)),
+    ("P2", (1, 8, 1)),
+    ("P3", (1, 1, 8)),
+    ("P4", (6, 3, 1)),
+    ("P5", (1, 3, 6)),
+)
+
+
 @dataclass
 class Evaluation:
     profile: dict
@@ -38,6 +50,70 @@ def chebyshev(items):
                                      x.latency, x.learning, identity(x)))
 
 
+def ratio_counts(clients, weights):
+    """Largest-remainder apportionment with stable mode-order ties."""
+    total = sum(weights)
+    counts = [clients * weight // total for weight in weights]
+    remainder = clients - sum(counts)
+    order = sorted(range(len(weights)), key=lambda index: (-(clients * weights[index] % total), index))
+    for index in order[:remainder]:
+        counts[index] += 1
+    return dict(zip(MODES, counts))
+
+
+def _mode_proxy(config, trace, mode, payload_mb, switching):
+    """Deterministic additive assignment proxy; final T still uses plan()."""
+    switch = config.switch_sec if switching else 0.0
+    block = config.local_steps * trace["step_sec"]
+    if mode == "FL_C":
+        return switch + block + payload_mb / trace["lc_rate"] + config.end_cloud_delay
+    stages = config.edge_stages if mode == "FL_EC" else 1
+    elapsed = 0.0
+    for stage in range(stages):
+        returned = 0.0 if stage == 0 else payload_mb / trace["le_rate"] + config.end_edge_delay
+        elapsed += returned + block + payload_mb / trace["le_rate"] + config.end_edge_delay
+        elapsed += config.edge_aggregation_sec
+    return switch + elapsed + payload_mb / trace["ec_rate"] + config.edge_cloud_delay
+
+
+def assign_ratio(config, pools, traces, payload_mb, previous, counts):
+    """Minimum additive-proxy feasible assignment with exact integer quotas.
+
+    The proxy uses the frozen client compute/link trace and switch state. Edge
+    grouping, Cloud-unit weights, the global barrier and ACKs are evaluated
+    exactly by plan() after this deterministic assignment is constructed.
+    """
+    clients = sorted(pools)
+    targets = (counts["FL_E"], counts["FL_EC"], counts["FL_C"])
+    # state=(assigned E, assigned EC); C is implied by the processed count.
+    states = {(0, 0): (0.0, ())}
+    for position, client in enumerate(clients):
+        updated = {}
+        for (assigned_e, assigned_ec), (cost, path) in states.items():
+            assigned_c = position - assigned_e - assigned_ec
+            assigned = (assigned_e, assigned_ec, assigned_c)
+            for mode_index, mode in enumerate(MODES):
+                if mode not in pools[client] or assigned[mode_index] >= targets[mode_index]:
+                    continue
+                next_e = assigned_e + (mode == "FL_E")
+                next_ec = assigned_ec + (mode == "FL_EC")
+                trace = traces[client]
+                proxy = _mode_proxy(config, trace, mode, payload_mb,
+                                    client in previous and previous[client] != mode)
+                candidate = (cost + proxy, path + (mode,))
+                key = (next_e, next_ec)
+                if key not in updated or candidate < updated[key]:
+                    updated[key] = candidate
+        states = updated
+        if not states:
+            return None, None
+    target_key = targets[:2]
+    if target_key not in states:
+        return None, None
+    cost, path = states[target_key]
+    return dict(zip(clients, path)), cost
+
+
 def select(config, policy, pools, history, traces, samples, payload_mb, start,
            round_index, previous, pending, force_reselect=False):
     started = time.perf_counter()
@@ -45,6 +121,8 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
         raise ValueError("unsupported policy; standalone J is not a core method")
     clients = sorted(pools)
     cache = {}
+    candidate_metadata = {}
+    rejected_candidates = []
     missing = set(MODES) - set(history.deviations)
     feasible_missing = missing.intersection({mode for pool in pools.values() for mode in pool})
     shared_initializing = policy in CORE_POLICIES and round_index < config.shared_init_rounds
@@ -67,6 +145,8 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
 
     default = {client: min(pools[client], key=lambda mode: (mode != "FL_C", mode)) for client in clients}
     fixed = {"fixed_fl_e": "FL_E", "fixed_fl_ec": "FL_EC", "fixed_fl_c": "FL_C"}
+    staged_eight = (config.experiment_version == "staged_eight_v1"
+                    and policy in CORE_POLICIES and not shared_initializing)
     special = None
     if shared_initializing:
         planned = {client: MODES[position % len(MODES)] for position, client in enumerate(clients)}
@@ -86,6 +166,34 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
     if special is not None:
         chosen = evaluate(special)
         phase = "shared_initialization" if shared_initializing else "fixed" if policy.startswith("fixed_") else "reuse_or_random"
+    elif staged_eight:
+        for name, weights in EIGHT_CANDIDATES:
+            counts = ratio_counts(len(clients), weights)
+            profile, proxy_cost = assign_ratio(config, pools, traces, payload_mb, previous, counts)
+            if profile is None:
+                rejected_candidates.append({"name": name, "weights": dict(zip(MODES, weights)),
+                                            "target_counts": counts, "reason": "quota_infeasible"})
+                continue
+            item = evaluate(profile)
+            key = identity(item)
+            if key in candidate_metadata:
+                raise RuntimeError("distinct staged candidates produced the same concrete profile")
+            candidate_metadata[key] = {
+                "name": name,
+                "ratios": {mode: weight / sum(weights) for mode, weight in zip(MODES, weights)},
+                "target_counts": counts,
+                "assignment_proxy_cost": proxy_cost,
+            }
+        if rejected_candidates or len(cache) != len(EIGHT_CANDIDATES):
+            raise RuntimeError("staged eight-candidate search could not realize every registered ratio")
+        values = list(cache.values())
+        front = nondominated(values)
+        if policy == "latency_only":
+            chosen = min(values, key=lambda item: (item.latency, identity(item)))
+            phase = "eight_latency_only"
+        else:
+            chosen = chebyshev(front)
+            phase = "eight_pareto"
     else:
         seeds = [default]
         seeds.extend({client: mode if mode in pools[client] else default[client]
@@ -151,7 +259,7 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
                 phase = "pareto"
     front = nondominated(list(cache.values()))
     archive = sorted(front, key=lambda item: (item.latency, item.learning, identity(item)))
-    if len(archive) > config.archive_size:
+    if not staged_eight and len(archive) > config.archive_size:
         if config.archive_size == 1:
             archive = [chebyshev(archive)]
         else:
@@ -159,17 +267,59 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
                        for index in range(config.archive_size)]
     if special is None and not initializing and policy in {"proposed", "joint_no_ema", "exhaustive"} and archive:
         chosen = chebyshev(archive)
+    front_keys = {identity(item) for item in front}
+    score_by_key = {}
+    rank_by_key = {}
+    if archive:
+        t0, t1 = min(item.latency for item in archive), max(item.latency for item in archive)
+        j0, j1 = min(item.learning for item in archive), max(item.learning for item in archive)
+        ranked = sorted(archive, key=lambda item: (
+            max((item.latency-t0)/(t1-t0+1e-9), (item.learning-j0)/(j1-j0+1e-9)),
+            item.latency, item.learning, identity(item)))
+        for rank, item in enumerate(ranked, 1):
+            key = identity(item)
+            score_by_key[key] = max((item.latency-t0)/(t1-t0+1e-9),
+                                    (item.learning-j0)/(j1-j0+1e-9))
+            rank_by_key[key] = rank
+
+    def candidate_record(item):
+        key = identity(item)
+        total = sum(unit.samples for unit in item.schedule.accepted)
+        dominators = [candidate_metadata.get(identity(other), {}).get("name") or str(identity(other))
+                      for other in cache.values()
+                      if other.learning is not None and item.learning is not None
+                      and other.latency <= item.latency and other.learning <= item.learning
+                      and (other.latency < item.latency or other.learning < item.learning)]
+        record = {**candidate_metadata.get(key, {}), "profile": item.profile,
+                "T": item.latency, "J": item.learning, "status": item.status,
+                "coverage": item.coverage, "masses": mode_masses(item.schedule.accepted),
+                "pareto": key in front_keys, "dominated_by": dominators,
+                "chebyshev_score": score_by_key.get(key), "pareto_rank": rank_by_key.get(key)}
+        if staged_eight:
+            record.update({
+                "cutoff": item.schedule.cutoff, "finish": item.schedule.finish,
+                "cloud_units": [{"identity": unit.identity, "mode": unit.mode, "edge": unit.edge,
+                                 "clients": list(unit.clients), "samples": unit.samples,
+                                 "weight": unit.samples/total, "arrival": unit.arrival}
+                                for unit in item.schedule.accepted],
+                "timeline": item.schedule.events,
+            })
+        return record
+
+    selected_key = identity(chosen)
     return chosen, {"phase": phase, "evaluated_profiles": len(cache),
                     "feasible_combinations": math.prod(len(pool) for pool in pools.values()),
                     "unconstrained_combinations": 3 ** len(clients),
                     "pareto_front_size": len(front),
                     "archive_size": len(archive),
                     "selection_sec": time.perf_counter()-started,
+                    "search_protocol": "fixed_eight_ratios_v1" if staged_eight else "bounded_neighbors_v1",
+                    "assignment_rule": "deterministic_min_additive_trace_proxy_dp_v1" if staged_eight else None,
                     "missing_history": sorted(missing),
                     "coverage": chosen.coverage,
-                    "candidates": [{"profile": item.profile, "T": item.latency, "J": item.learning,
-                                    "status": item.status, "coverage": item.coverage,
-                                    "masses": mode_masses(item.schedule.accepted)} for item in cache.values()],
+                    "candidates": [candidate_record(item) for item in cache.values()],
+                    "rejected_candidates": rejected_candidates,
                     "archive_profiles": [item.profile for item in archive],
                     "selected_profile": chosen.profile,
+                    "selected_candidate": candidate_metadata.get(selected_key, {}).get("name"),
                     "feasible_pools": pools}

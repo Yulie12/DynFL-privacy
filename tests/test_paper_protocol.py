@@ -4,7 +4,7 @@ import torch
 from dynfed.paper_config import PaperConfig
 from dynfed.paper_history import History
 from dynfed.paper_privacy import Ledger
-from dynfed.paper_search import select
+from dynfed.paper_search import EIGHT_CANDIDATES, ratio_counts, select
 from dynfed.paper_timeline import Unit, plan
 from dynfed.paper_runner import system_traces
 
@@ -249,3 +249,70 @@ def test_random_baseline_honors_the_same_selection_period():
     chosen, _ = select(config, "random_feasible", {0:("FL_C","FL_E"), 1:("FL_C","FL_E")},
                        History(), traces(), {0:1,1:1}, .01, 0, 1, previous, [])
     assert chosen.profile == previous
+
+
+def staged_config(**changes):
+    values = dict(clients=10, edges=2, rounds=12, train_limit=30, test_limit=10,
+                  local_steps=1, edge_stages=3, shared_init_rounds=10,
+                  selection_period=1, evaluation_budget=8,
+                  experiment_version="staged_eight_v1")
+    values.update(changes)
+    return PaperConfig(**values)
+
+
+def test_staged_eight_protocol_configuration_is_strict():
+    staged_config()
+    with pytest.raises(ValueError, match="ten charged"):
+        staged_config(shared_init_rounds=9)
+    with pytest.raises(ValueError, match="exactly eight"):
+        staged_config(evaluation_budget=7)
+
+
+def test_registered_ratio_counts_are_exact_for_one_hundred_clients():
+    expected = {
+        "Extreme-E": (100, 0, 0), "Extreme-EC": (0, 100, 0), "Extreme-C": (0, 0, 100),
+        "P1": (80, 10, 10), "P2": (10, 80, 10), "P3": (10, 10, 80),
+        "P4": (60, 30, 10), "P5": (10, 30, 60),
+    }
+    for name, weights in EIGHT_CANDIDATES:
+        counts = ratio_counts(100, weights)
+        assert tuple(counts[mode] for mode in ("FL_E", "FL_EC", "FL_C")) == expected[name]
+
+
+def test_round_eleven_evaluates_exactly_eight_concrete_candidates():
+    cfg = staged_config()
+    trace = system_traces(cfg, 42)[10]
+    pools = {client: ("FL_E", "FL_EC", "FL_C") for client in range(cfg.clients)}
+    history = History(reference=torch.tensor([1.], dtype=torch.float64), deviations={
+        "FL_E": torch.tensor([10.], dtype=torch.float64),
+        "FL_EC": torch.tensor([0.], dtype=torch.float64),
+        "FL_C": torch.tensor([10.], dtype=torch.float64),
+    })
+    chosen, report = select(cfg, "proposed", pools, history, trace,
+                            {client: 1 for client in pools}, .01, 0., 10, {}, [])
+    assert report["phase"] == "eight_pareto"
+    assert report["evaluated_profiles"] == 8
+    assert [item["name"] for item in report["candidates"]] == [name for name, _ in EIGHT_CANDIDATES]
+    assert not report["rejected_candidates"]
+    assert len({tuple(sorted(item["profile"].items())) for item in report["candidates"]}) == 8
+    for item in report["candidates"]:
+        actual = {mode: sum(value == mode for value in item["profile"].values())
+                  for mode in ("FL_E", "FL_EC", "FL_C")}
+        assert actual == item["target_counts"]
+    extreme_ec = next(item for item in report["candidates"] if item["name"] == "Extreme-EC")
+    assert extreme_ec["J"] == pytest.approx(0.) and extreme_ec["pareto"]
+    assert chosen.profile == report["selected_profile"]
+
+
+def test_staged_shared_initialization_lasts_through_round_ten():
+    cfg = staged_config()
+    trace = system_traces(cfg, 42)[0]
+    pools = {client: ("FL_E", "FL_EC", "FL_C") for client in range(cfg.clients)}
+    samples = {client: 1 for client in pools}
+    for index in (0, 9):
+        chosen, report = select(cfg, "latency_only", pools, History(), trace,
+                                samples, .01, 0., index, {}, [])
+        assert report["phase"] == "shared_initialization"
+        assert ratio_counts(10, (1, 1, 1)) == {
+            mode: sum(value == mode for value in chosen.profile.values())
+            for mode in ("FL_E", "FL_EC", "FL_C")}

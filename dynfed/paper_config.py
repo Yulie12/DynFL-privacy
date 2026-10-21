@@ -99,8 +99,18 @@ class PaperConfig:
             raise ValueError("device must be cpu or cuda")
         if self.protocol != "global_barrier_100" or self.cloud_quorum != 1.0:
             raise ValueError("only global_barrier_100 with cloud_quorum=1.0 is implemented; 90% is deferred")
-        if self.shared_init_rounds != 2:
-            raise ValueError("the registered shared initialization has exactly two charged rounds")
+        if self.experiment_version == "shared_init_v1":
+            if self.shared_init_rounds != 2:
+                raise ValueError("shared_init_v1 has exactly two charged initialization rounds")
+        elif self.experiment_version == "staged_eight_v1":
+            if self.shared_init_rounds != 10:
+                raise ValueError("staged_eight_v1 has exactly ten charged initialization rounds")
+            if self.selection_period != 1 or self.evaluation_budget != 8:
+                raise ValueError("staged_eight_v1 evaluates exactly eight candidates every post-initialization round")
+            if self.clients < 10:
+                raise ValueError("staged_eight_v1 requires at least ten clients for distinct ratio candidates")
+        else:
+            raise ValueError("unsupported experiment_version")
         if self.gradient_backend not in {"vectorized", "reference"}:
             raise ValueError("gradient_backend must be vectorized or reference")
 

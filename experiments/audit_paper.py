@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dynfed.paper_history import History
 from dynfed.paper_timeline import mode_masses, plan
 from dynfed.paper_config import PaperConfig, CORE_POLICIES, MODES, effective_config
-from dynfed.paper_runner import write_json
+from dynfed.paper_runner import history_identity, write_json
+from dynfed.paper_search import EIGHT_CANDIDATES
 from dynfed.paper_storage import digest, file_digest, load_checkpoint, tensor_digest
 from dynfed.paper_privacy import ORDERS
 
@@ -67,8 +68,8 @@ def audit(root, required_runs=None):
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
     if config.get("protocol") != "global_barrier_100":
         raise ValueError("old-protocol outputs cannot validate the global 100% barrier")
-    if config.get("experiment_version") != "shared_init_v1":
-        raise ValueError("results predate the registered shared-initialization experiment")
+    if config.get("experiment_version") not in {"shared_init_v1", "staged_eight_v1"}:
+        raise ValueError("results do not use a registered shared-initialization experiment")
     scenario_config = PaperConfig(**config)
     expected = {(seed, policy) for seed in config["seeds"] for policy in config["policies"]}
     required = expected if required_runs is None else set(required_runs)
@@ -231,11 +232,22 @@ def audit(root, required_runs=None):
             for index, metric in enumerate(metrics):
                 candidates = json.loads((folder/f"candidates_round_{index:03d}.json").read_text(encoding="utf-8"))
                 state = torch.load(folder/f"decision_history_{index:03d}.pt", map_location="cpu", weights_only=False)
+                if "history_id" in candidates:
+                    assert candidates["history_id"] == history_identity(state)
                 assert len(candidates["candidates"]) == int(metric["evaluated_profiles"])
                 assert len(candidates["candidates"]) <= config["evaluation_budget"] or folder.name == "exhaustive"
+                staged_search = candidates.get("search_protocol") == "fixed_eight_ratios_v1"
+                if staged_search:
+                    assert index >= config["shared_init_rounds"]
+                    assert len(candidates["candidates"]) == 8
+                    assert [item["name"] for item in candidates["candidates"]] == [name for name, _ in EIGHT_CANDIDATES]
+                    assert not candidates["rejected_candidates"]
                 candidate_map = {}
                 for candidate in candidates["candidates"]:
                     profile = {int(client):mode for client, mode in candidate["profile"].items()}
+                    if staged_search:
+                        actual_counts = {mode:sum(value == mode for value in profile.values()) for mode in MODES}
+                        assert actual_counts == candidate["target_counts"]
                     candidate_map[tuple(sorted(profile.items()))] = candidate
                     schedule = plan(PaperConfig(**config), profile, traces[index],
                                     {client:len(indices) for client,indices in enumerate(partition)},
@@ -266,9 +278,9 @@ def audit(root, required_runs=None):
                     assert math.isclose(selected_j,float(metric["predicted_j"]),rel_tol=1e-9,abs_tol=1e-9)
                 if candidates["phase"] == "shared_initialization":
                     assert key == tuple((client,MODES[client%3]) for client in range(config["clients"]))
-                if candidates["phase"] == "latency_only":
+                if candidates["phase"] in {"latency_only", "eight_latency_only"}:
                     assert key == min(candidate_map, key=lambda k:(candidate_map[k]["T"],k))
-                if candidates["phase"] == "pareto":
+                if candidates["phase"] in {"pareto", "eight_pareto"}:
                     archive = [tuple(sorted((int(c),m) for c,m in profile.items())) for profile in candidates["archive_profiles"]]
                     t0,t1 = min(candidate_map[k]["T"] for k in archive),max(candidate_map[k]["T"] for k in archive)
                     j0,j1 = min(candidate_map[k]["J"] for k in archive),max(candidate_map[k]["J"] for k in archive)
