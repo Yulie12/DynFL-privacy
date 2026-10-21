@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import os
+import json
 import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,15 +51,21 @@ def main():
     parser.add_argument("--phase", choices=("studies", "formal", "all"), default="all")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Retain completed training and repeat audits before advancing")
     args = parser.parse_args()
     cases = stages(args.phase)
     if args.dry_run:
         for name, kind, config in cases:
             print(name, kind, config.rounds, config.clients, config.seeds)
         return
-    args.output.mkdir(parents=True, exist_ok=False)
+    args.output.mkdir(parents=True, exist_ok=args.resume)
     manifest = {name: {"kind": kind, "config": config.to_dict()} for name, kind, config in cases}
-    write_json(args.output / "manifest.json", manifest)
+    manifest_path = args.output / "manifest.json"
+    if args.resume:
+        if json.loads(manifest_path.read_text(encoding="utf-8")) != json.loads(json.dumps(manifest)):
+            raise ValueError("cannot resume a different experiment matrix")
+    else:
+        write_json(manifest_path, manifest)
     completed = []
     for name, kind, config in cases:
         status = {"status": "running", "phase": name, "kind": kind,
@@ -67,7 +74,12 @@ def main():
         write_json(args.output / "campaign_status.json", status)
         destination = args.output / name
         try:
-            run(config, destination)
+            if args.resume and destination.exists():
+                summaries = list(destination.glob("seed_*/*/summary.json"))
+                if len(summaries) != len(config.seeds)*len(config.policies):
+                    raise RuntimeError(f"partial training exists at {destination}; do not overwrite or reuse its privacy state")
+            else:
+                run(config, destination)
             write_json(destination / "audit.json", audit(destination))
             runs, aggregate, paired = summarize(destination, .8)
             write_csv(destination / "aggregate.csv", aggregate)

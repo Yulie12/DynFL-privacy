@@ -717,6 +717,25 @@ synchronous $FL_{EC}$ or $FL_C$ unit exists. With no synchronous unit,
 an empty-set maximum does not specify a Cloud aggregation trigger.
 Such an execution requires an additional Cloud service policy, specified
 in the experimental setup. This is a modeling boundary, not a latency guarantee.
+For optimization over profiles that may contain no synchronous unit, we
+therefore distinguish synchronization time from the following explicitly
+extended round-observation time. Let $s_t$ be the absolute start time after
+any activation wait, $\mathcal S^t=\mathcal D_C^t\cup\mathcal D_{EC}^t$,
+and $\zeta_C^t$ the cutoff supplied by the external Cloud service policy.
+Then
+\begin{equation}
+T_{\mathrm{round}}^t(\mathbf h)=
+\begin{cases}
+T_{\mathrm{sys}}(\mathbf h), & \mathcal S^t\ne\emptyset,\\
+\zeta_C^t-s_t+\mathbb I(\mathcal K^t\ne\emptyset)T_C^{\mathrm{agg},t},
+& \mathcal S^t=\emptyset.
+\end{cases}
+\label{eq:extended_round_time}
+\end{equation}
+For a periodic service clock, $\zeta_C^t=\min\{j\tau_C:j\tau_C>s_t\}$.
+This second branch is a definition of the experimental observation window,
+not a consequence of the synchronization equation. Reported cumulative
+time additionally includes activation waits between such windows.
 Return delays are evaluated using
 (\ref{eq:comm_latency}), with absent
 return paths excluded from the maximum.
@@ -910,7 +929,7 @@ reported as \textsc{skip}.
 
 For each feasible profile, the flow model
 evaluates the round duration
-\(T_{\mathrm{sys}}(\mathbf h^t)\),
+\(T_{\mathrm{round}}^t(\mathbf h^t)\),
 while the calibration model estimates
 the learning error
 \(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\).
@@ -920,7 +939,7 @@ The multiobjective optimization problem is
 {\operatorname{minimize}}
 \quad
 \begin{bmatrix}
-T_{\mathrm{sys}}(\mathbf h^t)\\
+T_{\mathrm{round}}^t(\mathbf h^t)\\
 \widehat J_{\mathrm{learn}}^t(\mathbf h^t)
 \end{bmatrix}.
 \label{eq:global_multiobjective}
@@ -938,7 +957,7 @@ The normalized objectives are
 \bar T(\mathbf h^t)
 =
 \frac{
-T_{\mathrm{sys}}(\mathbf h^t)-T_{\min}^t
+T_{\mathrm{round}}^t(\mathbf h^t)-T_{\min}^t
 }{
 T_{\max}^t-T_{\min}^t+\gamma_n
 },
@@ -1049,8 +1068,8 @@ and $\mathbf h^{t-1,\ast}\in\mathcal F_{\mathrm{sys}}^t$}
     mode distributions
     \STATE Explore candidates by changing
     one client's mode
-    \STATE Evaluate $T_{\mathrm{sys}}(\mathbf h^t)$
-    using \eqref{eq:system_round_latency}
+    \STATE Evaluate $T_{\mathrm{round}}^t(\mathbf h^t)$
+    using \eqref{eq:extended_round_time}
     \STATE Estimate $\widehat J_{\mathrm{learn}}^t
     (\mathbf h^t)$ using
     \eqref{eq:j_learn_estimate}
@@ -1137,7 +1156,7 @@ Client computing capacity, available memory, Edge capacity, link
 throughput, and propagation delays are configurable. Three groups
 of conditions are planned: a reference setting, stronger resource
 heterogeneity, and larger changes in network conditions. The
-system time $T_{\mathrm{sys}}$ is calculated using the latency
+system time $T_{\mathrm{round}}$ is calculated using the latency
 model, while the time spent searching for a mode distribution is
 measured separately. The same recorded system conditions are used
 for all methods in each comparison.
@@ -1266,7 +1285,7 @@ time required to reach a specified test accuracy, the fraction
 of clients admitted, the fraction of rounds producing a Cloud
 update, total communication volume, and mode selection time.
 Selection computation time is reported separately from
-$T_{\mathrm{sys}}$ because it is not part of the current round
+$T_{\mathrm{round}}$ because it is not part of the current round
 latency model. When a target accuracy is not reached, this is
 reported without assigning an artificial completion time.
 
@@ -1345,6 +1364,10 @@ The pilot EMA comparison is reported separately from full-scale runs.
 Setting both smoothing coefficients to zero keeps the latest valid
 observations; it does not remove the historical objective. These
 measurements do not establish a universal advantage of smoothing.
+Changing $\gamma_C$ also changes the reference defining $J_{\mathrm{obs}}$.
+Consequently, MAE across different $\gamma_C$ values is not an error
+comparison against one fixed prediction target. Controls with a common
+$\gamma_C$ are reported separately, alongside test accuracy and system time.
 
 \subsubsection{Resource, Network, and Privacy Conditions}
 \label{subsec:constraint_ablation}

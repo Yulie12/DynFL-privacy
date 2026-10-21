@@ -8,7 +8,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dynfed.paper_history import History
-from dynfed.paper_timeline import mode_masses
+from dynfed.paper_timeline import mode_masses, plan
+from dynfed.paper_config import PaperConfig
 from dynfed.paper_runner import write_json
 
 
@@ -39,6 +40,27 @@ def independent_equations(before, units, gamma_d, gamma_c, epsilon_j):
     return after, deviations, prediction, j_obs
 
 
+def reconstruct_dispatches(folder, seed_dir, config, partition, payload_mb):
+    """Rebuild starts from metadata; never trust a stored end-of-round timestamp."""
+    with (folder/"client_decisions.csv").open(encoding="utf-8-sig") as handle:
+        decisions = list(csv.DictReader(handle))
+    traces = json.loads((seed_dir/"traces.json").read_text(encoding="utf-8"))
+    cfg = PaperConfig(**config)
+    samples = {client:len(indices) for client,indices in enumerate(partition)}
+    now, previous, busy, pending = 0., {}, {}, []
+    reconstructed = {}
+    for index in range(config["rounds"]):
+        if not pending and busy and all(busy.get(client,0) > now+1e-12 for client in samples):
+            now = min(busy.values())
+        profile = {int(row["client"]):row["mode"] for row in decisions if int(row["round"]) == index}
+        schedule = plan(cfg, profile, traces[index], samples, payload_mb, now, index, previous, pending)
+        reconstructed[index] = (now, schedule)
+        previous.update({client:mode for client,mode in profile.items() if mode != "SKIP"})
+        busy.update(schedule.client_finish)
+        now, pending = schedule.finish, schedule.pending
+    return reconstructed
+
+
 def audit(root):
     root = Path(root)
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
@@ -59,11 +81,20 @@ def audit(root):
             late = 0
             prior_edge_generations = []
             initial_vector = None
+            reconstructed = None
             for round_index, snapshot_path in enumerate(sorted(folder.glob("history_round_*.pt"))):
                 snapshot = torch.load(snapshot_path, map_location="cpu", weights_only=False)
                 if initial_vector is None:
                     initial_vector = snapshot.get("model_before")
+                    if initial_vector is not None:
+                        reconstructed = reconstruct_dispatches(folder, seed_dir, config, partition,
+                                                               initial_vector.numel()*initial_vector.element_size()/1e6)
                 round_index = snapshot.get("round_index", round_index)
+                dispatch_time = snapshot.get("dispatch_time")
+                if reconstructed is not None:
+                    dispatch_time, reconstructed_schedule = reconstructed[round_index]
+                    assert {unit.identity for unit in snapshot["accepted"]} == {unit.identity for unit in reconstructed_schedule.accepted}
+                    assert {unit.identity for unit in snapshot["pending"]} == {unit.identity for unit in reconstructed_schedule.pending}
                 if "history_before" in snapshot:
                     state = snapshot["history_before"]
                     history = History(config["gamma_d"], config["gamma_c"], config["epsilon_j"],
@@ -83,7 +114,7 @@ def audit(root):
                     assert unit.base_source.startswith("edge:" if unit.mode == "FL_E" else "cloud:")
                     if unit.mode == "FL_E" and config.get("snapshot_interval", 1) == 1:
                         candidates = [item for item in prior_edge_generations
-                                      if item["unit"].edge == unit.edge and item["edge_ready"] <= snapshot["dispatch_time"]+1e-12]
+                                      if item["unit"].edge == unit.edge and item["edge_ready"] <= dispatch_time+1e-12]
                         parent = max(candidates, key=lambda item: (item["edge_ready"],item["unit"].identity)) if candidates else None
                         expected = initial_vector if parent is None else parent["end"]
                         torch.testing.assert_close(generation["base"], expected)

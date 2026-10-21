@@ -82,6 +82,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         # Activation only waits for each client's own required model return.
         # FL_E availability is independent of its still-pending Cloud upload.
         logical_time = activation_start(logical_time, busy, samples, pending)
+        dispatch_time = logical_time
         edge_models.advance(logical_time)
         trace = traces[round_index]
         pools, sigmas = {}, {}
@@ -188,7 +189,7 @@ def run_policy(config, policy, seed, data, partition, traces, destination):
         # exact pre-execution reference, with no test data in selection.
         if save_snapshot:
             torch.save({"round_index": round_index, "history_before": history_before,
-                    "dispatch_time": logical_time,
+                    "dispatch_time": dispatch_time,
                     "generation_records": generation_records,
                     "reference_before": observation.get("reference_before"),
                     "predicted_before_execution": predicted,
