@@ -4,7 +4,7 @@ from itertools import product
 import math
 import random
 import time
-from .paper_config import MODES
+from .paper_config import MODES, CORE_POLICIES, POLICIES
 from .paper_timeline import mode_masses, plan
 
 
@@ -41,11 +41,16 @@ def chebyshev(items):
 def select(config, policy, pools, history, traces, samples, payload_mb, start,
            round_index, previous, pending, force_reselect=False):
     started = time.perf_counter()
+    if policy not in POLICIES:
+        raise ValueError("unsupported policy; standalone J is not a core method")
     clients = sorted(pools)
     cache = {}
     missing = set(MODES) - set(history.deviations)
     feasible_missing = missing.intersection({mode for pool in pools.values() for mode in pool})
-    initializing = policy in {"proposed", "deviation_only", "exhaustive"} and (
+    shared_initializing = policy in CORE_POLICIES and round_index < config.shared_init_rounds
+    if policy in CORE_POLICIES and not shared_initializing and (history.reference is None or missing):
+        raise RuntimeError("shared initialization did not collect all three valid mode histories")
+    initializing = policy == "exhaustive" and (
         history.reference is None or bool(feasible_missing))
 
     def evaluate(profile):
@@ -63,7 +68,12 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
     default = {client: min(pools[client], key=lambda mode: (mode != "FL_C", mode)) for client in clients}
     fixed = {"fixed_fl_e": "FL_E", "fixed_fl_ec": "FL_EC", "fixed_fl_c": "FL_C"}
     special = None
-    if policy in fixed:
+    if shared_initializing:
+        planned = {client: MODES[position % len(MODES)] for position, client in enumerate(clients)}
+        if any(mode not in pools[client] for client, mode in planned.items()):
+            raise RuntimeError("predetermined shared initialization is infeasible; do not invent history")
+        special = planned
+    elif policy in fixed:
         special = {client: fixed[policy] if fixed[policy] in pools[client] else "SKIP" for client in clients}
     elif policy == "fixed_mixed":
         special = {client: MODES[client % 3] if MODES[client % 3] in pools[client] else "SKIP" for client in clients}
@@ -75,7 +85,7 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
         special = {client: rng.choice(pools[client]) for client in clients}
     if special is not None:
         chosen = evaluate(special)
-        phase = "fixed" if policy.startswith("fixed_") else "reuse_or_random"
+        phase = "shared_initialization" if shared_initializing else "fixed" if policy.startswith("fixed_") else "reuse_or_random"
     else:
         seeds = [default]
         seeds.extend({client: mode if mode in pools[client] else default[client]
@@ -111,9 +121,6 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
                     base = min(candidates, key=lambda x: (-x.coverage, x.latency, identity(x)))
                 elif policy == "latency_only":
                     base = min(candidates, key=lambda x: (x.latency, identity(x)))
-                elif policy == "deviation_only":
-                    base = min(candidates, key=lambda x: (math.inf if x.learning is None else x.learning,
-                                                         x.latency, identity(x)))
                 else:
                     front = nondominated(candidates)
                     base = chebyshev(front) if front else min(candidates, key=lambda x: (x.latency, identity(x)))
@@ -139,9 +146,6 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
             if not valid:
                 chosen = min(values, key=lambda x: (-x.coverage, x.latency, identity(x)))
                 phase = "history_initialization"
-            elif policy == "deviation_only":
-                chosen = min(valid, key=lambda x: (x.learning, x.latency, identity(x)))
-                phase = "deviation_only"
             else:
                 chosen = chebyshev(nondominated(valid))
                 phase = "pareto"
@@ -153,7 +157,7 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
         else:
             archive = [archive[round(index*(len(archive)-1)/(config.archive_size-1))]
                        for index in range(config.archive_size)]
-    if special is None and not initializing and policy in {"proposed", "exhaustive"} and archive:
+    if special is None and not initializing and policy in {"proposed", "joint_no_ema", "exhaustive"} and archive:
         chosen = chebyshev(archive)
     return chosen, {"phase": phase, "evaluated_profiles": len(cache),
                     "feasible_combinations": math.prod(len(pool) for pool in pools.values()),
@@ -162,4 +166,10 @@ def select(config, policy, pools, history, traces, samples, payload_mb, start,
                     "archive_size": len(archive),
                     "selection_sec": time.perf_counter()-started,
                     "missing_history": sorted(missing),
-                    "coverage": chosen.coverage}
+                    "coverage": chosen.coverage,
+                    "candidates": [{"profile": item.profile, "T": item.latency, "J": item.learning,
+                                    "status": item.status, "coverage": item.coverage,
+                                    "masses": mode_masses(item.schedule.accepted)} for item in cache.values()],
+                    "archive_profiles": [item.profile for item in archive],
+                    "selected_profile": chosen.profile,
+                    "feasible_pools": pools}

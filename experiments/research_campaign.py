@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from dynfed.paper_config import PaperConfig
 from dynfed.paper_runner import run, write_json, write_csv
-from audit_paper import audit
-from summarize_paper import summarize
+from experiments.audit_paper import audit
+from experiments.summarize_paper import summarize
 
 
 def stages(phase):
@@ -69,12 +69,7 @@ def main():
         write_json(args.output / "campaign_status.json", status)
         destination = args.output / name
         try:
-            if args.resume and destination.exists():
-                summaries = list(destination.glob("seed_*/*/summary.json"))
-                if len(summaries) != len(config.seeds)*len(config.policies):
-                    raise RuntimeError(f"partial training exists at {destination}; do not overwrite or reuse its privacy state")
-            else:
-                run(config, destination)
+            run(config, destination, resume=args.resume and destination.exists())
             write_json(destination / "audit.json", audit(destination))
             runs, aggregate, paired = summarize(destination, .8)
             write_csv(destination / "aggregate.csv", aggregate)
@@ -83,14 +78,14 @@ def main():
                                                         "paired": paired})
             completed.append(name)
             if name == "cifar_trial":
-                from export_paper_results import export_studies
+                from experiments.export_paper_results import export_studies
                 export_studies(args.output)
         except Exception:
             status.update(status="failed", error=traceback.format_exc())
             write_json(args.output / "campaign_status.json", status)
             raise
     if args.phase in {"formal", "all"}:
-        from export_paper_results import export_formal
+        from experiments.export_paper_results import export_formal
         export_formal(args.output)
     write_json(args.output / "campaign_status.json", {"status": "completed", "completed": completed,
                                                        "updated_utc": datetime.now(timezone.utc).isoformat()})

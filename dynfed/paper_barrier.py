@@ -1,4 +1,5 @@
 """Explicit version/ACK gate for the single-host logical network simulation."""
+import math
 
 
 class VersionBarrier:
@@ -19,6 +20,8 @@ class VersionBarrier:
         self.ready_at = 0.
 
     def acknowledge(self, client, version, at):
+        if not math.isfinite(at) or at < 0:
+            raise RuntimeError("invalid acknowledgement time")
         if client not in self.clients or version != self.version or client in self.acks:
             raise RuntimeError("unknown, stale, or duplicate model acknowledgement")
         self.client_versions[client] = version

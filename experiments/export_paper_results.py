@@ -3,11 +3,15 @@ import argparse
 import json
 from pathlib import Path
 import statistics
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT))
 
 
 def checked(path):
+    from experiments.audit_paper import audit
+    audit(path)
     path = Path(path)
     config = json.loads((path / "config.json").read_text(encoding="utf-8"))
     if config.get("protocol") != "global_barrier_100":
@@ -70,7 +74,7 @@ def export_formal(campaign):
     provenance = {}
     labels = {"proposed":"Proposed", "fixed_fl_e":r"Fixed $FL_E$", "fixed_fl_ec":r"Fixed $FL_{EC}$",
               "fixed_fl_c":r"Fixed $FL_C$", "fixed_mixed":"Fixed mixed", "random_feasible":"Random feasible",
-              "latency_only":"Time only", "deviation_only":"Deviation only"}
+              "latency_only":"Time only", "joint_no_ema":"Time + J (no deviation EMA)"}
     for name, title in (("formal_fmnist","Fashion-MNIST / LeNet-5"), ("formal_cifar10","CIFAR-10 / frozen ResNet-18 head")):
         config, analysis = checked(campaign/name)
         if (config["rounds"],config["clients"],config["edges"],config["seeds"]) != (100,100,10,[42,43,44]):

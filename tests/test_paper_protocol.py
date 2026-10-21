@@ -118,7 +118,7 @@ def test_initialization_collects_all_feasible_modes_before_pareto():
         pending = [replace(u, update=torch.tensor([1.0], dtype=torch.float64)) for u in chosen.schedule.pending]
         now, previous = chosen.schedule.finish, chosen.profile
     assert set(h.deviations) == {"FL_E", "FL_EC", "FL_C"}
-    assert phases[0] == "history_initialization"
+    assert phases[:2] == ["shared_initialization", "shared_initialization"]
     assert "pareto" in phases or "reuse_or_random" in phases
 
 

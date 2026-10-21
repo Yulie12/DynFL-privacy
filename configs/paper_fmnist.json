@@ -10,7 +10,7 @@
   "edges": 10,
   "rounds": 100,
   "seeds": [42, 43, 44],
-  "policies": ["proposed", "fixed_fl_e", "fixed_fl_ec", "fixed_fl_c", "fixed_mixed", "random_feasible", "latency_only", "deviation_only"],
+  "policies": ["latency_only", "joint_no_ema", "proposed", "fixed_fl_e", "fixed_fl_ec", "fixed_fl_c", "fixed_mixed", "random_feasible"],
   "local_steps": 2,
   "edge_stages": 3,
   "epsilon": 8.0,

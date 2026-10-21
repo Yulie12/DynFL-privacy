@@ -5,8 +5,9 @@ import math
 from pathlib import Path
 
 MODES = ("FL_E", "FL_EC", "FL_C")
-POLICIES = ("proposed", "fixed_fl_e", "fixed_fl_ec", "fixed_fl_c", "fixed_mixed",
-            "random_feasible", "latency_only", "deviation_only", "exhaustive")
+CORE_POLICIES = ("latency_only", "joint_no_ema", "proposed")
+POLICIES = ("proposed", "joint_no_ema", "latency_only", "fixed_fl_e", "fixed_fl_ec",
+            "fixed_fl_c", "fixed_mixed", "random_feasible", "exhaustive")
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,9 @@ class PaperConfig:
     selection_period: int = 5
     evaluation_budget: int = 256
     archive_size: int = 16
+    shared_init_rounds: int = 2
     protocol: str = "global_barrier_100"
+    experiment_version: str = "shared_init_v1"
     cloud_quorum: float = 1.0
     acknowledgement_mb: float = 0.000064
     model_install_sec: float = 0.001
@@ -96,6 +99,8 @@ class PaperConfig:
             raise ValueError("device must be cpu or cuda")
         if self.protocol != "global_barrier_100" or self.cloud_quorum != 1.0:
             raise ValueError("only global_barrier_100 with cloud_quorum=1.0 is implemented; 90% is deferred")
+        if self.shared_init_rounds != 2:
+            raise ValueError("the registered shared initialization has exactly two charged rounds")
         if self.gradient_backend not in {"vectorized", "reference"}:
             raise ValueError("gradient_backend must be vectorized or reference")
 
@@ -112,3 +117,16 @@ class PaperConfig:
             if name in data:
                 data[name] = tuple(data[name])
         return cls(**data)
+
+
+def effective_config(config, policy, seed=None):
+    """Explicit, hashable per-arm settings; reference EMA is not disabled."""
+    from dataclasses import replace
+    if policy not in POLICIES:
+        raise ValueError("unsupported policy")
+    settings = {"policies": (policy,)}
+    if seed is not None:
+        settings["seeds"] = (seed,)
+    if policy == "joint_no_ema":
+        settings.update(gamma_d=0., gamma_c=.9)
+    return replace(config, **settings)

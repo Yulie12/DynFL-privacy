@@ -149,7 +149,8 @@ def assign(model, values):
         raise ValueError("trainable vector dimension mismatch")
 
 
-def local_train(model, base, x, y, indices, config, sigma, ledger, seed):
+def local_train(model, base, x, y, indices, config, sigma, ledger, seed,
+                resume_state=None, progress_callback=None):
     """Joint per-example gradient clipping, then one Gaussian mechanism per step.
 
     Replacement adjacency: sensitivity of the summed clipped gradients is 2C;
@@ -162,10 +163,17 @@ def local_train(model, base, x, y, indices, config, sigma, ledger, seed):
     params = [p for p in worker.parameters() if p.requires_grad]
     rng = np.random.default_rng(seed)
     generator = torch.Generator(device=config.device).manual_seed(seed)
-    if ledger.epsilon(config.local_steps, sigma) > ledger.budget + 1e-8:
-        raise RuntimeError("local block failed privacy preflight")
+    completed = 0
     losses = []
-    for _ in range(config.local_steps):
+    if resume_state is not None:
+        assign(worker, resume_state["vector"])
+        completed = resume_state["completed_steps"]
+        rng.bit_generator.state = resume_state["numpy_generator"]
+        generator.set_state(resume_state["torch_generator"])
+        losses = list(resume_state["losses"])
+    if ledger.epsilon(config.local_steps-completed, sigma) > ledger.budget + 1e-8:
+        raise RuntimeError("local block failed privacy preflight")
+    for step in range(completed, config.local_steps):
         selected = rng.permutation(indices)[:config.batch_size]
         summed = [torch.zeros_like(parameter) for parameter in params]
         if config.gradient_backend == "vectorized" and isinstance(worker, nn.Linear):
@@ -209,6 +217,10 @@ def local_train(model, base, x, y, indices, config, sigma, ledger, seed):
                 gradient = (accumulator + noise * (2 * config.clip_norm * sigma)) / len(selected)
                 parameter.add_(gradient, alpha=-config.learning_rate)
         ledger.commit(1, sigma)
+        if progress_callback is not None:
+            progress_callback({"completed_steps": step+1, "vector": vector(worker),
+                               "numpy_generator": rng.bit_generator.state,
+                               "torch_generator": generator.get_state(), "losses": losses})
     result = vector(worker)
     if not torch.isfinite(result).all():
         raise FloatingPointError("nonfinite DP-SGD model")

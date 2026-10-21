@@ -11,6 +11,9 @@ from dynfed.paper_runner import write_csv, write_json
 
 
 def summarize(root, target):
+    # Never trust the existence of summary.json or an old audit.json alone.
+    from experiments.audit_paper import audit
+    audit(root)
     records = []
     for path in sorted(Path(root).rglob("summary.json")):
         if not (path.parent / "round_metrics.csv").is_file():
@@ -34,7 +37,10 @@ def summarize(root, target):
         aggregate = {"policy": policy, "seeds": len(rows), "reached_target_seeds": sum(row["target_reached"] for row in rows)}
         for key in ("final_test_accuracy", "final_test_loss", "system_time", "selection_sec",
                     "admission_fraction", "cloud_update_fraction", "communication_mb", "max_epsilon",
-                    "mode_changes", "prediction_mae"):
+                    "mode_changes", "prediction_mae", "initialization_system_time", "initialization_steps",
+                    "initialization_max_epsilon", "selection_phase_system_time", "selection_phase_steps",
+                    "initialization_test_accuracy", "post_initialization_accuracy_change", "mean_selection_round_duration",
+                    "selection_fraction_FL_E", "selection_fraction_FL_EC", "selection_fraction_FL_C"):
             values = [row[key] for row in rows if row.get(key) is not None]
             aggregate[key + "_mean"] = statistics.mean(values) if values else None
             aggregate[key + "_std"] = statistics.stdev(values) if len(values) > 1 else None
