@@ -1,11 +1,4 @@
 \documentclass[5p,times]{elsarticle}
-
-% YTT
-\usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,calc}
-\usepackage{xcolor}
-
-
 \usepackage{amsmath,amsfonts,amssymb}
 \usepackage{algorithm}
 \usepackage{algorithmic}
@@ -37,7 +30,7 @@
 
 \graphicspath{{figures/}{figures_en/}}
 
-\journal{Future Generation Computer Systems-The International Journal of eScience}
+\journal{Journal of Parallel and Distributed Computing}
 
 \theoremstyle{plain}
 \newtheorem{theorem}{Theorem}
@@ -60,1314 +53,1865 @@
 \makeatletter
 \newenvironment{breakablealgorithm}
 {%
-  \par\addvspace{\intextsep}
-  \refstepcounter{algorithm}%
-  \hrule height 0.8pt depth 0pt
-  \kern 2pt
-  \renewcommand{\caption}[2][\relax]{%
-    \noindent\textbf{\ALG@name~\thealgorithm}\ ##2\par
-    \ifx\relax##1\relax
-      \addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##2}%
-    \else
-      \addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##1}%
-    \fi
-    \kern 2pt
-    \hrule height 0.8pt depth 0pt
-    \kern 2pt
-  }%
+	\par\addvspace{\intextsep}
+	\refstepcounter{algorithm}%
+	\hrule height 0.8pt depth 0pt
+	\kern 2pt
+	\renewcommand{\caption}[2][\relax]{%
+		\noindent\textbf{\ALG@name~\thealgorithm}\ ##2\par
+		\ifx\relax##1\relax
+		\addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##2}%
+		\else
+		\addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##1}%
+		\fi
+		\kern 2pt
+		\hrule height 0.8pt depth 0pt
+		\kern 2pt
+	}%
 }
 {%
-  \kern 2pt
-  \hrule height 0.8pt depth 0pt
-  \par\addvspace{\intextsep}
+	\kern 2pt
+	\hrule height 0.8pt depth 0pt
+	\par\addvspace{\intextsep}
 }
 \makeatother
 
 \begin{document}
-
-\begin{frontmatter}
-
-\title{Dynamic Collaboration Mode Selection in Hierarchical Federated Learning}
-
-\author[bupt1,bupt2,bupt3]{Tingting Yang}
-\author[bupt1,bupt2,bupt3]{Wenbo Zhang}
-\author[bupt1,bupt2,bupt3]{Shaohua Liu}
-\author[bupt1,bupt2,bupt3]{Lihua Zhang}
-\author[bupt1,bupt2,bupt3]{Xinyuan Lin}
-\author[bupt1,bupt2,bupt3]{Qian Liu}
-
-\affiliation[bupt1]{
-    organization={School of Mathematical Sciences, Beijing University of Posts and Telecommunications},
-    city={Beijing},
-    country={China}
-}
-
-\affiliation[bupt2]{
-    organization={State Key Laboratory of Information Photonics and Optical Communications (Beijing University of Posts and Telecommunications)},
-    city={Beijing},
-    country={China}
-}
-
-\affiliation[bupt3]{
-    organization={Key Laboratory of Mathematics and Information Networks (Beijing University of Posts and Telecommunications), Ministry of Education},
-    city={Beijing},
-    country={China}
-}
-
-\begin{abstract}
-Hierarchical federated learning enables cloud-edge-end collaborative training, but fixed execution and aggregation schemes are insufficient to adapt to heterogeneous and dynamic conditions.
-To address this challenge, a dynamic collaboration reconfiguration framework is proposed.
-The framework selects collaboration modes according to the current system state and considers execution paths and aggregation strategies.
-A historical update deviation model is developed
-to estimate the Cloud update under different
-collaboration mode distributions. The estimated
-deviation and system latency are jointly considered
-in the multiobjective optimization.
-Feasible collaboration profiles are filtered by Pareto dominance and selected using the Chebyshev ideal point criterion.
-Experiments on CIFAR-10 with ResNet-18 and Fashion-MNIST with LeNet-5 evaluate dynamic collaboration under heterogeneous resource and data conditions.
-\end{abstract}
-
-\begin{keyword} 
-Internet of Things \sep hierarchical federated learning \sep cloud-edge-end collaboration \sep dynamic collaboration reconfiguration \sep differential privacy \sep device heterogeneity 
-\end{keyword}
-
-\end{frontmatter}
-\section{Introduction}
-\label{sec:introduction}
-Federated learning (FL) enables multiple end devices to collaboratively train a shared model without transferring raw data to a central server~\cite{fedavg,ZHAO2026108518}. In AIoT systems, however, participating devices differ substantially in computational capability, memory capacity, communication quality, and local data distribution. Cloud-edge-end hierarchical federated learning (HFL) introduces edge servers between end devices and the cloud, providing intermediate aggregation and computation capabilities while reducing direct communication with the cloud~\cite{hfl,FLaTEC2026,yang2026hierarchical}.
-
-Data and system heterogeneity can limit the effectiveness of fixed cloud-edge-end collaboration schemes across clients and training rounds. First, non-IID data can cause
-local updates to drift in different directions and can degrade simple weighted
-aggregation~\cite{fedavgm,fedprox,scaffold,khan2026accelerating,11214447}.
-Second, system capabilities are heterogeneous. A weak end device may be unable
-to handle the same workload or meet the same deadline as a stronger device,
-whereas an edge or cloud server can undertake more computation~\cite{wang2019adaptivefl,FAN2026108249}.
-A mode that suits one client in one round may be inefficient or infeasible
-for the same client in another round, or for another client.
-
-Existing work on HFL and cloud-edge-end collaboration has covered personalization,
-resource allocation, wireless scheduling, heterogeneous models, and split
-training~\cite{Personalizedhfl,JSJX202502007,dinh2021wirelessfl,BSBODP,mazloomi2025multiserver,SFETEC,11185336,YAO2026108495}.
-These studies address different aspects of collaborative training. However, dynamically selecting execution and aggregation configurations according to individual client capabilities and changing system conditions remains an important problem.
-
-Different collaboration modes have different
-training and communication paths, which affect
-system latency and Cloud updates. This paper
-studies dynamic collaboration mode selection
-under changing system conditions. Historical
-Cloud updates are used to estimate the update
-deviation of candidate mode distributions.
-System latency and predicted update deviation
-are jointly minimized while satisfying
-privacy protection requirements.
-\begin{itemize}
-    \item A dynamic collaboration configuration space for cloud-edge-end federated learning is formulated, which enables execution and aggregation configurations to be selected according to current system conditions.
-
-    \item A historical update-deviation estimator is constructed from accepted Cloud units. Its normalized deviation and modeled system time form two objectives under resource and lifetime privacy constraints. Feasible configurations are compared using Pareto dominance and the Chebyshev ideal point criterion. The estimator is not asserted to bound optimization error or predict loss reduction.
-
-    \item A reproducible evaluation protocol separates estimator error, real test performance, modeled communication time, and measured selection overhead, using paired random seeds and explicit Cloud acceptance rules.
-\end{itemize}
-
-The remainder of this paper is organized as follows.
-Section~\ref{sec:related_work} reviews related studies
-on hierarchical federated learning and cloud-edge-end
-collaboration.
-Section~\ref{sec:model} introduces the system model
-and formulates the latency and learning error objectives
-under resource and privacy constraints.
-Section~\ref{sec:algorithm} presents the proposed
-dynamic collaboration selection algorithm.
-Section~\ref{sec:experiment} evaluates its performance
-through experiments.
-Finally, Section~\ref{sec:conclusion} concludes the paper.
-
-\section{Related Work}
-\label{sec:related_work}
-\subsection{HFL Under Heterogeneous Environments}
-Existing HFL studies use edge servers for intermediate aggregation between end devices and the cloud~\cite{hfl}. Research on resource management in FL has investigated model pruning under bandwidth and device constraints~\cite{phfl}, adaptive local update frequency and model compression~\cite{xu2022adaptive,wang2019adaptivefl}, and wireless resource allocation~\cite{dinh2021wirelessfl}. Personalized FL and HFL studies have addressed data heterogeneity through client clustering, shared representations, and personalized model components~\cite{sattler2020clustered,collins2021exploiting,Personalizedhfl}. These studies address different aspects of heterogeneous federated training, including resource management, communication efficiency, and model personalization.
-
-Beyond these aspects, heterogeneous device capabilities and changing system conditions can also affect how computation and aggregation are organized across the cloud, edge, and end layers. In this work, a collaboration configuration specifies where model computation is performed, how updates are transmitted, and where aggregation takes place. Different clients may use different configurations, and their configurations may be reconsidered as system conditions change. Since frequent reevaluation incurs computational overhead, we use a configurable selection period to determine when configurations are reevaluated. Related studies have also considered the cost of frequent changes in FL
-scheduling decisions and reduced such overhead by maintaining selected client
-sets over multiple rounds~\cite{CHEN2026112204,10757319}.
-
-\subsection{Cloud-Edge-End Collaborative Federated Learning}
-
-Cloud-edge-end collaborative FL distributes computation, communication, and aggregation tasks across end devices, edge servers, and the cloud. Different studies have explored how these tasks can be organized. FedAgg~\cite{BSBODP} employs bridge samples and online distillation to support collaboration among models of different sizes across the three layers. SFETEC~\cite{SFETEC} investigates split federated learning in Thing Edge Cloud environments, allowing model computation to be distributed across layers. Related task offloading research has also considered federated learning, privacy protection, and task efficiency in cloud-edge-end systems~\cite{dong2026privacyoffloading}. While these studies investigate different collaborative mechanisms, this work focuses on selecting feasible execution and aggregation configurations for individual clients under changing system conditions.
-
-Task migration in mobile edge computing provides a related perspective on adapting execution placement to changing system conditions. Zhang and Zheng~\cite{ZHANG2019111} investigate task migration decisions under user mobility, while Zhu et al.~\cite{ZHU2024303} study load aware task migration for balancing workloads across edge nodes. Although task migration differs from federated learning collaboration reconfiguration, these studies illustrate the importance of adapting execution placement to system conditions.
-
-
-\subsection{Privacy Preserving HFL}
-Model parameters, gradients, and intermediate representations in federated
-training may leak information about private data~\cite{zhu2019dlg}.
-Differential privacy (DP) and homomorphic encryption (HE) are widely used
-privacy protection techniques in FL~\cite{dwork2006calibrating,cheon2017ckks}.
-For HFL, group local DP provides personalized privacy through sampling,
-randomized response, and shuffling~\cite{GLDP}.
-Adaptive DP FL studies have explored dynamic privacy budget allocation,
-adaptive clipping, and client selection for adjusting privacy protection
-during training~\cite{xu2025adpfl}.
-Other HFL studies combine DP based protection and CKKS based HE for privacy
-preserved data sharing scenarios~\cite{PPHFL}.
-Related fog FL studies combine hierarchical aggregation, personalization, and DP
-for IoT intrusion detection~\cite{islam2025pphffl}.
-These studies mainly focus on the security guarantee, budget allocation, or
-accuracy degradation of a particular privacy mechanism.
-These studies mainly focus on the design, analysis, or adaptation of individual
-privacy mechanisms. In this work, privacy requirements are considered jointly
-with execution and aggregation configuration selection in cloud-edge-end
-federated learning.
-
-This paper jointly considers execution, aggregation, and protection
-configuration in federated learning.
-Existing categories optimize selected resources, training steps, or privacy
-parameters within a prescribed collaboration structure. The proposed collaboration space enables different execution locations,
-aggregation paths, transmitted objects, and privacy mechanisms to be compared
-within one feasible decision model.
-\section{Model Construction}
-\label{sec:model}
-\subsection{Collaborative Mode and Transmission Modeling}
-\label{sec:link_model}
-We consider a three-tier federated learning system
-consisting of \(N\) clients, a set of edge servers,
-and a central cloud server. Each client \(i\) is
-associated with an edge server \(e(i)\). At round
-\(t\), the system assigns a collaboration mode
-\(h_i^t\in\mathcal H\) to each participating client,
-allowing training and aggregation to be organized
-across different tiers.
-
-\textbf{Collaboration modes.}
-Three collaboration modes are considered in the 
-cloud-edge-end architecture, which are distinguished 
-by their aggregation paths and client-side synchronization 
-requirements.
-
-In Edge-based Federated Learning ($FL_E$), 
-clients perform local training and submit their updates 
-to the Edge for aggregation. The aggregated Edge update 
-is then asynchronously propagated to the Cloud, without 
-requiring clients to wait for Cloud-side aggregation to finish their local
-Edge chain. All clients nevertheless wait for the global version barrier
-before starting the next round. In
-Edge--Cloud Federated Learning ($FL_{EC}$), a group of 
-clients associated with the same Edge participates in a 
-multi-stage collaborative process. The Edge performs $E_B$ 
-processing stages before submitting a single final joint 
-update to the Cloud for global aggregation. In Cloud-based 
-Federated Learning ($FL_C$), clients directly submit their 
-locally trained updates to the Cloud for aggregation without 
-intermediate Edge aggregation.
-
-Let \(L\), \(E\), and \(C\) denote the Local, Edge,
-and Cloud tiers, respectively. The three candidate
-collaboration modes are defined as
-\begin{equation}
-\mathcal H =
-\{\mathrm{FL_E},\mathrm{FL_{EC}},\mathrm{FL_C}\}.
-\label{eq:three_modes}
-\end{equation}
-In all three modes, raw training data remain on
-the client. Local model updates or Edge-aggregated
-updates are transmitted according to the selected
-collaboration mode.
-
-
-\subsubsection{Collaborative Training Blocks and Mode Flows}
-
-Let \(L_B\) denote the number of local training
-steps in each block, and let \(T_L(L_B)\) represent
-the corresponding local training process followed
-by model update generation.
-During local training, 
-gradients computed for each example are clipped, 
-and Gaussian noise is added to the clipped gradients using differentially private stochastic gradient descent.
-Let \(A_E\) and \(A_C\)
-denote aggregation at the Edge and Cloud,
-respectively.
-For the \(FL_{EC}\) mode, \(E_B\) denotes
-the number of Edge processing and aggregation
-stages. At each stage, clients perform
-\(L_B\) local training steps using the latest
-model received from the Edge. After each
-stage, the aggregated model is returned to
-the clients for the next stage. The final
-aggregated update is denoted by
-\(\Delta_e^{(E_B)}\).
-\begin{equation}
-\begin{aligned}
-\mathrm{FL_E}:~~&
-T_L(L_B)
-\xrightarrow{\mathrm{upd}} A_E
-\xrightarrow{\mathrm{async\ upd}} A_C,\\
-\mathrm{FL_{EC}}:~~&
-T_L(L_B)
-\xrightarrow{\mathrm{upd}} \Delta_e^{(E_B)}
-\xrightarrow{\mathrm{upd}} A_C,\\
-\mathrm{FL_C}:~~&
-T_L(L_B)
-\xrightarrow{\mathrm{upd}} A_C.
-\end{aligned}
-\label{eq:mode_flows}
-\end{equation}
-All modes start a round from the same Cloud model version, installed and
-acknowledged by every client before training starts. $FL_{EC}$ uses intermediate
-Edge models within its multi-stage local collaboration. $FL_E$ may finish its
-Edge collaboration chain without waiting for Cloud aggregation, but cannot
-start the next round before the global broadcast barrier. Unit increments
-are measured relative to the common round-start model.
-Model preparation at a mode switch is included in the reconfiguration-time
-estimate; this bootstrap overhead has not been measured on a physical network.
-Here, The arrows indicate the direction of information flow.
- The label \(\mathrm{upd}\) indicates the transmission
-of a model update to the next aggregation stage.
-The label \(\mathrm{async\ upd}\) indicates
-asynchronous update transmission without requiring
-clients to wait for Cloud-side aggregation.
-
-Figure~\ref{fig:eecblockflow} illustrates the
-execution structures of the three collaboration
-modes. Figures (a)--(c) show the execution and
-aggregation processes of \(FL_E\), \(FL_{EC}\),
-and \(FL_C\), respectively, while Fig.~(d)
-compares the three modes from the perspective
-of an individual client. Filled circles, hollow
-circles, and hollow diamonds represent the
-Local, Edge, and Cloud tiers, respectively.
-Dashed arrows indicate model update transmissions,
-and circular arrows represent aggregation
-operations. Spring-like marks indicate that the transmitted
-model updates contain noise introduced by
-client-side DP-SGD during local training.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{eecblockflow.png}
-\caption{Execution structures of the three collaboration modes in the cloud-edge-end architecture.}
-\label{fig:eecblockflow}
-\end{figure}
-
-\subsection{Lifetime Privacy Accounting}
-\label{sec:privacy_model}
-
-Sample-level differential privacy~\cite{dwork2014the}
-is enforced during local training through the
-differentially private stochastic gradient descent
-mechanism~\cite{abadi2016deep}, in which gradients
-are clipped and Gaussian noise is added to the
-clipped gradients. The resulting model updates
-carry this noise when transmitted across tiers. For each client,
-R\'enyi differential privacy (RDP)~\cite{mironov2017renyi}
-is used to accumulate privacy loss across
-training rounds. Let \(\mathcal A\) denote
-the set of R\'enyi orders~\cite{vanerven2014renyi}. 
-For a Gaussian
-mechanism with noise multiplier \(\sigma\),
-the RDP cost at order \(\alpha\in\mathcal A\)
-is \(\rho(\alpha,\sigma)=\alpha/(2\sigma^2)\).
-
-Let \(m_i^t\) denote the number of Gaussian
-mechanisms applied to client \(i\) in round
-\(t\), with corresponding noise multipliers
-\(\sigma_{i,k}^t\).
-The accumulated RDP cost can be calculated as
-\begin{equation}
-\Phi_i^{t+1}(\alpha)
-=
-\Phi_i^t(\alpha)
-+
-\sum_{k=1}^{m_i^t}
-\rho(\alpha,\sigma_{i,k}^t).
-\label{eq:rdp_update}
-\end{equation}
-For a given privacy parameter \(\delta\),
-the corresponding privacy loss is
-\begin{equation}
-\epsilon_i^t
-=
-\min_{\alpha\in\mathcal A}
-\left[
-\Phi_i^t(\alpha)
-+
-\frac{\log(1/\delta)}{\alpha-1}
-\right].
-\label{eq:rdp_to_dp}
-\end{equation}
-Let \(\bar{\epsilon}\) denote the lifetime
-privacy budget of each client. The accumulated
-privacy loss must satisfy
-\(\epsilon_i^t\leq\bar{\epsilon}\)
-throughout training process.
-
-For client \(i\) and candidate mode \(h\), let
-\(N_i^t(h)\) denote the estimated number of Gaussian
-mechanisms whose privacy costs are attributed to
-client \(i\) over the remaining training rounds.
-This estimate is determined by the planned local
-training schedule and the protected releases
-required by the selected mode. Let \(R\) denote
-the total number of training rounds.
-
-For \(N_i^t(h)>0\), the noise multiplier
-\(\sigma_i^t(h)\) is calibrated to satisfy
-\begin{equation}
-\min_{\alpha\in\mathcal A}
-\left[
-\Phi_i^t(\alpha)
-+
-\frac{N_i^t(h)\alpha}
-{2[\sigma_i^t(h)]^2}
-+
-\frac{\log(1/\delta)}{\alpha-1}
-\right]
-\leq\bar{\epsilon}.
-\label{eq:noise_calibration}
-\end{equation}
-The smallest feasible multiplier is selected.
-If calibration is infeasible, the candidate
-mode is excluded. No calibration is required
-when \(N_i^t(h)=0\).
-
-Before execution, the planned privacy cost
-is checked against the remaining budget.
-The privacy ledger is updated using the
-executed Gaussian mechanisms, and the resulting
-RDP state is used for mode selection in
-the next round.
-\subsection{Joint Cost and Utility Modeling}
-\label{sec:cost_utility_model}
-Each collaboration mode is evaluated in terms
-of resource feasibility, round latency, and
-learning error, subject to the lifetime
-privacy budget in Sec.~\ref{sec:privacy_model}.
-\subsubsection{Path and Round Latency on a Common Timeline}
-
-The client-side execution sequence of $FL_{EC}$ contains $E_B$ sequential
-Edge aggregation stages and intermediate return transmissions to the clients.
-After the final Edge aggregation stage, the resulting update is forwarded
-to the Cloud.
-The global state sequence is: fix the expected unit set, execute local
-collaboration, wait for all expected units, aggregate at the Cloud,
-broadcast the model, collect every client ACK, and release the next round.
-The former timeline illustration that excluded $FL_E$ from the Cloud
-barrier is not used in this revised protocol.
-
-\textbf{Transmission latency.}
-For a payload \(b\) transmitted from tier \(u\)
-to tier \(v\), let \(S_{u,v,b}^t(h_i)\) denote
-the original payload size under collaboration
-mode \(h_i\). Let \(B_{i,u,v}^t\) denote
-the transmission rate of the link between
-tiers \(u\) and \(v\) for client \(i\) in
-round \(t\), and let \(D_{u,v}^{0}\) denote
-the fixed transmission delay of this link.
-\begin{equation}
-T_{u,v,b}^{\mathrm{link},t}(h_i)
-=
-\frac{
-\kappa\!\left(\pi_i^{t,h_i}(u,v,b)\right)
-S_{u,v,b}^t(h_i)}
-{B_{i,u,v}^t}
-+
-D_{u,v}^{0}
-+
-T_{u,v,b}^{\mathrm{priv},t}
-\!\left(\pi_i^{t,h_i}(u,v,b)\right).
-\label{eq:comm_latency}
-\end{equation}
-Here, \(\kappa(\cdot)\) denotes the payload
-expansion factor, and
-\(T_{u,v,b}^{\mathrm{priv},t}(\cdot)\)
-denotes the protection processing time.
-For unprotected transmissions,
-\(\kappa(\mathrm{none})=1\) and
-\(T_{u,v,b}^{\mathrm{priv},t}(\mathrm{none})=0\).
-
-
-\textbf{Execution latency.}
-Let \(\tau_{i,L}^t(h)\) denote the estimated
-execution time per local training step for
-client \(i\) under mode \(h\).
-The execution latency is given by
-\begin{equation}
-T_i^{\mathrm{stage},t}(h)
-=
-L_B\tau_{i,L}^t(h),
-\quad
-h\in\{FL_E,FL_{EC},FL_C\}.
-\label{eq:execution_latency}
-\end{equation}
-Transmission and aggregation delays are
-accounted for separately.
-
-\textbf{Reconfiguration latency.}
-Switching collaboration modes may require
-reconfiguring the communication and aggregation
-paths. We model the resulting reconfiguration
-delay as
-\begin{equation}
-T_i^{\mathrm{sw},t}
-=
-\eta_h \mathbb{I}(h_i^t\neq h_i^{t-1}),
-\label{eq:switching_cost}
-\end{equation}
-where \(\eta_h\) denotes the mode switching
-overhead and \(\mathbb{I}(\cdot)\) is the
-indicator function.
-
-\textbf{Path arrival and aggregation.}
-For each candidate mode \(h_i\), the mode flow
-determines the sequence of execution stages
-and payload transmissions leading to the
-relevant aggregation point.
-We calculate update arrival times by
-following this sequence and accounting for
-execution, transmission, and reconfiguration
-delays in their order of occurrence.
-Let \(a_{i,E}^{t,k}(h)\) denote the arrival time
-of client \(i\)'s update at Edge stage \(k\)
-under collaboration mode \(h\). Let \(a_{i,C}^t\)
-denote the arrival time of client \(i\)'s update
-at the Cloud under \(FL_C\).
-
-Given a mode distribution
-$\mathbf h^t=(h_1^t,\ldots,h_N^t)$,
-clients are grouped by their associated Edge
-and selected mode. Let
-\begin{equation}
-\mathcal G_{g,m}^t
-=\{i\mid e(i)=g,\ h_i^t=m\},
-\quad m\in\{FL_E,FL_{EC}\},
-\label{eq:edge_mode_group}
-\end{equation}
-denote the clients assigned to mode $m$
-at Edge $g$. Let \(k\) denote the
-Edge aggregation stage index. For \(FL_E\),
-only one Edge aggregation stage is performed,
-whereas \(FL_{EC}\) consists of \(E_B\)
-sequential Edge aggregation stages.
-
-For \(h\in\{FL_E,FL_{EC}\}\), the update
-arrival time at the first Edge stage is
-\begin{equation}
-a_{i,E}^{t,1}(h)
-=
-T_i^{\mathrm{sw},t}
-+
-T_i^{\mathrm{stage},t}(h)
-+
-T_{L,E,b}^{\mathrm{link},t}(h).
-\end{equation}
-
-For a nonempty Edge group
-$\mathcal G_{g,m}^t$, the completion time
-of aggregation stage $k$ is
-\begin{equation}
-f_{g,E}^{t,k}(m)
-=
-\max_{i\in\mathcal G_{g,m}^t}
-a_{i,E}^{t,k}(m)
-+
-T_{g,E}^{\mathrm{agg},t},
-\label{eq:edge_agg_finish}
-\end{equation}
-where $k=1$ for $FL_E$ and
-$k=1,\ldots,E_B$ for $FL_{EC}$.
-Updates arriving earlier remain buffered
-until all required updates in the same
-aggregation group have arrived.
-
-For \(FL_{EC}\), each subsequent Edge stage
-starts after the aggregated model from the
-previous stage has been returned to the
-clients. The clients then perform another
-local training block and transmit their
-updates to the Edge. Thus, for
-\(k=1,\ldots,E_B-1\), the update arrival
-time at the next stage is
-\begin{equation}
-\begin{aligned}
-a_{i,E}^{t,k+1}(FL_{EC})
-={}&f_{g,E}^{t,k}(FL_{EC})
-+T_{E,L,b}^{\mathrm{link},t}(FL_{EC})\\
-&+T_i^{\mathrm{stage},t}(FL_{EC})
-+T_{L,E,b}^{\mathrm{link},t}(FL_{EC}).
-\end{aligned}
-\end{equation}
-
-For \(FL_E\), the aggregated Edge update is
-forwarded to the Cloud asynchronously after
-the single Edge aggregation stage. This
-transmission does not require clients to wait
-for Cloud aggregation to finish their local Edge chain. Its arrival is,
-however, required by the current 100\% Cloud update-unit quorum.
-
-For \(FL_{EC}\), the final Edge update is
-forwarded to the Cloud after the \(E_B\)-th
-Edge aggregation stage. Its arrival time is
-\begin{equation}
-a_{g,C}^t
-=
-f_{g,E}^{t,E_B}(FL_{EC})
-+
-T_{E,C,b}^{\mathrm{link},t}.
-\end{equation}
-
-For \(FL_C\), clients transmit their updates
-directly to the Cloud. The arrival time of
-client \(i\)'s update is
-\begin{equation}
-a_{i,C}^t
-=
-T_i^{\mathrm{sw},t}
-+
-T_i^{\mathrm{stage},t}(FL_C)
-+
-T_{L,C,b}^{\mathrm{link},t}(FL_C).
-\end{equation}
-
-Let $\mathcal K_{\mathrm{exp}}^t$ be the Cloud update-unit set fixed before
-training: one unit for each nonempty (Edge, mode) group and one for each
-$FL_C$ client. With a 100\% unit-count quorum, all these units must arrive.
-Using round-relative arrival times $a_{k,C}^t$, Cloud aggregation completes at
-\begin{equation}
-f_C^t=\max_{k\in\mathcal K_{\mathrm{exp}}^t}a_{k,C}^t+T_C^{\mathrm{agg},t}.
-\label{eq:cloud_agg_finish}
-\end{equation}
-For an empty expected set, there is no aggregation or new Cloud version.
-No unit is carried into a later round.
-
-After aggregation, the Cloud broadcasts the resulting version to every
-configured client, including clients marked \textsc{skip}. Let $D_i^t$ be
-the model downlink time, $A_i^t$ the ACK uplink time, $I_i^t$ the installation
-time, and $L_i^t$ the completion of any required local Edge return (zero
-when no such return is outstanding). The client acknowledgement reaches
-the Cloud at
-\begin{equation}
-b_i^t=\max\{f_C^t+D_i^t,L_i^t\}+I_i^t+A_i^t.
-\label{eq:system_round_latency}
-\end{equation}
-Edge-mode clients receive the broadcast through their Edge; direct-mode
-and skipped clients use the direct Cloud link in the current logical model.
-Each client transfer is modeled independently, without shared-link contention.
-The full round duration and next-round start are
-\begin{equation}
-T_{\mathrm{round}}^t(\mathbf h)=\max_{i\in\mathcal D}b_i^t,
-\qquad s_{t+1}=s_t+T_{\mathrm{round}}^t(\mathbf h).
-\label{eq:extended_round_time}
-\end{equation}
-All clients must acknowledge the same version before the next round starts.
-Thus $FL_E$ is locally asynchronous, not cross-round asynchronous. The current
-implementation assumes successful delivery; disconnected-client recovery is
-not modeled. A 90\% quorum and its cancellation semantics are deferred.
-
-The client-side latency for each collaboration
-mode is defined as
-\begin{equation}
-T_{i,\mathrm{client}}^t(h_i^t)
-=
-\begin{cases}
-f_{g,E}^{t,1}(FL_E)
-+T_{E,L,b}^{\mathrm{link},t}(h_i^t),
-& h_i^t=FL_E,\\[4pt]
-f_C^t
-+T_{C,E,b}^{\mathrm{link},t}(h_i^t)
-+T_{E,L,b}^{\mathrm{link},t}(h_i^t),
-& h_i^t=FL_{EC},\\[4pt]
-f_C^t
-+T_{C,L,b}^{\mathrm{link},t}(h_i^t),
-& h_i^t=FL_C.
-\end{cases}
-\label{eq:client_latency}
-\end{equation}
-This mode-specific path latency is distinct from permission to start the
-next round; that permission is governed by the all-client ACK barrier.
-
-\subsubsection{Historical Global Update Deviation Modeling}
-\label{sec:learning_cost}
-
-Different mode distributions produce different Cloud
-updates. Since the ideal gradient step
-$-\eta_t\nabla F(w^t)$ is generally unavailable
-before mode selection, the learning cost is estimated
-from historical updates. This cost measures deviation
-from a historical global reference, rather than the
-exact learning error.
-
-\textbf{Cloud aggregation and weights.}
-For a candidate distribution
-$\mathbf h^t=(h_1^t,\ldots,h_N^t)$,
-clients connected to the same Edge and assigned
-the same mode are grouped. Let
-$\mathcal K^t(\mathbf h^t)$ denote the units
-included in the current Cloud aggregation.
-Each $FL_{EC}$ group contributes one final Edge update
-after $E_B$ stages, while each $FL_C$ client
-contributes its own update directly. 
-For $FL_E$, each Edge group sends its
-aggregated update to the Cloud asynchronously.
-The update must arrive before the current round's 100\% quorum is satisfied;
-only the local Edge chain can finish before Cloud aggregation.
-
-Let $n_i$ denote the number of training samples
-of client $i$, and let $\mathcal M_k^t$ denote
-the clients represented by Cloud unit $k$.
-The aggregation weight is calculated as
-\begin{equation}
-\begin{aligned}
-N_k^t
-&=\sum_{i\in\mathcal M_k^t}n_i,\\
-I_k^t(\mathbf h^t)
-&=\frac{N_k^t}
-{\sum_{\ell\in\mathcal K^t(\mathbf h^t)}N_\ell^t}.
-\end{aligned}
-\label{eq:cloud_unit_weights}
-\end{equation}
-
-
-\textbf{Historical deviation by mode.}
-Let $\Delta_C^\tau$ denote the Cloud update at round $\tau$.
-The historical global reference is calculated from previous
-Cloud updates as
-\begin{equation}
-v_g^{\tau-1}
-=\gamma_C v_g^{\tau-2}
-+(1-\gamma_C)\Delta_C^{\tau-1},
-\quad 0\leq\gamma_C<1.
-\label{eq:global_ema}
-\end{equation}
-The first available Cloud update is used to initialize
-the reference. If no Cloud unit is accepted, the previous reference is
-retained. The first accepted update initializes only this reference;
-a mode deviation cannot be computed before a prior reference exists.
-
-Let $u_{k,\mathrm{DP}}^\tau$ denote the update of unit $k$
-accepted by the Cloud at round $\tau$ after the required
-privacy protection. Only updates allowed under
-Sec.~\ref{sec:privacy_model} are used.
-The deviation of unit $k$ from the historical reference is
-\begin{equation}
-d_k^\tau=u_{k,\mathrm{DP}}^\tau-v_g^{\tau-1}.
-\label{eq:unit_deviation}
-\end{equation}
-The reference in this expression is frozen before executing round
-$\tau$. Deviations and prediction errors are recorded before updating
-either EMA. All accepted units belong to the current round and their
-increments are relative to its common Cloud version.
-Let $\mathcal K_m^\tau$ denote the Cloud units of mode
-$m\in\mathcal H$ included at round $\tau$.
-If this set is not empty, the weighted mean deviation of
-mode $m$ is
-\begin{equation}
-\bar d_m^\tau
-=\frac{\sum_{k\in\mathcal K_m^\tau}I_k^\tau d_k^\tau}
-{\sum_{k\in\mathcal K_m^\tau}I_k^\tau}.
-\label{eq:mode_mean_deviation}
-\end{equation}
-The weighted mean is calculated for each mode across all Edges.
-
-The historical mean deviation of each mode is estimated
-using an exponential moving average (EMA):
-\begin{equation}
-\widehat d_m^t
-=\gamma_d\widehat d_m^{t-1}
-+(1-\gamma_d)\bar d_m^{t-1},
-\quad 0\leq\gamma_d<1.
-\label{eq:mode_deviation_ema}
-\end{equation}
-The first available mean deviation is used to initialize
-the estimate. If no new data are available, the previous
-estimate is retained.
-As clients switch modes between rounds, the set of clients
-assigned to the same mode at each Edge may change.
-Therefore, the mean deviation is estimated for each mode
-rather than for a fixed group of clients.
-
-\textbf{Learning cost.}
-For each candidate mode distribution $\mathbf h^t$,
-the Cloud units and their aggregation weights are determined.
-The predicted Cloud update is
-\begin{equation}
-\widehat U_C^t(\mathbf h^t)
-=v_g^{t-1}
-+\sum_{k\in\mathcal K^t(\mathbf h^t)}
-I_k^t(\mathbf h^t)\widehat d_{m(k)}^t,
-\label{eq:predicted_cloud_update}
-\end{equation}
-where $m(k)$ denotes the mode of unit $k$.
-The learning cost is calculated as the normalized squared
-difference between the predicted Cloud update and the
-historical reference:
-\begin{equation}
-\widehat J_{\mathrm{learn}}^t(\mathbf h^t)
-=\frac{\left\|\widehat U_C^t(\mathbf h^t)
--v_g^{t-1}\right\|_2^2}
-{\left\|v_g^{t-1}\right\|_2^2+\varepsilon_J},
-\quad\varepsilon_J>0.
-\label{eq:j_learn_estimate}
-\end{equation}
-A smaller cost indicates that the predicted Cloud update
-is closer to the historical global reference.
-Different mode distributions may have the same learning cost
-but different training times, which are considered in the
-Pareto optimization.
-
-After the selected mode distribution is executed,
-the observed deviation is
-\begin{equation}
-J_{\mathrm{obs}}^t
-=\frac{\left\|\Delta_C^t-v_g^{t-1}\right\|_2^2}
-{\left\|v_g^{t-1}\right\|_2^2+\varepsilon_J}.
-\label{eq:j_observed}
-\end{equation}
-The estimated cost is available before mode selection,
-while the observed deviation is calculated after Cloud
-aggregation. The cost measures the difference from the
-historical reference, not the change in model loss.
-If no Cloud update is formed or a required mode estimate
-is unavailable, the cost is not assigned.
-
-
-\subsection{Global Multiobjective Collaborative Optimization}
-\label{sec:global_optimization}
-For each client, the decision variable is
-the collaboration mode $h_i^t\in\mathcal F_i^t$,
-where $\mathcal F_i^t\subseteq\mathcal H$
-contains the modes satisfying the privacy
-protection requirements. The protection
-mechanisms and DP noise multipliers are
-determined by the selected mode and the
-current privacy ledger.
-
-A complete mode profile is
-\(\mathbf h^t=(h_1^t,\ldots,h_N^t)\).
-The shared Edge and Cloud aggregation and
-admission rules define the system feasible
-set
-\(\mathcal F_{\mathrm{sys}}^t
-\subseteq\prod_{i=1}^N\mathcal F_i^t\).
-An execution that is not admitted is
-reported as \textsc{skip}.
-
-For each feasible profile, the flow model
-evaluates the round duration
-\(T_{\mathrm{round}}^t(\mathbf h^t)\),
-while the calibration model estimates
-the learning error
-\(\widehat J_{\mathrm{learn}}^t(\mathbf h^t)\).
-The multiobjective optimization problem is
-\begin{equation}
-\underset{\mathbf h^t\in\mathcal F_{\mathrm{sys}}^t}
-{\operatorname{minimize}}
-\quad
-\begin{bmatrix}
-T_{\mathrm{round}}^t(\mathbf h^t)\\
-\widehat J_{\mathrm{learn}}^t(\mathbf h^t)
-\end{bmatrix}.
-\label{eq:global_multiobjective}
-\end{equation}
-
-A bounded Pareto search maintains a
-nondominated archive
-\(\widehat{\mathcal H}_{\mathrm P}^t\).
-Let \(T_{\min}^t,T_{\max}^t\) and
-\(J_{\min}^t,J_{\max}^t\) denote the
-minimum and maximum objective values
-within this archive.
-The normalized objectives are
-\begin{equation}
-\bar T(\mathbf h^t)
-=
-\frac{
-T_{\mathrm{round}}^t(\mathbf h^t)-T_{\min}^t
-}{
-T_{\max}^t-T_{\min}^t+\gamma_n
-},
-\qquad
-\bar J(\mathbf h^t)
-=
-\frac{
-\widehat J_{\mathrm{learn}}^t(\mathbf h^t)-J_{\min}^t
-}{
-J_{\max}^t-J_{\min}^t+\gamma_n
-},
-\label{eq:pareto_normalization}
-\end{equation}
-where \(\gamma_n>0\) is a small
-normalization constant.
-
-The Tchebycheff criterion selects the
-profile minimizing the largest normalized
-deviation:
-\begin{equation}
-\begin{aligned}
-D_\infty(\mathbf h^t)
-&=
-\max\{
-\bar T(\mathbf h^t),
-\bar J(\mathbf h^t)
-\},\\
-\mathbf h^{t,\ast}
-&\in
-\arg\min_{
-\mathbf h^t\in\widehat{\mathcal H}_{\mathrm P}^t
-}
-D_\infty(\mathbf h^t).
-\end{aligned}
-\label{eq:selection}
-\end{equation}
-
-Equal distances are resolved using
-system latency, learning error, and
-a stable profile identity, in that order.
-Real test accuracy is used only for
-experimental evaluation.
-
-
-
-
-\section{Algorithm}
-\label{sec:algorithm}
-
-Algorithm~\ref{alg:selection} presents the dynamic collaborative
-mode selection procedure based on the feasibility, privacy,
-system time, and historical update deviation models.
-
-\begin{table}[t]
-\centering
-\caption{Notation Used in Algorithm~\ref{alg:selection}}
-\label{tab:algorithm_notation}
-\small
-\begin{tabular}{p{0.23\columnwidth}p{0.67\columnwidth}}
-\hline
-\textbf{Symbol} & \textbf{Description} \\
-\hline
-$R$ & Total number of training rounds. \\
-$N$ & Number of clients. \\
-$S_P$ & Strategy update period. \\
-$\Phi_i^t(\alpha)$ & Accumulated RDP cost of client $i$ at order $\alpha$. \\
-$Q_{\mathrm{comp},i}$ & Available computing capacity of client $i$. \\
-$Q_{\mathrm{mem},i}$ & Available memory capacity of client $i$. \\
-$\mathcal H_i^{\mathrm{res}}$ & Modes satisfying the resource constraints of client $i$. \\
-$\mathcal F_i^t$ & Feasible collaboration modes of client $i$. \\
-$\mathcal F_{\mathrm{sys}}^t$ & Feasible system mode distributions. \\
-$\mathbf h^{t-1,\ast}$ & Selected distribution from the previous round. \\
-$\mathbf h^{t,\ast}$ & Selected distribution for the current round. \\
-$\widehat d_m^t$ & Historical deviation estimate for mode $m$. \\
-$v_g^{t-1}$ & Historical global update reference. \\
-$\widehat{\mathcal H}_{\mathrm P}^t$ & Pareto archive in round $t$. \\
-$D_\infty$ & Normalized Tchebycheff score. \\
-\hline
-\end{tabular}
-\end{table}
-
-\begin{algorithm}[t]
-\caption{Dynamic Collaboration Mode Selection}
-\label{alg:selection}
-\small
-\begin{algorithmic}[1]
-\REQUIRE Round $t$, strategy period $S_P$,
-system state, privacy ledger, historical estimates, and acknowledged Cloud version
-\ENSURE Selected mode distribution
-$\mathbf h^{t,\ast}$ or \textsc{skip}
-\STATE Require completion of the previous all-client version barrier
-
-\STATE Determine privacy feasible modes
-$\mathcal F_i^t$ using
-\eqref{eq:noise_calibration}
-\STATE Construct $\mathcal F_{\mathrm{sys}}^t$
-using the Cloud admission rules
-
-\IF{$\mathcal F_{\mathrm{sys}}^t=\emptyset$}
-    \STATE Set new assignments to \textsc{skip}; retain the Cloud version
-\ELSIF{$t>1$,
-$\operatorname{mod}(t-1,S_P)\neq0$,
-history initialization has finished,
-and $\mathbf h^{t-1,\ast}\in\mathcal F_{\mathrm{sys}}^t$}
-    \STATE $\mathbf h^{t,\ast}
-    \leftarrow\mathbf h^{t-1,\ast}$
-\ELSE
-    \STATE Generate feasible candidate
-    mode distributions
-    \STATE Explore candidates by changing
-    one client's mode
-    \STATE Evaluate $T_{\mathrm{round}}^t(\mathbf h^t)$
-    using \eqref{eq:extended_round_time}
-    \STATE Estimate $\widehat J_{\mathrm{learn}}^t
-    (\mathbf h^t)$ using
-    \eqref{eq:j_learn_estimate}
-    when historical estimates are available
-
-    \IF{candidates with both objectives exist}
-        \STATE Construct
-        $\widehat{\mathcal H}_{\mathrm P}^t$
-        using Pareto dominance
-        \STATE Select $\mathbf h^{t,\ast}$
-        using \eqref{eq:pareto_normalization}
-        and \eqref{eq:selection}
-    \ELSE
-        \STATE Select a feasible distribution
-        using latency and mode coverage
-    \ENDIF
-\ENDIF
-\STATE Execute training and apply the explicit Cloud acceptance policy
-\STATE Record predictions and observed deviations against the frozen reference
-\STATE Update observed mode-deviation EMAs, then the global EMA; retain unavailable histories
-\STATE Broadcast the Cloud version; block the next round until every client ACK is received
-\STATE \textbf{return} $\mathbf h^{t,\ast}$
-\end{algorithmic}
-\end{algorithm}
-\section{Experiments}
-\label{sec:experiment}
-
-The experiments are designed to evaluate whether dynamic collaboration
-can reduce training time while keeping the predicted Cloud update close
-to the historical global reference. We separately examine the accuracy
-of the historical deviation estimate, the training performance of the
-selected modes, the effect of privacy and system constraints, and the
-cost of mode selection. All numerical results will be reported after
-the experiments are completed.
-
-\subsection{Experimental Setup}
-\label{sec:exp_setup}
-
-\textbf{Training tasks and data.}
-CIFAR-10 with ResNet-18 is selected as the primary task. As an initial
-implementation, the pretrained feature extractor is frozen and only
-the classification layer is trained. Fashion-MNIST with LeNet-5 is
-planned as a second task to test whether the findings extend to a
-different dataset and model. Both training and test partitions are
-fixed before comparing methods. Training data are distributed across
-clients using unequal label distributions. An independent test set
-is reserved for evaluation and is never used during mode selection.
-
-\textbf{Collaboration and privacy.}
-The system contains clients, Edge servers, and one Cloud server.
-All methods use the same three modes, $FL_E$, $FL_{EC}$, and $FL_C$.
-Clients under the same Edge and assigned the same mode follow the
-aggregation rules in Sec.~\ref{sec:link_model}. In $FL_{EC}$, the
-clients in one group jointly perform $E_B$ Edge stages and submit
-one final update. In $FL_C$, each client sends its update directly
-to the Cloud. In $FL_E$, an Edge group sends its update asynchronously;
-the update contributes to the Cloud aggregation that accepts it.
-Only accepted units are included when Cloud weights and historical
-mode deviations are calculated.
-
-\textbf{Full-quorum global barrier.}
-The current protocol waits for 100\% of the predetermined Cloud update units,
-then aggregates and broadcasts the new version to all clients. Every client
-must install and acknowledge that version before another round starts.
-The logical simulation explicitly includes downlink, installation, and ACK
-time (default ACK size 64 bytes and installation time 1 ms). These are
-configurable modeling assumptions, not measurements of a physical deployment.
-There is no periodic clock or cross-round update queue. A 90\% threshold is
-reserved for a later experiment, after defining treatment of unfinished work.
-Results from the superseded periodic protocol are excluded from this version.
-
-Sample level DP is applied during local training and privacy costs
-are accumulated using the ledger in Sec.~\ref{sec:privacy_model}.
-Candidate modes must pass the resource, activation, and privacy
-checks before they can be selected. Any encryption overhead required
-by the protection policy is included consistently in the system
-model. Actual privacy consumption is recorded after execution.
-
-\textbf{System conditions.}
-Client computing capacity, available memory, Edge capacity, link
-throughput, and propagation delays are configurable. Three groups
-of conditions are planned: a reference setting, stronger resource
-heterogeneity, and larger changes in network conditions. The
-system time $T_{\mathrm{round}}$ is calculated using the latency
-model, while the time spent searching for a mode distribution is
-measured separately. The same recorded system conditions are used
-for all methods in each comparison.
-
-\begin{table*}[t]
-\centering
-\caption{Initial experimental plan. Values marked as initial choices
-will be finalized before the experiments. No entries are measured results.}
-\label{tab:experimental_settings}
-\small
-\renewcommand{\arraystretch}{1.15}
-\begin{tabularx}{\textwidth}{@{}p{0.30\textwidth}XX@{}}
-\toprule
-\textbf{Item} & \textbf{Initial choice} & \textbf{Implementation requirement} \\
-\midrule
-Primary task & CIFAR-10 / ResNet-18 & Train the classification layer first \\
-Second task & Fashion-MNIST / LeNet-5 & Use the same three collaboration modes \\
-Clients / Edge servers & 100 / 10 & Begin with a smaller pilot topology \\
-Training rounds & 100 & Keep the same limit for matched comparisons \\
-Data distribution & Unequal labels across Edge groups & Save one split for each random seed \\
-Privacy budget & $(\bar\epsilon,\delta)=(8,10^{-5})$ & Initial choice; record actual RDP costs \\
-Edge stages & $E_B$ to be set & Hold fixed within matched comparisons \\
-Mode selection period & $S_P\in\{1,5,10\}$ & Include a fixed mode assignment \\
-History smoothing & $\gamma_d,\gamma_C$ to be set & Test more than one value \\
-Random seeds & 42, 43, 44 & Use paired seeds across methods \\
-System conditions & Reference / resource / network & Use common per round traces \\
-Search limits & Archive size and evaluation budget to be set & Match budgets in search comparisons \\
-\bottomrule
-\end{tabularx}
-\end{table*}
-
-\textbf{Reproducibility.}
-For every run, the random seed, data partition, initial model,
-resource profile, network trace, privacy parameters, and selection
-settings are saved. Methods compared in the same scenario use the
-same initial conditions. A run records both the selected mode
-distribution and the actual admission decisions. Unless otherwise
-stated, results are summarized across the paired random seeds.
-
-\subsection{Implementation Checks and Initial Training}
-\label{sec:exp_validation}
-
-Before running the full experiments, a small topology is used to
-check the implementation of all three modes. Each $FL_{EC}$ group
-must contribute one final Cloud unit after $E_B$ stages, each
-$FL_C$ client must contribute an independent unit, and each accepted
-$FL_E$ group must contribute its asynchronous Edge update.
-For every Cloud aggregation, the recorded weights must satisfy
-$\sum_{k\in\mathcal K^t}I_k^t=1$ and must be based on the training
-sample counts of the accepted units. Updates that have not been
-accepted must not enter the aggregation or its historical statistics.
-
-The initial rounds are used to establish the historical Cloud
-reference and collect observations for the three modes. If a
-required estimate is unavailable, the initialization policy in
-Algorithm~\ref{alg:selection} is applied without evaluating an
-undefined learning cost. The full search is enabled only when
-its candidate costs can be evaluated. These checks are completed
-before the client count and training rounds are increased.
-
-\subsection{Historical Update Deviation Evaluation}
-\label{sec:exp_prediction}
-
-\textbf{Objective.}
-This experiment examines whether the historical mode statistics
-can predict the update deviation of an executed mode distribution.
-The estimate $\widehat J_{\mathrm{learn}}^t$ is calculated before
-mode selection, using only information available at that time.
-After the Cloud accepts and aggregates the submitted updates,
-the observed deviation is calculated as
-\begin{equation}
-J_{\mathrm{obs}}^t=
-\frac{\|\Delta_C^t-v_g^{t-1}\|_2^2}
-{\|v_g^{t-1}\|_2^2+\varepsilon_J}.
-\label{eq:exp_observed_deviation}
-\end{equation}
-The historical reference used for this calculation is saved
-before execution and is not updated until the deviations for
-the current round have been recorded.
-
-\textbf{Procedure.}
-For each round with an available prediction and a completed Cloud
-aggregation, both $\widehat J_{\mathrm{learn}}^t(\mathbf h^{t,\ast})$
-and $J_{\mathrm{obs}}^t$ are recorded. Their absolute difference
-measures prediction error. The difference between the predicted
-Cloud update $\widehat U_C^t(\mathbf h^{t,\ast})$ and the observed
-Cloud update $\Delta_C^t$ is also measured. The analysis is repeated
-for different smoothing parameters and system conditions.
-
-Because only the selected distribution is executed in an ordinary
-round, the updates of other candidates are not observed. To examine
-whether the estimator correctly ranks several candidates, a
-separate small scale experiment would need to start each candidate
-from the same model checkpoint and system state, keep candidate
-executions independent, and compare their results only after execution.
-This counterfactual ranking test is not implemented in the current
-experiment campaign; selected-profile prediction errors alone do not
-establish correct ranking of unexecuted candidates. Nor does a smaller
-update deviation guarantee higher test accuracy.
-
-\subsection{Comparison with Baselines}
-\label{sec:main_comparison}
-
-\textbf{Compared methods.}
-The proposed method is compared with feasible implementations of
-fixed $FL_E$, fixed $FL_{EC}$, fixed $FL_C$, a fixed mixed mode
-distribution, random feasible mode selection, and a method that
-selects modes using only system time. A method that uses only
-$\widehat J_{\mathrm{learn}}^t$ is included to examine the
-contribution of the second objective. An alternative Pareto search,
-such as NSGA-II, would require the same evaluation budget and the
-same two objectives. It is not implemented or included in the current
-reported comparisons.
-
-\textbf{Fair comparison.}
-All methods use the same dataset partitions, initial parameters,
-privacy rules, resource limits, and network traces. A fixed mode
-is not silently replaced when it violates a constraint; the
-corresponding client is excluded or marked as \textsc{skip} under
-the common admission rules. The number of successful training
-rounds, admitted clients, privacy consumption, and executed local
-steps are reported to make differences in training work visible.
-
-\textbf{Evaluation measures.}
-Test accuracy and test loss are recorded against both training
-rounds and cumulative modeled system time. We also report the
-time required to reach a specified test accuracy, the fraction
-of clients admitted, the fraction of rounds producing a Cloud
-update, total communication volume, and mode selection time.
-Selection computation time is reported separately from
-$T_{\mathrm{round}}$ because it is not part of the current round
-latency model. When a target accuracy is not reached, this is
-reported without assigning an artificial completion time.
-
-\IfFileExists{results/formal_main.tex}{\input{results/formal_main.tex}}{%
-\begin{table*}[t]
-\centering
-\caption{Planned comparison measures. All result cells will be
-filled after running the experiments.}
-\label{tab:main_comparison}
-\small
-\setlength{\tabcolsep}{5pt}
-\begin{tabular}{lrrrrr}
-\toprule
-\textbf{Method} & \textbf{Final acc. (\%)} &
-\textbf{Test loss} & \textbf{System time (s)} &
-\textbf{Admission (\%)} & \textbf{Search time (s)} \\
-\midrule
-Proposed method & -- & -- & -- & -- & -- \\
-Fixed $FL_E$ & -- & -- & -- & -- & -- \\
-Fixed $FL_{EC}$ & -- & -- & -- & -- & -- \\
-Fixed $FL_C$ & -- & -- & -- & -- & -- \\
-Fixed mixed modes & -- & -- & -- & -- & -- \\
-Random feasible modes & -- & -- & -- & -- & -- \\
-System time only & -- & -- & -- & -- & -- \\
-Update deviation only & -- & -- & -- & -- & -- \\
-\bottomrule
-\end{tabular}
-\end{table*}
-}
-
-\subsection{Ablation Study}
-\label{sec:ablation_result}
-
-\subsubsection{Mode Selection and Reconfiguration Period}
-\label{subsec:dynamic_mode_ablation}
-
-The effect of changing collaboration modes is evaluated by
-comparing $S_P=1$, $S_P=5$, $S_P=10$, and a fixed mode
-distribution. The same historical estimator and privacy policy
-are used when selection is enabled. Mode changes, admitted
-clients, system time, and model performance are recorded to
-explain differences between policies.
-
-\begin{table}[t]
-\centering
-\caption{Planned reconfiguration experiment. Entries are pending.}
-\label{tab:mode_selection_ablation}
-\footnotesize
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Policy} & \textbf{Final acc. (\%)} &
-\textbf{Time (s)} & \textbf{Mode changes} \\
-\midrule
-$S_P=1$ & -- & -- & -- \\
-$S_P=5$ & -- & -- & -- \\
-$S_P=10$ & -- & -- & -- \\
-Fixed distribution & -- & -- & -- \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsubsection{Historical Statistics and Objective Selection}
-\label{subsec:deviation_ablation}
-
-The historical model is examined by varying $\gamma_d$ and
-$\gamma_C$, and by comparing the full two objective selection
-with selection based on only one objective. A further comparison
-uses historical deviations from individual Edge groups rather
-than the mean deviation of each mode. This test examines the
-loss of detail caused by sharing one statistical estimate across
-Edges. Prediction error, system time, and test accuracy are
-reported separately.
-
-\IfFileExists{results/pilot_ema.tex}{\input{results/pilot_ema.tex}}{}
-EMA comparisons must be rerun under the full-quorum global barrier;
-superseded periodic-protocol results are not reported here.
-Setting both smoothing coefficients to zero keeps the latest valid
-observations; it does not remove the historical objective. These
-measurements do not establish a universal advantage of smoothing.
-Changing $\gamma_C$ also changes the reference defining $J_{\mathrm{obs}}$.
-Consequently, MAE across different $\gamma_C$ values is not an error
-comparison against one fixed prediction target. Controls with a common
-$\gamma_C$ are required alongside test accuracy and system time.
-
-\subsubsection{Resource, Network, and Privacy Conditions}
-\label{subsec:constraint_ablation}
-
-The effects of computing capacity, available memory, Edge
-capacity, network variability, and lifetime privacy budgets
-are evaluated under matched random seeds. For each condition,
-the feasible mode counts, mode distribution, admission rate,
-privacy consumption, and training time are recorded. The
-number of $FL_{EC}$ stages $E_B$ is varied in a separate
-experiment because it changes both training work and the
-number of protected local steps.
-
-A 90\% unit-count quorum is planned only as a subsequent control, after
-the full-quorum flow and unfinished-task handling have been validated.
-
-\subsection{Search Space Reduction and Selection Cost}
-\label{sec:exp_search_cost}
-
-The selection search is evaluated independently of model
-training. With three available modes, the unconstrained
-space contains at most $3^N$ mode distributions. After
-client feasibility filtering, the number of combinations
-before the shared system constraints is
-$\prod_{i=1}^{N}|\mathcal F_i^t|$.
-The number of candidates accepted by the system constraints
-is measured exactly only when enumeration is practical.
-For larger topologies, the search records the number of
-complete distributions evaluated, the number rejected, the
-Pareto archive size, and the elapsed selection time.
-
-Bounded search is compared with exhaustive search on small
-topologies, where the Pareto front can be determined exactly.
-For larger topologies, different search limits are compared
-using the same evaluation budget and system state. The selected
-objective values and computation time are reported. This
-experiment measures the search cost without claiming that a
-bounded search always finds the complete Pareto front.
-
-\subsection{Discussion}
-\label{sec:reconfiguration_behavior}
-\label{sec:experiment_limits}
-
-The results will be discussed in terms of three separate
-questions: how well historical mode deviations predict
-Cloud updates, how the predicted deviation and system time
-affect mode selection, and whether these choices improve
-actual model training. Distributions with the same total
-Cloud weight for each mode can receive the same predicted
-learning cost, even if their members differ. Their system
-times and actual updates may still differ. The experiments
-therefore report training performance in addition to
-$\widehat J_{\mathrm{learn}}^t$.
-
-The predicted deviation is not a direct estimate of model
-loss reduction. Conclusions about accuracy are based on the
-observed test results rather than on the value of the
-predicted learning cost alone.
-
-\section{Conclusion}
-\label{sec:conclusion}
-This paper studies three-mode cloud-edge-end collaboration using historical
-update deviation and modeled system time as selection objectives. Accepted
-Cloud units determine both sample weights and historical statistics. Local
-sample-level DP-SGD is composed using a conservative Gaussian RDP ledger.
-Bounded Pareto search and normalized Chebyshev selection provide an
-approximate search procedure; completeness of its Pareto front is not claimed.
-
-The implementation executes training on one host and models the three-tier
-timeline using configurable compute and link parameters. It does not execute
-a CKKS or secure-aggregation protocol. Historical deviation is an empirical
-selection signal, not a proved bound on loss reduction or test accuracy.
-Physical distributed deployment, measured resource profiling, and validation
-of asynchronous service policies remain outside the current experiments.
-
-\appendix
-\bibliographystyle{elsarticle-num}
-\bibliography{refs}
-
+	
+	\begin{frontmatter}
+		
+		\title{Dynamic Collaboration Mode Selection in Hierarchical Federated Learning}
+		
+		\author[bupt1,bupt2,bupt3]{Tingting Yang}
+		\author[bupt1,bupt2,bupt3]{Wenbo Zhang\corref{cor1}}
+		\ead{zhangwb@bupt.edu.cn}
+		\cortext[cor1]{Corresponding author.}
+		\author[bupt1,bupt2,bupt3]{Shaohua Liu}
+		\author[bupt1,bupt2,bupt3]{Lihua Zhang}
+		\author[bupt1,bupt2,bupt3]{Xinyuan Lin}
+		\author[bupt1,bupt2,bupt3]{Qian Liu}
+		
+		\affiliation[bupt1]{
+			organization={School of Mathematical Sciences, Beijing University of Posts and Telecommunications},
+			city={Beijing},
+			country={China}
+		}
+		
+		\affiliation[bupt2]{
+			organization={State Key Laboratory of Information Photonics and Optical Communications (Beijing University of Posts and Telecommunications)},
+			city={Beijing},
+			country={China}
+		}
+		
+		\affiliation[bupt3]{
+			organization={Key Laboratory of Mathematics and Information Networks (Beijing University of Posts and Telecommunications), Ministry of Education},
+			city={Beijing},
+			country={China}
+		}
+		
+		\begin{abstract}
+			Hierarchical federated learning enables collaboration among Cloud, Edge, and end devices, but fixed collaboration schemes may not adapt effectively to heterogeneous and changing system conditions.
+			To address this challenge, a dynamic collaboration mode selection framework is proposed. Three collaboration modes are considered: Edge aggregation with asynchronous Cloud updates ($FL_E$), multistage Edge aggregation followed by Cloud aggregation ($FL_{EC}$), and direct Cloud aggregation ($FL_C$).
+			To evaluate candidate mode distributions, a historical aggregate update deviation score is constructed by combining mode specific historical update deviations with the aggregation weights of the corresponding Cloud update units.
+			The proposed framework combines this score with estimated system latency into a joint utility and dynamically selects feasible mode distributions under resource and lifetime privacy constraints.
+			Experiments on Fashion MNIST with LeNet 5 evaluate the relationship between the proposed deviation score and subsequent learning performance. 
+			Experimental results show that the rankings
+			of the examined candidate distributions by
+			the proposed score are consistent with their
+			subsequent loss reductions, providing
+			empirical support for the effectiveness
+			of the proposed score.
+			Further experiments demonstrate how different
+			utility weights affect learning performance
+			and cumulative system latency.
+		\end{abstract}
+		
+		\begin{keyword} 
+			hierarchical federated learning \sep cloud-edge-end collaboration \sep dynamic collaboration mode selection \sep differential privacy \sep device heterogeneity 
+		\end{keyword}
+		
+	\end{frontmatter}
+	\section{Introduction}
+	\label{sec:introduction}
+	Federated learning (FL) enables multiple end devices to collaboratively train a shared model without transferring raw data to a central server~\cite{fedavg,ZHAO2026108518}. In AIoT systems, however, participating devices differ substantially in computational capability, memory capacity, communication quality, and local data distribution. Cloud-edge-end hierarchical federated learning (HFL) introduces edge servers between end devices and the cloud, providing intermediate aggregation and computation capabilities while reducing direct communication with the cloud~\cite{hfl,FLaTEC2026,yang2026hierarchical}.
+	
+	Data and system heterogeneity can limit the effectiveness of fixed cloud-edge-end collaboration schemes across clients and training rounds. First, non-IID data can cause
+	local updates to drift in different directions and can degrade simple weighted
+	aggregation~\cite{fedavgm,fedprox,scaffold,khan2026accelerating,11214447}.
+	Second, system capabilities are heterogeneous. A weak end device may be unable
+	to handle the same workload or meet the same deadline as a stronger device,
+	whereas an edge or cloud server can undertake more computation~\cite{wang2019adaptivefl,FAN2026108249}.
+	A mode that suits one client in one round may be inefficient or infeasible
+	for the same client in another round, or for another client.
+	
+	Existing work on HFL and cloud-edge-end collaboration has covered personalization,
+	resource allocation, wireless scheduling, heterogeneous models, and split
+	training~\cite{Personalizedhfl,JSJX202502007,dinh2021wirelessfl,BSBODP,mazloomi2025multiserver,SFETEC,11185336,YAO2026108495}.	
+	These studies address different aspects of
+	collaborative training. However, heterogeneous
+	client capabilities, non IID data, and changing
+	communication conditions can affect the suitability
+	of different collaboration modes across training
+	rounds. A fixed mode assignment may therefore
+	fail to maintain a desirable balance between
+	learning related update behavior and system
+	latency under resource and lifetime privacy
+	constraints.	
+	
+	To address this problem, three collaboration
+	modes are considered in the proposed framework.	
+	In $FL_E$, clients perform one local training
+	stage and submit their updates to the Edge for
+	aggregation. The resulting Edge model is
+	returned to clients without waiting for Cloud
+	aggregation, while the aggregated Edge update
+	is asynchronously forwarded to the Cloud to
+	contribute to global aggregation.
+	In $FL_{EC}$, clients perform multiple local
+	training and Edge aggregation stages before
+	the final Edge update is forwarded to the Cloud.
+	In $FL_C$, client updates are directly transmitted
+	to the Cloud for aggregation.
+	
+	These modes provide different aggregation paths
+	and training stage arrangements, making their
+	suitability dependent on the current system
+	conditions. A mode distribution that is suitable
+	under one set of conditions may not remain
+	effective as client resources, communication
+	conditions, and update characteristics change.
+	Therefore, the proposed method dynamically
+	selects a feasible distribution of clients among
+	the three modes from a finite candidate set.
+	
+	Each candidate is evaluated using a historical
+	aggregate update deviation score and estimated
+	system latency, subject to resource and lifetime
+	privacy constraints. These two quantities form
+	the joint utility for mode selection. The deviation
+	score serves as a decision signal rather than a
+	direct measure of model accuracy. The learning
+	performance of the selected strategies is then
+	evaluated experimentally.
+	
+	
+	The main contributions of this paper are as follows:
+	\begin{itemize}
+		
+		\item A dynamic collaboration mode selection
+		framework is developed for hierarchical
+		federated learning with three collaboration
+		modes, $FL_E$, $FL_{EC}$, and $FL_C$,
+		distinguished by their aggregation paths
+		and training stage arrangements.
+		A finite set of candidate mode distributions
+		is used to represent different client
+		assignments across these modes.
+		
+		\item A historical aggregate update deviation
+		score is constructed by combining mode
+		specific historical update deviations
+		with the aggregation weights of the
+		corresponding Cloud update units.
+		The proposed score is integrated with
+		estimated system latency into a normalized
+		joint utility to evaluate feasible candidate
+		mode distributions under resource and
+		lifetime privacy constraints.
+		
+		\item Simulation experiments are conducted
+		to evaluate the proposed framework.
+		The results provide empirical support
+		for the effectiveness of the proposed
+		deviation score by showing consistency
+		between candidate score rankings and
+		subsequent loss reductions.
+		Further comparisons characterize the
+		tradeoffs between learning performance
+		and system latency under different
+		utility preferences and switching controls.
+		
+	\end{itemize}
+	
+	
+	The remainder of this paper is organized as follows.
+	Section~\ref{sec:related_work} reviews related studies
+	on hierarchical federated learning and cloud-edge-end
+	collaboration.
+	Section~\ref{sec:model} introduces the system model
+	and formulates the historical aggregate deviation
+	contribution and system latency under resource
+	and lifetime privacy constraints.
+	Section~\ref{sec:algorithm} presents the proposed
+	dynamic collaboration selection algorithm.
+	Section~\ref{sec:experiment} evaluates its performance
+	through experiments.
+	Finally, Section~\ref{sec:conclusion} concludes the paper.
+	
+	\section{Related Work}
+	\label{sec:related_work}
+	Existing research on hierarchical federated
+	learning covers resource optimization,
+	collaborative training and aggregation,
+	and privacy protection. This section
+	reviews representative studies in these
+	three research directions.
+	\subsection{HFL Under Heterogeneous Environments}
+	
+	Hierarchical federated learning introduces
+	intermediate Edge aggregation to improve
+	communication efficiency in distributed
+	training~\cite{hfl}. Resource constraints
+	and differences in client capabilities have
+	motivated the adaptation of training and
+	communication parameters.
+	PHFL employs model pruning and jointly
+	adjusts pruning ratios, processor frequencies,
+	and transmission power to address limited
+	bandwidth and heterogeneous device
+	capabilities~\cite{phfl}.
+	Xu et al. investigate adaptive control of
+	local update frequency and model compression
+	to improve training efficiency~\cite{xu2022adaptive}.
+	
+	More recently, Su et al. jointly optimize
+	aggregation frequencies and computation
+	and communication resources in hierarchical
+	federated learning~\cite{su2025adaptivehfl}.
+	Wei et al. introduce a digital twin based
+	framework that dynamically adjusts aggregation
+	deadlines and resource allocation in hierarchical
+	federated learning for IoT
+	environments~\cite{wei2026dthfl}.
+	
+	Data heterogeneity has also motivated client
+	clustering and model personalization.
+	Clustered FL organizes clients into groups
+	according to similarities in their training
+	characteristics~\cite{sattler2020clustered}.
+	Other studies investigate shared representations
+	and personalized hierarchical federated learning
+	to accommodate differences in local data
+	distributions~\cite{collins2021exploiting,
+		Personalizedhfl}.
+	Together with the resource management approaches
+	discussed above, these studies address
+	heterogeneous federated training through
+	model adaptation, aggregation control,
+	and resource optimization.
+	
+	\subsection{Cloud-Edge-End Collaborative Federated Learning}
+	
+	Collaborative FL across the Cloud, Edge, and Local
+	tiers can be organized through different training
+	and aggregation mechanisms. FedAgg employs bridge
+	samples and online knowledge distillation to
+	transfer knowledge between models of different
+	sizes across the three tiers~\cite{BSBODP}.
+	FLaTEC distributes model components between
+	devices and Edge servers and applies knowledge
+	distillation to support efficient collaborative
+	training~\cite{FLaTEC2026}.
+	Fed3Scale introduces a collaborative framework
+	that combines training and aggregation across
+	the three tiers with semi supervised
+	learning~\cite{fed3scale}.
+	
+	Aggregation synchronization has also been
+	investigated to improve training efficiency.
+	FedSA employs a semi asynchronous mechanism
+	that aggregates a specified number of received
+	client updates instead of waiting for all
+	participating clients~\cite{Ma2021}.
+	This approach adjusts aggregation timing to
+	reduce the waiting delay associated with
+	synchronous training.
+	
+	
+	These studies illustrate different approaches to organizing collaborative training and aggregation across multiple tiers.	The diversity of aggregation paths and synchronization requirements provides a basis for dynamic collaboration mode selection in hierarchical federated learning.
+	
+	
+	
+	\subsection{Privacy Preserving HFL}
+	
+	Although raw training data remain on local devices,
+	model updates may still reveal sensitive information
+	about the training data~\cite{zhu2019dlg}.
+	Differential privacy (DP) has been widely investigated
+	to limit information leakage during federated
+	training~\cite{dwork2006calibrating}.
+	
+	Privacy preservation in HFL has been studied
+	through different mechanisms.
+	Chen et al. investigate personalized privacy
+	protection using group local DP, incorporating
+	randomized response and shuffling~\cite{GLDP}.
+	Xu et al. propose ADPFL, which adapts privacy
+	budget allocation, gradient clipping, and
+	client selection during training~\cite{xu2025adpfl}.
+	Wang et al. develop a client sampling framework
+	that protects both communicated model information
+	and information revealed by client sampling
+	decisions~\cite{11267456}.
+	
+	Other studies combine multiple privacy mechanisms
+	within hierarchical architectures.
+	Kalafatelis et al. integrate client level DP,
+	secure aggregation, and homomorphic encryption
+	for hierarchical learning across data
+	spaces~\cite{PPHFL}.
+	Islam et al. incorporate DP and personalization
+	into hierarchical fog federated learning
+	for IoT intrusion detection~\cite{islam2025pphffl}.
+	
+	These studies investigate privacy preservation
+	through different mechanisms and adaptive
+	privacy control strategies.
+	In the proposed framework, DP-SGD is applied
+	during local training, and RDP accounting
+	tracks the accumulated privacy loss across
+	training rounds~\cite{abadi2016deep,mironov2017renyi}.
+	The lifetime privacy budget is incorporated
+	into the feasibility assessment of candidate
+	collaboration mode distributions, together
+	with resource constraints.
+	Privacy constraints are therefore considered
+	alongside historical update deviation and
+	estimated system latency during mode selection.
+	\section{Model Construction}
+	\label{sec:model}
+	\subsection{Collaborative Mode and Transmission Modeling}
+	\label{sec:link_model}
+	We consider a three-tier federated learning system
+	consisting of \(N\) clients, a set of edge servers,
+	and a central cloud server. Each client \(i\) is
+	associated with an edge server \(e(i)\). At round
+	\(t\), the system assigns a collaboration mode
+	\(h_i^t\in\mathcal H\) to each participating client,
+	allowing training and aggregation to be organized
+	across different tiers.
+	
+	\textbf{Collaboration modes.}
+	Three collaboration modes are considered in the 
+	cloud-edge-end architecture, which are distinguished 
+	by their aggregation paths and client-side synchronization 
+	requirements.
+	
+	In Edge based Federated Learning ($FL_E$),
+	clients perform local training and submit
+	their updates to the Edge for aggregation.
+	After Edge aggregation, the resulting Edge
+	model is returned to clients independently
+	of the Cloud aggregation process. Meanwhile,
+	the aggregated Edge update is asynchronously
+	forwarded to the Cloud and contributes to
+	global aggregation. In 
+	Edge--Cloud Federated Learning ($FL_{EC}$), a group of 
+	clients associated with the same Edge participates in a 
+	multi-stage collaborative process. The Edge performs $E_B$ 
+	processing stages before submitting a single final joint 
+	update to the Cloud for global aggregation. In Cloud-based 
+	Federated Learning ($FL_C$), clients directly submit their 
+	locally trained updates to the Cloud for aggregation without 
+	intermediate Edge aggregation.
+	
+	Let \(L\), \(E\), and \(C\) denote the Local, Edge,
+	and Cloud tiers, respectively. The three candidate
+	collaboration modes are defined as
+	\begin{equation}
+		\mathcal H =
+		\{\mathrm{FL_E},\mathrm{FL_{EC}},\mathrm{FL_C}\}.
+		\label{eq:three_modes}
+	\end{equation}
+	In all three modes, raw training data remain on
+	the client. Local model updates or Edge-aggregated
+	updates are transmitted according to the selected
+	collaboration mode.
+	
+	
+	\subsubsection{Collaborative Training Blocks and Mode Flows}
+	
+	Let \(L_B\) denote the number of local training
+	steps in each block, and let \(T_L(L_B)\) represent
+	the corresponding local training process followed
+	by model update generation.
+	During local training, 
+	gradients computed for each example are clipped, 
+	and Gaussian noise is added to the clipped gradients using differentially private stochastic gradient descent.
+	Let \(A_E\) and \(A_C\)
+	denote aggregation at the Edge and Cloud,
+	respectively.
+	For the \(FL_{EC}\) mode, \(E_B\) denotes
+	the number of Edge processing and aggregation
+	stages. At each stage, clients perform
+	\(L_B\) local training steps using the latest
+	model received from the Edge. After each
+	stage, the aggregated model is returned to
+	the clients for the next stage. The final
+	aggregated update is denoted by
+	\(\Delta_e^{(E_B)}\).
+	\begin{equation}
+		\begin{aligned}
+			\mathrm{FL_E}:~~&
+			T_L(L_B)
+			\xrightarrow{\mathrm{upd}} A_E
+			\xrightarrow{\mathrm{async\ upd}} A_C,\\
+			\mathrm{FL_{EC}}:~~&
+			T_L(L_B)
+			\xrightarrow{\mathrm{upd}} \Delta_e^{(E_B)}
+			\xrightarrow{\mathrm{upd}} A_C,\\
+			\mathrm{FL_C}:~~&
+			T_L(L_B)
+			\xrightarrow{\mathrm{upd}} A_C.
+		\end{aligned}
+		\label{eq:mode_flows}
+	\end{equation}
+	Here, The arrows indicate the direction of information flow.
+	The label \(\mathrm{upd}\) indicates the transmission
+	of a model update to the next aggregation stage.
+	The label \(\mathrm{async\ upd}\) indicates
+	asynchronous update transmission without requiring
+	clients to wait for Cloud-side aggregation.
+	
+	Figure~\ref{fig:eecblockflow} illustrates the
+	execution structures of the three collaboration
+	modes. Figures (a)--(c) show the execution and
+	aggregation processes of \(FL_E\), \(FL_{EC}\),
+	and \(FL_C\), respectively, while Fig.~(d)
+	compares the three modes from the perspective
+	of an individual client. Filled circles, hollow
+	circles, and hollow diamonds represent the
+	Local, Edge, and Cloud tiers, respectively.
+	Dashed arrows indicate model update transmissions,
+	and circular arrows represent aggregation
+	operations. Spring-like marks indicate that the transmitted
+	model updates contain noise introduced by
+	client-side DP-SGD during local training.
+	
+	\begin{figure}[t]
+		\centering
+		\includegraphics[width=\columnwidth]{eecblockflow.png}
+		\caption{Execution structures of the three collaboration modes in the cloud-edge-end architecture.}
+		\label{fig:eecblockflow}
+	\end{figure}
+	
+	\subsection{Lifetime Privacy Accounting}
+	\label{sec:privacy_model}
+	
+	Sample-level differential privacy~\cite{dwork2014the}
+	is enforced during local training through the
+	differentially private stochastic gradient descent
+	mechanism~\cite{abadi2016deep}, in which gradients
+	are clipped and Gaussian noise is added to the
+	clipped gradients. The resulting model updates
+	carry this noise when transmitted across tiers. For each client,
+	R\'enyi differential privacy (RDP)~\cite{mironov2017renyi}
+	is used to accumulate privacy loss across
+	training rounds. Let \(\mathcal A\) denote
+	the set of R\'enyi orders~\cite{vanerven2014renyi}. 
+	For a Gaussian
+	mechanism with noise multiplier \(\sigma\),
+	the RDP cost at order \(\alpha\in\mathcal A\)
+	is \(\rho(\alpha,\sigma)=\alpha/(2\sigma^2)\).
+	
+	Let \(m_i^t\) denote the number of Gaussian
+	mechanisms applied to client \(i\) in round
+	\(t\), with corresponding noise multipliers
+	\(\sigma_{i,k}^t\).
+	The accumulated RDP cost can be calculated as
+	\begin{equation}
+		\Phi_i^{t+1}(\alpha)
+		=
+		\Phi_i^t(\alpha)
+		+
+		\sum_{k=1}^{m_i^t}
+		\rho(\alpha,\sigma_{i,k}^t).
+		\label{eq:rdp_update}
+	\end{equation}
+	For a given privacy parameter \(\delta\),
+	the corresponding privacy loss is
+	\begin{equation}
+		\epsilon_i^t
+		=
+		\min_{\alpha\in\mathcal A}
+		\left[
+		\Phi_i^t(\alpha)
+		+
+		\frac{\log(1/\delta)}{\alpha-1}
+		\right].
+		\label{eq:rdp_to_dp}
+	\end{equation}
+	Let \(\bar{\epsilon}\) denote the lifetime
+	privacy budget of each client. The accumulated
+	privacy loss must satisfy
+	\(\epsilon_i^t\leq\bar{\epsilon}\)
+	throughout training process.
+	
+	For client \(i\) and candidate mode \(h\), let
+	\(N_i^t(h)\) denote the estimated number of Gaussian
+	mechanisms whose privacy costs are attributed to
+	client \(i\) over the remaining training rounds.
+	This estimate is determined by the planned local
+	training schedule and the protected releases
+	required by the selected mode. Let \(R\) denote
+	the total number of training rounds.
+	
+	For \(N_i^t(h)>0\), the noise multiplier
+	\(\sigma_i^t(h)\) is calibrated to satisfy
+	\begin{equation}
+		\min_{\alpha\in\mathcal A}
+		\left[
+		\Phi_i^t(\alpha)
+		+
+		\frac{N_i^t(h)\alpha}
+		{2[\sigma_i^t(h)]^2}
+		+
+		\frac{\log(1/\delta)}{\alpha-1}
+		\right]
+		\leq\bar{\epsilon}.
+		\label{eq:noise_calibration}
+	\end{equation}
+	A noise multiplier satisfying
+	\eqref{eq:noise_calibration} is selected.
+	If calibration is infeasible, the candidate
+	mode is excluded. No calibration is required
+	when \(N_i^t(h)=0\).
+	
+	Before execution, the planned privacy cost
+	is checked against the remaining budget.
+	The privacy ledger is updated using the
+	executed Gaussian mechanisms, and the resulting
+	RDP state is used for mode selection in
+	the next round.
+	
+	\subsection{Joint Cost and Utility Modeling}
+	\label{sec:cost_utility_model}
+	Candidate mode distributions are evaluated using historical update
+	deviation contributions and system latency, subject to resource
+	constraints and the lifetime privacy budget in
+	Sec.~\ref{sec:privacy_model}.
+	\subsubsection{Path and Round Latency on a Common Timeline}
+	
+	Figure~\ref{fig:system_timeline} provides two 
+	complementary views of collaboration latency. 
+	Fig.~\ref{fig:system_timeline}(a) illustrates the 
+	client-side execution and communication sequence 
+	of $FL_{EC}$, including the $E_B$ sequential Edge 
+	aggregation stages and the intermediate return 
+	transmissions from the Edge to the clients. 
+	After the final Edge aggregation stage, 
+	the resulting update is forwarded to the Cloud. 
+	Fig.~\ref{fig:system_timeline}(b) illustrates 
+	the system-level synchronization process for 
+	$FL_{EC}$ and $FL_C$. It shows how the final 
+	Edge updates and direct client updates determine 
+	the Cloud aggregation completion time, 
+	followed by the required return transmissions. 
+	For clarity, panel (b) uses $E_B=1$ as an 
+	illustrative example, while the latency 
+	formulation supports general $E_B$. 
+	The asynchronous Cloud upload in $FL_E$ 
+	is omitted from panel (b) because it does not 
+	impose a waiting dependency on the 
+	Cloud-synchronized round.
+	\begin{figure*}[t]
+		\centering
+		\includegraphics[width=\textwidth]{common_timeline.png}
+		\caption{Client-side and system-level latency timelines.
+			(a) Client-side execution and communication path 
+			for $FL_{EC}$, showing the $E_B$ sequential 
+			Edge aggregation stages. 
+			(b) System-level synchronization 
+			timeline for $FL_{EC}$ and $FL_C$, 
+			illustrated with $E_B=1$ for clarity. 
+			Cloud aggregation waits for the final 
+			$FL_{EC}$ Edge updates and direct $FL_C$ 
+			client updates, followed by the required 
+			return transmissions. The asynchronous 
+			Cloud upload in $FL_E$ is omitted because 
+			it does not delay the Cloud-synchronized round.}
+		\label{fig:system_timeline}
+	\end{figure*}
+	
+	\textbf{Transmission latency.}
+	For a payload \(b\) transmitted from tier \(u\)
+	to tier \(v\), let \(S_{u,v,b}^t(h_i)\) denote
+	the original payload size under collaboration
+	mode \(h_i\). Let \(B_{i,u,v}^t\) denote
+	the transmission rate of the link between
+	tiers \(u\) and \(v\) for client \(i\) in
+	round \(t\), and let \(D_{u,v}^{0}\) denote
+	the fixed transmission delay of this link.
+	\begin{equation}
+		T_{u,v,b}^{\mathrm{link},t}(h_i)
+		=
+		\frac{S_{u,v,b}^t(h_i)}
+		{B_{i,u,v}^t}
+		+D_{u,v}^{0}.
+		\label{eq:comm_latency}
+	\end{equation}
+		
+	For an aggregated update transmitted from tier
+	$u$ to tier $v$, let $S_{u,v,b}^t$ denote
+	the payload size and $B_{u,v}^t$ denote
+	the corresponding transmission rate.
+	The transmission latency is
+	\begin{equation}
+		T_{u,v,b}^{\mathrm{link},t}
+		=
+		\frac{S_{u,v,b}^t}{B_{u,v}^t}
+		+D_{u,v}^{0}.
+	\end{equation}
+	
+	\textbf{Execution latency.}
+	Let \(\tau_{i,L}^t(h)\) denote the estimated
+	execution time per local training step for
+	client \(i\) under mode \(h\).
+	The execution latency is given by
+	\begin{equation}
+		T_i^{\mathrm{stage},t}(h)
+		=
+		L_B\tau_{i,L}^t(h),
+		\quad
+		h\in\{FL_E,FL_{EC},FL_C\}.
+		\label{eq:execution_latency}
+	\end{equation}
+	Transmission and aggregation delays are
+	accounted for separately.
+	
+	\textbf{Reconfiguration latency.}
+	Switching collaboration modes may require
+	reconfiguring the communication and aggregation
+	paths. We model the resulting reconfiguration
+	delay as
+	\begin{equation}
+		T_i^{\mathrm{sw},t}
+		=
+		\eta_h \mathbb{I}(h_i^t\neq h_i^{t-1}),
+		\label{eq:switching_cost}
+	\end{equation}
+	where \(\eta_h\) denotes the mode switching
+	overhead and \(\mathbb{I}(\cdot)\) is the
+	indicator function.
+	
+	\textbf{Path arrival and aggregation.}
+	For each candidate mode \(h_i\), the mode flow
+	determines the sequence of execution stages
+	and payload transmissions leading to the
+	relevant aggregation point.
+	We calculate update arrival times by
+	following this sequence and accounting for
+	execution, transmission, and reconfiguration
+	delays in their order of occurrence.
+	Let \(a_{i,E}^{t,k}(h)\) denote the arrival time
+	of client \(i\)'s update at Edge stage \(k\)
+	under collaboration mode \(h\). Let \(a_{i,C}^t\)
+	denote the arrival time of client \(i\)'s update
+	at the Cloud under \(FL_C\).
+	
+	Given a mode distribution
+	$\mathbf h^t=(h_1^t,\ldots,h_N^t)$,
+	clients are grouped by their associated Edge
+	and selected mode. Let
+	\begin{equation}
+		\mathcal G_{g,m}^t
+		=\{i\mid e(i)=g,\ h_i^t=m\},
+		\quad m\in\{FL_E,FL_{EC}\},
+		\label{eq:edge_mode_group}
+	\end{equation}
+	denote the clients assigned to mode $m$
+	at Edge $g$. Let \(k\) denote the
+	Edge aggregation stage index. For \(FL_E\),
+	only one Edge aggregation stage is performed,
+	whereas \(FL_{EC}\) consists of \(E_B\)
+	sequential Edge aggregation stages.
+	
+	For \(h\in\{FL_E,FL_{EC}\}\), the update
+	arrival time at the first Edge stage is
+	\begin{equation}
+		a_{i,E}^{t,1}(h)
+		=
+		T_i^{\mathrm{sw},t}
+		+
+		T_i^{\mathrm{stage},t}(h)
+		+
+		T_{L,E,b}^{\mathrm{link},t}(h).
+	\end{equation}
+	
+	For a nonempty Edge group
+	$\mathcal G_{g,m}^t$, the completion time
+	of aggregation stage $k$ is
+	\begin{equation}
+		f_{g,E}^{t,k}(m)
+		=
+		\max_{i\in\mathcal G_{g,m}^t}
+		a_{i,E}^{t,k}(m)
+		+
+		T_{g,E}^{\mathrm{agg},t},
+		\label{eq:edge_agg_finish}
+	\end{equation}
+	where $k=1$ for $FL_E$ and
+	$k=1,\ldots,E_B$ for $FL_{EC}$.
+	Updates arriving earlier remain buffered
+	until all required updates in the same
+	aggregation group have arrived.
+	
+	For \(FL_{EC}\), each subsequent Edge stage
+	starts after the aggregated model from the
+	previous stage has been returned to the
+	clients. The clients then perform another
+	local training block and transmit their
+	updates to the Edge. Thus, for
+	\(k=1,\ldots,E_B-1\), the update arrival
+	time at the next stage is
+	\begin{equation}
+		\begin{aligned}
+			a_{i,E}^{t,k+1}(FL_{EC})
+			={}&f_{g,E}^{t,k}(FL_{EC})
+			+T_{E,L,b}^{\mathrm{link},t}(FL_{EC})\\
+			&+T_i^{\mathrm{stage},t}(FL_{EC})
+			+T_{L,E,b}^{\mathrm{link},t}(FL_{EC}).
+		\end{aligned}
+	\end{equation}
+	
+	For \(FL_E\), the aggregated Edge update is
+	forwarded to the Cloud asynchronously after
+	the single Edge aggregation stage. This
+	transmission does not require clients to wait
+	for Cloud aggregation and is excluded from
+	the Cloud synchronization latency.
+	
+	For \(FL_{EC}\), the final Edge update is
+	forwarded to the Cloud after the \(E_B\)-th
+	Edge aggregation stage. Its arrival time is
+	\begin{equation}
+		a_{g,C}^t
+		=
+		f_{g,E}^{t,E_B}(FL_{EC})
+		+
+		T_{E,C,b}^{\mathrm{link},t}.
+	\end{equation}
+	
+	For \(FL_C\), clients transmit their updates
+	directly to the Cloud. The arrival time of
+	client \(i\)'s update is
+	\begin{equation}
+		a_{i,C}^t
+		=
+		T_i^{\mathrm{sw},t}
+		+
+		T_i^{\mathrm{stage},t}(FL_C)
+		+
+		T_{L,C,b}^{\mathrm{link},t}(FL_C).
+	\end{equation}
+	
+	Cloud aggregation waits for the direct client
+	updates from $FL_C$ and the final Edge updates
+	from $FL_{EC}$. 
+	Let $\mathcal G_{EC}^t
+	=\{g\mid\mathcal G_{g,FL_{EC}}^t
+	\neq\emptyset\}$ denote the Edge servers
+	with active $FL_{EC}$ groups. The Cloud aggregation
+	completion time is
+	\begin{equation}
+		\begin{aligned}
+			f_C^t
+			={}&
+			\max\Bigg\{
+			\max_{i\in\mathcal D_C^t} a_{i,C}^t,\,
+			\max_{g\in\mathcal G_{EC}^t} a_{g,C}^t
+			\Bigg\}\\
+			&+T_C^{\mathrm{agg},t},
+			\label{eq:cloud_agg_finish}
+		\end{aligned}
+	\end{equation}
+	where $\mathcal D_C^t$ denotes the set of
+	$FL_C$ clients. The asynchronous uploads
+	of $FL_E$ do not affect the Cloud
+	synchronization time.
+	
+	
+	The system round latency is measured
+	with respect to Cloud synchronization.
+	It is determined by the completion times
+	of $FL_{EC}$ and $FL_C$ clients, including
+	the required return transmissions.
+	The asynchronous Cloud uploads of $FL_E$
+	do not impose a waiting dependency on
+	the Cloud synchronization process.
+	The system round latency is therefore
+	\begin{equation}
+		\begin{aligned}
+			T_{\mathrm{sys}}(\mathbf h^t)
+			={}&f_C^t+\max\Bigg\{
+			\max_{i\in\mathcal D_{EC}^t}
+			\Big(
+			T_{C,E,b}^{\mathrm{link},t}(h_i^t)
+			+
+			T_{E,L,b}^{\mathrm{link},t}(h_i^t)
+			\Big),\\
+			&\qquad
+			\max_{i\in\mathcal D_C^t}
+			T_{C,L,b}^{\mathrm{link},t}(h_i^t)
+			\Bigg\}.
+		\end{aligned}
+		\label{eq:system_round_latency}
+	\end{equation}
+	
+	Here, $\mathcal D_{EC}^t=\{i\mid h_i^t=FL_{EC}\}$
+	and $\mathcal D_C^t=\{i\mid h_i^t=FL_C\}$
+	denote the corresponding client sets.
+	Clients operating in \(FL_E\) are excluded
+	from both sets because they do not wait for
+	Cloud aggregation.
+	Return delays are evaluated using
+	(\ref{eq:comm_latency}), with absent
+	return paths excluded from the maximum.
+	
+	The client-side latency for each collaboration
+	mode is defined as
+	\begin{equation}
+		T_{i,\mathrm{client}}^t(h_i^t)
+		=
+		\begin{cases}
+			f_{g,E}^{t,1}(FL_E)
+			+T_{E,L,b}^{\mathrm{link},t}(h_i^t),
+			& h_i^t=FL_E,\\[4pt]
+			f_C^t
+			+T_{C,E,b}^{\mathrm{link},t}(h_i^t)
+			+T_{E,L,b}^{\mathrm{link},t}(h_i^t),
+			& h_i^t=FL_{EC},\\[4pt]
+			f_C^t
+			+T_{C,L,b}^{\mathrm{link},t}(h_i^t),
+			& h_i^t=FL_C.
+		\end{cases}
+		\label{eq:client_latency}
+	\end{equation}
+	
+	\subsubsection{Historical Global Update Deviation Modeling}
+	\label{sec:learning_cost}
+	
+	Different collaboration modes involve distinct
+	training and aggregation procedures, which may
+	result in different update characteristics.
+	The historical update deviations of each mode
+	are estimated from previous rounds and used
+	to evaluate the aggregate deviation signal
+	associated with each candidate mode distribution.
+	
+	\textbf{Cloud aggregation and weights.}
+	For a candidate distribution
+	$\mathbf h^t=(h_1^t,\ldots,h_N^t)$,
+	clients connected to the same Edge and assigned
+	the same mode are grouped. Let
+	$\mathcal K^t(\mathbf h^t)$ denote the units
+	included in the current Cloud aggregation.
+	Each $FL_{EC}$ group contributes one final Edge update
+	after $E_B$ stages, while each $FL_C$ client
+	contributes its own update directly. 
+	For $FL_E$, each Edge group sends its
+	aggregated update to the Cloud asynchronously.
+	The update is included in the Cloud aggregation
+	that accepts it, without delaying the current
+	synchronization.
+	
+	Figure~\ref{fig:client_mode_grouping} illustrates
+	how mode reassignment changes the grouping structure
+	and the resulting Cloud update units.
+	From Fig.~\ref{fig:client_mode_grouping}(a) to
+	Fig.~\ref{fig:client_mode_grouping}(b), client $l_2$
+	switches from $FL_{EC}$ to $FL_C$, while client $l_5$
+	switches from $FL_E$ to $FL_{EC}$.
+	
+	For example, if the two configurations are applied
+	in consecutive rounds $t-1$ and $t$, respectively,
+	the set of Cloud update units changes from
+	\begin{equation}
+		\mathcal K^{t-1}(\mathbf h^{t-1})
+		=\{k_1,k_2,k_3,k_4,k_5,k_6\}
+	\end{equation}
+	to
+	\begin{equation}
+		\mathcal K^t(\mathbf h^t)
+		=\{k_1,k_2,k_3,k_4,k_5,k_6,k_7\}.
+	\end{equation}
+	Here, $k_i$ denotes the $i$th Cloud update unit
+	in the corresponding round.
+	The units are indexed separately in each round,
+	and their composition depends on the client
+	mode distribution.
+	
+	\begin{figure}[t]
+		\centering
+		\subfloat[Before mode reassignment]{
+			\includegraphics[width=0.90\columnwidth]
+			{client_mode_grouping_a.png}
+			\label{fig:client_mode_grouping_a}
+		}
+		
+		\subfloat[After mode reassignment]{
+			\includegraphics[width=0.90\columnwidth]
+			{client_mode_grouping_b.png}
+			\label{fig:client_mode_grouping_b}
+		}
+		
+		\caption{Illustration of client grouping and Cloud
+			update units under different mode distributions.
+			From (a) to (b), client $l_2$ switches from
+			$FL_{EC}$ to $FL_C$, while client $l_5$ switches
+			from $FL_E$ to $FL_{EC}$. These changes alter
+			the grouping structure and the resulting Cloud
+			update units.}
+		\label{fig:client_mode_grouping}
+	\end{figure}
+	
+	
+	Let $n_i$ denote the number of training samples
+	of client $i$, and let $\mathcal M_k^t$ denote
+	the clients represented by Cloud unit $k$.
+	The aggregation weight is calculated as
+	\begin{equation}
+		\begin{aligned}
+			N_k^t
+			&=\sum_{i\in\mathcal M_k^t}n_i,\\
+			I_k^t(\mathbf h^t)
+			&=\frac{N_k^t}
+			{\sum_{\ell\in\mathcal K^t(\mathbf h^t)}N_\ell^t}.
+		\end{aligned}
+		\label{eq:cloud_unit_weights}
+	\end{equation}
+	
+	For example, in Fig.~\ref{fig:client_mode_grouping}(a),
+	unit $k_1$ represents clients $l_1$ and $l_2$,
+	with $N_{k_1}^{t-1}=n_1+n_2$.
+	In Fig.~\ref{fig:client_mode_grouping}(b),
+	unit $k_1$ instead represents clients $l_1$
+	and $l_5$, with $N_{k_1}^t=n_1+n_5$.
+	Meanwhile, client $l_2$ forms an individual
+	Cloud update unit $k_2$, with $N_{k_2}^t=n_2$.
+	The aggregation weights are determined by
+	these sample counts and the total samples
+	represented by the accepted Cloud units.
+	
+	
+	\textbf{Historical deviation by mode.}
+	Let $\Delta_C^\tau$ denote the Cloud update at round $\tau$.
+	The historical global reference is calculated from previous
+	Cloud updates as
+	\begin{equation}
+		v_g^{\tau-1}
+		=\gamma_C v_g^{\tau-2}
+		+(1-\gamma_C)\Delta_C^{\tau-1},
+		\quad 0\leq\gamma_C<1.
+		\label{eq:global_ema}
+	\end{equation}
+	The first available Cloud update is used to initialize
+	the reference.
+	
+	Let $u_{k,\mathrm{DP}}^\tau$ denote the update of unit $k$
+	accepted by the Cloud at round $\tau$ after the required
+	privacy protection. Only updates allowed under
+	Sec.~\ref{sec:privacy_model} are used.
+	The deviation of unit $k$ from the historical reference is
+	\begin{equation}
+		d_k^\tau=u_{k,\mathrm{DP}}^\tau-v_g^{\tau-1}.
+		\label{eq:unit_deviation}
+	\end{equation}
+	Let $\mathcal K_m^\tau$ denote the Cloud units of mode
+	$m\in\mathcal H$ included at round $\tau$.
+	If this set is not empty, the weighted mean deviation of
+	mode $m$ is
+	\begin{equation}
+		\bar d_m^\tau
+		=\frac{\sum_{k\in\mathcal K_m^\tau}I_k^\tau d_k^\tau}
+		{\sum_{k\in\mathcal K_m^\tau}I_k^\tau}.
+		\label{eq:mode_mean_deviation}
+	\end{equation}
+	The weighted mean is calculated for each mode across all Edges.
+	
+	The historical mean deviation of each mode is estimated
+	using an exponential moving average (EMA):
+	\begin{equation}
+		\widehat d_m^t
+		=\gamma_d\widehat d_m^{t-1}
+		+(1-\gamma_d)\bar d_m^{t-1},
+		\quad 0\leq\gamma_d<1.
+		\label{eq:mode_deviation_ema}
+	\end{equation}
+	The first available mean deviation is used to initialize
+	the estimate. If no new data are available, the previous
+	estimate is retained.
+	As clients switch modes between rounds, the set of clients
+	assigned to the same mode at each Edge may change.
+	Therefore, the mean deviation is estimated for each mode
+	rather than for a fixed group of clients.
+	
+	\textbf{Update deviation score.}
+	For each candidate mode distribution $\mathbf h^t$,
+	the Cloud units and their aggregation weights are determined.
+	The historical deviation contributions are aggregated
+	and combined with the global reference as follows:
+	\begin{equation}
+		\widehat U_C^t(\mathbf h^t)
+		=v_g^{t-1}
+		+\sum_{k\in\mathcal K^t(\mathbf h^t)}
+		I_k^t(\mathbf h^t)\widehat d_{m(k)}^t,
+		\label{eq:predicted_cloud_update}
+	\end{equation}
+	Here, $m(k)$ denotes the collaboration mode
+	of Cloud update unit $k$.
+	For example, in Fig.~\ref{fig:client_mode_grouping}(b),
+	$m(k_1)=FL_{EC}$ and $m(k_2)=FL_C$.
+	Their contributions to the aggregate deviation
+	are weighted by $I_{k_1}^t(\mathbf h^t)$
+	and $I_{k_2}^t(\mathbf h^t)$, respectively.
+	The update deviation score measures the normalized
+	squared magnitude of the aggregate historical
+	deviation contribution:
+	\begin{equation}
+		J^t(\mathbf h^t)
+		=\frac{\left\|\widehat U_C^t(\mathbf h^t)
+			-v_g^{t-1}\right\|_2^2}
+		{\left\|v_g^{t-1}\right\|_2^2+\varepsilon_J},
+		\quad\varepsilon_J>0.
+		\label{eq:j_learn_estimate}
+	\end{equation}
+	A larger $J^t(\mathbf h^t)$ indicates a greater
+	historical aggregate update deviation under
+	the candidate mode distribution.
+	Therefore, larger values of $J^t(\mathbf h^t)$
+	are preferred to prioritize mode distributions
+	with more pronounced historical update
+	characteristics.
+	The system latency is also considered to
+	balance the historical aggregate update
+	deviation score and the execution overhead.
+	
+	\subsection{Finite Candidate Joint Selection}
+	\label{sec:global_optimization}
+	
+	
+	Let $P_j$ denote a candidate mode distribution,
+	where $j=0,\ldots,M-1$ and $M$ is the number
+	of candidate distributions considered.
+	Each candidate specifies the proportions
+	of clients assigned to $(FL_E,FL_{EC},FL_C)$.
+	
+	For each candidate $P_j$, let
+	$\mathbf h_j^t=\Psi^t(P_j)$
+	denote the corresponding client mode assignment
+	in round $t$, where $\Psi^t$ represents
+	the assignment procedure applied at each Edge.
+	
+	
+	Let $\mathcal F_{\mathrm{sys}}^t$ denote the set
+	of client mode assignments satisfying the
+	resource, privacy, and system admission
+	constraints in round $t$.
+	The feasible candidate set is defined as
+	\begin{equation}
+		\mathcal C^t
+		=
+		\left\{
+		\mathbf h_j^t \mid
+		0\leq j<M,\;
+		\mathbf h_j^t\in\mathcal F_{\mathrm{sys}}^t
+		\right\}.
+		\label{eq:feasible_candidates}
+	\end{equation}
+	
+	The search complexity is $O(M)$,
+	as at most $M$ candidate distributions
+	are considered for joint utility maximization.
+	
+	The candidate set can be extended by considering
+	additional mode distributions.
+	For experimental evaluation, five candidate
+	mode distributions are considered, with $M=5$.
+	Their proportions for $(FL_E,FL_{EC},FL_C)$
+	are specified as
+	\[
+	\begin{array}{ll}
+		P_0=(0.30,0.30,0.40), & P_1=(0.50,0.25,0.25),\\
+		P_2=(0.25,0.50,0.25), & P_3=(0.25,0.25,0.50),\\
+		P_4=(0.40,0.40,0.20). &
+	\end{array}
+	\]
+	
+	The specified proportions are applied separately
+	to the clients associated with each Edge.
+	For each candidate, the number of clients
+	assigned to each mode is obtained by rounding
+	the corresponding proportion and adjusting
+	the resulting counts to match the total
+	number of clients at that Edge.
+	
+	For each feasible assignment
+	$\mathbf h_j^t\in\mathcal C^t$,
+	the historical update deviation score
+	$J^t(\mathbf h_j^t)$ and system latency
+	$T_{\mathrm{sys}}(\mathbf h_j^t)$
+	are evaluated.
+	All candidates are evaluated using the
+	historical statistics and system conditions
+	available in round $t$.
+	
+	Since the two quantities have different scales,
+	their values are normalized among the feasible
+	candidates in each round.
+	Let $J_{\min}^t$ and $J_{\max}^t$ denote the
+	minimum and maximum values of $J^t$.
+	Similarly, $T_{\min}^t$ and $T_{\max}^t$
+	denote the minimum and maximum system latencies.
+	
+	The joint utility is defined as
+	\begin{equation}
+		\begin{aligned}
+			U^t(\mathbf h^t;\lambda)
+			={}&\lambda
+			\frac{J^t(\mathbf h^t)-J_{\min}^t}
+			{J_{\max}^t-J_{\min}^t}\\
+			&+(1-\lambda)
+			\frac{T_{\max}^t-T_{\mathrm{sys}}(\mathbf h^t)}
+			{T_{\max}^t-T_{\min}^t},
+		\end{aligned}
+		\label{eq:joint_utility}
+	\end{equation}
+	where $0\leq\lambda\leq1$ controls the relative
+	importance of the historical deviation
+	contribution and system latency.
+	A normalized value of $0.5$ is used when
+	the corresponding maximum and minimum are equal.
+	
+	A larger $J^t(\mathbf h^t)$ is preferred
+	to favor stronger historical aggregate
+	deviation contributions.
+	A smaller $T_{\mathrm{sys}}(\mathbf h^t)$
+	is preferred to reduce system execution time.
+	Both preferences are therefore represented
+	by larger normalized values in the joint utility.
+	
+	The mode distribution is selected by
+	\begin{equation}
+		\mathbf h^{t,\ast}
+		\in
+		\arg\max_{\mathbf h^t\in\mathcal C^t}
+		U^t(\mathbf h^t;\lambda).
+		\label{eq:joint_selection}
+	\end{equation}
+	If multiple candidates achieve the same
+	maximum utility, the candidate with the
+	smallest index is selected.
+	
+	\section{Algorithm}
+	\label{sec:algorithm}
+	
+	Algorithm~\ref{alg:selection} presents the
+	dynamic collaboration mode selection procedure,
+	and the main symbols are summarized in
+	Table~\ref{tab:algorithm_notation}.
+	At each mode selection step, at most $M$
+	candidate distributions are evaluated
+	based on their feasibility, historical
+	deviation contribution, and system latency.
+	The candidate search complexity is $O(M)$
+	in terms of the number of candidate evaluations.
+	
+	\begin{table}[t]
+		\centering
+		\caption{Notation Used in Algorithm~\ref{alg:selection}}
+		\label{tab:algorithm_notation}
+		\small
+		\setlength{\tabcolsep}{4pt}
+		\begin{tabular}{p{0.37\columnwidth}p{0.54\columnwidth}}
+			\hline
+			\textbf{Symbol} & \textbf{Description} \\
+			\hline
+			$M$ & Number of candidate mode distributions. \\
+			$P_j$ & Candidate mode distribution indexed by $j$. \\
+			$S_P$ & Mode selection period. \\
+			$\mathcal F_{\mathrm{sys}}^t$ &
+			Set of system feasible mode distributions. \\
+			$\mathcal C^t$ &
+			Set of feasible candidate distributions in round $t$. \\
+			$\mathbf h^{t,\ast}$ &
+			Selected mode distribution in round $t$. \\
+			$J^t(\mathbf h^t)$ &
+			Historical aggregate deviation contribution. \\
+			$T_{\mathrm{sys}}(\mathbf h^t)$ &
+			System latency under distribution $\mathbf h^t$. \\
+			$U^t(\mathbf h^t;\lambda)$ &
+			Joint utility for candidate selection. \\
+			\hline
+		\end{tabular}
+	\end{table}
+	
+	\begin{breakablealgorithm}
+		\caption{Dynamic Collaboration Mode Selection}
+		\label{alg:selection}
+		\small
+		\begin{algorithmic}[1]
+			\REQUIRE Round $t$, candidate distributions
+			$\{P_j\}_{j=0}^{M-1}$,
+			strategy period $S_P$,
+			utility weight $\lambda$,
+			hysteresis threshold $\theta_H$,
+			previous candidate index $j_{t-1}$,
+			system state, privacy ledger,
+			and historical statistics
+			\ENSURE Selected mode distribution
+			$\mathbf h^{t,\ast}$ or \textsc{skip}
+			
+			\IF{$t\leq 5$}
+			\STATE $\mathbf h_0^t\leftarrow\Psi^t(P_0)$
+			
+			\IF{$\mathbf h_0^t\notin\mathcal F_{\mathrm{sys}}^t$}
+			\STATE \textbf{return} \textsc{skip}
+			\ENDIF
+			
+			\STATE \textbf{return} $\mathbf h_0^t$
+			\ENDIF
+			
+			\IF{$t>1$,
+				$\operatorname{mod}(t-1,S_P)\neq0$,
+				and $\mathbf h^{t-1,\ast}
+				\in\mathcal F_{\mathrm{sys}}^t$}
+			
+			\STATE $\mathbf h^{t,\ast}
+			\leftarrow\mathbf h^{t-1,\ast}$
+			
+			\ELSE
+			
+			\STATE Construct $\mathcal C^t$
+			using \eqref{eq:feasible_candidates}
+			
+			\IF{$\mathcal C^t=\emptyset$}
+			\STATE \textbf{return} \textsc{skip}
+			\ENDIF
+			
+			\STATE Freeze $v_g^{t-1}$ and
+			$\{\widehat d_m^t\}_{m\in\mathcal H}$
+			
+			
+			\FORALL{$\mathbf h_j^t\in\mathcal C^t$}
+			
+			\STATE Evaluate
+			$J^t(\mathbf h_j^t)$
+			using \eqref{eq:j_learn_estimate}
+			
+			\STATE Evaluate
+			$T_{\mathrm{sys}}(\mathbf h_j^t)$
+			using \eqref{eq:system_round_latency}
+			
+			\ENDFOR
+			
+			\STATE Determine
+			$J_{\min}^t$, $J_{\max}^t$,
+			$T_{\min}^t$, and $T_{\max}^t$
+			from all feasible candidates
+			
+			\FORALL{$\mathbf h_j^t\in\mathcal C^t$}
+			
+			\STATE Compute
+			$U^t(\mathbf h_j^t;\lambda)$
+			using \eqref{eq:joint_utility}
+			
+			\ENDFOR			
+			
+			
+			\STATE Select $\mathbf h^{t,\ast}$
+			using \eqref{eq:joint_selection}
+			
+			\STATE Resolve utility ties
+			by selecting the candidate
+			with the smallest index $j$
+			
+			\IF{$\theta_H>0$ and $t>1$}
+			
+			\IF{$\mathbf h_{j_{t-1}}^t\in\mathcal C^t$}
+			
+			\IF{$U^t(\mathbf h^{t,\ast};\lambda)
+				-U^t(\mathbf h_{j_{t-1}}^t;\lambda)
+				\leq\theta_H$}
+			
+			\STATE $\mathbf h^{t,\ast}
+			\leftarrow\mathbf h_{j_{t-1}}^t$
+			
+			\ENDIF
+			\ENDIF
+			\ENDIF
+			
+			\ENDIF
+			
+			\STATE \textbf{return} $\mathbf h^{t,\ast}$
+			
+		\end{algorithmic}
+	\end{breakablealgorithm}
+	
+	\section{Experiments}
+	\label{sec:experiment}
+	
+	The experiments test whether the proposed dynamic collaboration
+	mode selection method, which jointly considers the historical
+	aggregate deviation contribution $J^t(\mathbf h^t)$ and system
+	latency $T_{\mathrm{sys}}(\mathbf h^t)$, achieves a more favorable
+	tradeoff between test loss and cumulative system latency than fixed
+	collaboration mode distributions. Five fixed strategies based on
+	$P_0,\ldots,P_4$ are compared with seven dynamic strategies: three
+	Greedy variants with $\lambda\in\{0.25,0.50,0.75\}$, Maximum $J$,
+	Minimum $T$, Hysteresis, and Periodic selection. The comparisons
+	cover convergence, communication and computation costs, and
+	candidate selection, with particular attention to the effects of
+	Hysteresis and Periodic selection on mode switching.
+	
+	\subsection{Experimental Setup}
+	\label{sec:exp_setup}
+	
+	\textbf{Data and training.}
+	Fashion MNIST contains 60,000 training images and 10,000 test images.
+	To simulate heterogeneous data distributions, the training samples
+	of each class are allocated to ten Edge servers using a Dirichlet
+	distribution with concentration parameter $\alpha=0.5$.
+	Each Edge server then distributes its assigned samples among
+	ten clients. A LeNet 5 model is trained for 100 global rounds.
+	The training parameters and collaboration mode configurations
+	are summarized in Table~\ref{tab:experimental_setup}.
+	The reverse links are assumed to have the same nominal transmission rates and fixed delays as the corresponding forward links.
+	
+	\textbf{System conditions.}
+	To model differences in client computing capabilities,
+	each client is assigned a computation factor sampled from
+	$\mathcal U(0.5,2.0)$ and held constant across rounds.
+	The local computation time per step is 0.1 s multiplied
+	by this factor, while the client compute capacity is
+	2.0 divided by the same factor.
+	Client memory is independently assigned by multiplying
+	32 MB by a fixed draw from $\mathcal U(0.5,2.0)$.
+	All 100 clients satisfy the resource requirements
+	and participate in every training round.
+	The same client population is used across strategies
+	to compare different collaboration mode distributions.
+	The system resource settings are listed in
+	Table~\ref{tab:experimental_setup}.
+	
+	\textbf{System latency.}
+	Different collaboration modes involve different
+	computation, communication, and aggregation processes,
+	which lead to different system latencies.
+	To capture these differences, an event based
+	simulation is used to model the execution
+	timeline of each collaboration mode.
+	All strategies are evaluated using the same
+	system conditions and timing rules to provide
+	a consistent comparison of system efficiency.
+	Communication latency is calculated using
+	Eq.~\eqref{eq:comm_latency}, while local execution,
+	Edge aggregation, Cloud aggregation, and mode
+	reconfiguration follow
+	Eqs.~\eqref{eq:execution_latency},
+	\eqref{eq:edge_agg_finish},
+	\eqref{eq:cloud_agg_finish}, and
+	\eqref{eq:switching_cost}, respectively.
+	The transmission rates, link delays, and
+	other latency parameters are summarized in
+	Table~\ref{tab:experimental_setup}.
+	
+	\textbf{Privacy configuration.}
+	Local training applies per example gradient clipping
+	with $C=1.0$, followed by Gaussian noise addition
+	at each local update step.
+	Under replacement adjacency, the sensitivity is
+	$2C$, and the noise standard deviation is
+	$2C\sigma$.
+	Privacy expenditure is tracked using an RDP
+	accountant without sampling amplification.
+	The privacy parameters are summarized in
+	Table~\ref{tab:experimental_setup}.
+	The noise multiplier is calibrated according
+	to the selected collaboration mode and the
+	remaining lifetime privacy budget, as specified
+	in \eqref{eq:noise_calibration}. In the reported
+	experimental configuration, the representative
+	values are approximately $9.803$ for $FL_E$
+	and $FL_C$, and $16.979$ for $FL_{EC}$.
+	
+	\begin{table}[t]
+		\centering
+		\caption{Experimental configuration.}
+		\label{tab:experimental_setup}
+		\scriptsize
+		\setlength{\tabcolsep}{4pt}
+		\renewcommand{\arraystretch}{1.12}
+		\begin{tabularx}{\columnwidth}{@{}lX@{}}
+			\toprule
+			\textbf{Parameter} & \textbf{Configuration} \\
+			\midrule
+			\multicolumn{2}{@{}l}{\textit{Data and training}} \\
+			Dataset & Fashion MNIST (60,000 training, 10,000 test) \\
+			Model & LeNet 5 \\
+			Topology & 100 clients, 10 Edge servers \\
+			Data heterogeneity & Dirichlet distribution, $\alpha=0.5$ \\
+			Global rounds & 100 \\
+			Local optimization & DP SGD, batch size 64, learning rate 0.05 \\
+			Local steps & 2 per training stage \\
+			Mode stages & $FL_E$: 1, $FL_{EC}$: 3, $FL_C$: 1 \\
+			\midrule
+			\multicolumn{2}{@{}l}{\textit{System conditions}} \\
+			Local computation & 0.1 s per step, factor $\mathcal U(0.5,2.0)$ \\
+			Client memory & 32 MB, factor $\mathcal U(0.5,2.0)$ \\
+			Client participation & All 100 clients per round \\
+			\midrule
+			\multicolumn{2}{@{}l}{\textit{System latency}} \\
+			Link rates & $L\to E$: 5.0, $L\to C$: 2.2, $E\to C$: 8.0 MB/s \\
+			Rate variation & $\mathcal U(0.75,1.25)$ per client and round \\
+			Link delays & $L\to E$: 0.015, $L\to C$: 0.04, $E\to C$: 0.01 s \\
+			Edge aggregation & 0.02 s per group and stage \\
+			Cloud aggregation & 0.04 s per aggregation \\
+			Mode switching & 0.02 s per changed client \\
+			\midrule
+			\multicolumn{2}{@{}l}{\textit{Privacy configuration}} \\
+			Clipping norm & $C=1.0$ \\
+			Noise multiplier & Mode and budget dependent;
+			$FL_E$, $FL_C$: $\sigma\approx9.803$;
+			$FL_{EC}$: $\sigma\approx16.979$ \\
+			Privacy budget & $\epsilon\leq8$, $\delta=10^{-5}$ \\
+			\bottomrule
+		\end{tabularx}
+	\end{table}
+	
+	\subsection{Comparison Strategies and Evaluation Metrics}
+	\label{sec:exp_strategies_metrics}
+	
+	\textbf{Main comparison.}
+	All fixed and dynamic strategies use the five candidate
+	distributions $P_0,\ldots,P_4$ defined in
+	Sec.~\ref{sec:global_optimization}.
+	Each fixed strategy retains one candidate throughout
+	training, while dynamic strategies select candidates
+	according to the joint utility or its individual
+	objective components.
+	The Greedy variants maximize
+	$U^t(\mathbf h^t;\lambda)$ with
+	$\lambda\in\{0.25,0.50,0.75\}$,
+	while Maximum $J$ and Minimum $T$ prioritize
+	the respective objective components.
+	Hysteresis and Periodic selection use
+	$\lambda=0.50$ with additional restrictions
+	on reconfiguration.
+	Hysteresis requires a utility improvement
+	greater than 0.05 before switching candidates,
+	whereas Periodic selection allows a new
+	decision every five rounds.
+	These strategies examine how restrictions
+	on mode switching affect learning performance
+	and system latency.
+	
+	\textbf{Pure mode references.}
+	Three pure mode strategies are considered, where
+	all clients use the same collaboration mode
+	throughout training: $FL_E$, $FL_{EC}$, or $FL_C$.
+	These strategies are evaluated separately from
+	the five candidate distributions to compare
+	the learning performance and system costs of
+	different collaboration modes.
+	
+	All dynamic strategies first execute $P_0$ for five rounds.
+	Its relatively balanced proportions allow historical update
+	information to be collected from all three collaboration modes.
+	Candidate selection then begins in round 6 using the
+	accumulated historical statistics.
+	
+	\textbf{Metrics.}
+	Learning performance is evaluated using test loss
+	and test accuracy. System efficiency is measured
+	by cumulative system latency, total communication
+	volume in MB, and the number of local training steps.
+	Candidate changes and client mode changes are recorded
+	to evaluate mode switching behavior.
+	\subsection{Learning Performance and Efficiency}
+	\label{sec:exp_convergence}
+	\label{sec:main_comparison}
+	The five fixed candidate distributions are first compared by test loss and cumulative system latency. The values of the historical aggregate deviation contribution \(J\) and system latency are then compared for feasible candidates at the first online decision. Finally, the dynamic selection strategies are evaluated over training. For the main experiments, results are reported
+	as means across seeds 42, 43, and 44, with
+	shaded bands or error bars indicating one
+	sample standard deviation.
+	\subsubsection{Fixed Candidate Learning Performance}
+	Figure~\ref{fig:fixed_loss_vs_cumulative_latency} compares
+	Fixed $P_0$ to Fixed $P_4$ by test loss and cumulative system
+	latency to assess their learning progress relative to the
+	simulated time required.
+	The mean final losses increase in the order
+	$P_2$, $P_4$, $P_0$, $P_1$, and $P_3$.
+	Fixed $P_2$ obtains the lowest mean final loss,
+	$1.1992\pm0.0188$, and the highest mean
+	accuracy over rounds 91--100 among the
+	fixed strategies, $54.97\pm0.78\%$.
+	\begin{figure}[t]
+		\centering
+		\includegraphics[width=\columnwidth]
+		{experiment_fixed_loss_vs_cumulative_T.pdf}
+		\caption{Test loss versus cumulative system latency
+			for fixed strategies. Inset circles mark the
+			first recorded mean loss at or below 1.40.}
+		\label{fig:fixed_loss_vs_cumulative_latency}
+	\end{figure}
+	
+	The inset highlights the latency differences near loss 1.40.
+	The mean curves first reach this level in the order
+	$P_2$, $P_4$, $P_0$, $P_1$, and $P_3$,
+	as summarized in Table~\ref{tab:fixed_loss_140}.
+	Fixed $P_2$ reaches this reference level at 107.45 s,
+	compared with 137.56 s for Fixed $P_0$,
+	a reduction of approximately 21.9\%.		
+	\begin{table}[t]
+		\centering
+		\caption{Client mode proportions and cumulative latency
+			at the circled points in
+			Fig.~\ref{fig:fixed_loss_vs_cumulative_latency}.
+			Latency is reported as mean $\pm$ sample standard deviation.}
+		\label{tab:fixed_loss_140}
+		\footnotesize
+		\setlength{\tabcolsep}{0pt}
+		\begin{tabular}{@{}
+				>{\raggedright\arraybackslash}p{0.22\columnwidth}
+				>{\centering\arraybackslash}p{0.11\columnwidth}
+				>{\centering\arraybackslash}p{0.13\columnwidth}
+				>{\centering\arraybackslash}p{0.11\columnwidth}
+				>{\raggedleft\arraybackslash}p{0.33\columnwidth}
+				@{}}
+			\toprule
+			Candidate & $FL_E$ & $FL_{EC}$ & $FL_C$
+			& \mbox{Cumulative latency (s)} \\
+			\midrule
+			Fixed $P_0$ & 30\% & 30\% & 40\% & $137.56\pm1.55$ \\
+			Fixed $P_1$ & 50\% & 25\% & 25\% & $142.07\pm1.13$ \\
+			Fixed $P_2$ & 25\% & 50\% & 25\% & $107.45\pm0.87$ \\
+			Fixed $P_3$ & 25\% & 25\% & 50\% & $145.10\pm4.30$ \\
+			Fixed $P_4$ & 40\% & 40\% & 20\% & $120.38\pm1.54$ \\
+			\bottomrule
+		\end{tabular}
+	\end{table}	
+	These results show that $P_2$ and $P_4$, which assign
+	50\% and 40\% of clients to $FL_{EC}$, respectively,
+	achieve lower mean final losses than the other fixed
+	configurations.
+	However, these configurations also execute more local
+	training steps.
+	Fixed $P_2$ and $P_4$ execute 400 and 360 steps per round,
+	compared with 320 for $P_0$ and 300 for $P_1$ and $P_3$.
+	Their results therefore reflect both the collaboration
+	configuration and the amount of training performed.
+	\subsubsection{Candidate Scores and Training Tradeoffs}
+	Figure~\ref{fig:round6_candidate_jt} compares candidate
+	scores with subsequent learning performance from a
+	common training state.
+	After five rounds of $P_0$,
+	all five candidates are evaluated using the same
+	model and historical information. Each candidate is
+	then applied separately in rounds 6 to 10.
+	This preliminary experiment uses seed 42,
+	with results obtained from a single run
+	for each candidate.
+	The inset shows the corresponding $J$ and system
+	latency $T$, while the main plot shows the subsequent
+	test loss.
+	
+	\begin{figure}[t]
+		\centering
+		\includegraphics[width=0.96\columnwidth]{experiment_pilot_loss_JT_folded.pdf}
+		\caption{Candidate scores and subsequent test loss following five
+			common rounds of $P_0$. The circled point marks the end of round 5.
+			Each continuation uses one candidate in rounds 6 to 10. The inset
+			shows historical deviation contribution $J$ and system latency
+			$T$ in seconds, evaluated at the common round 5 state. Its dashed
+			line connects the nondominated candidate scores. Results are obtained using seed 42.}
+		\label{fig:round6_candidate_jt}
+	\end{figure}	
+	
+	The inset identifies $P_3$, $P_0$, and $P_2$ as
+	nondominated candidates at the common decision state.
+	Among them, $P_2$ provides the largest $J$, whereas
+	$P_3$ has the smallest system latency $T$.
+	$P_0$ has intermediate values of both objectives,
+	offering a compromise between historical deviation
+	contribution and system latency.
+	
+	The main plot shows the subsequent learning outcomes
+	when these candidates are retained for five rounds.
+	From round 5 to round 10, the loss reductions for
+	$P_2$, $P_0$, and $P_3$ are 0.0926, 0.0704, and
+	0.0648, respectively, following the same ordering
+	as their initial $J$ values.
+	Meanwhile, the recorded cumulative system latencies
+	at round 10 are 18.8601, 18.8527, and 18.4668 s,
+	respectively. Thus, $P_2$ achieves the largest loss
+	reduction, while $P_3$ requires the least system time.
+	This ordering is consistent with the fixed
+	strategy results in
+	Fig.~\ref{fig:fixed_loss_vs_cumulative_latency}, where $P_2$ achieves the lowest final loss
+	among the fixed candidates. These observations provide preliminary empirical support for using
+	$J$ as an indicator of potential learning progress when comparing candidate mode distributions.
+	
+	\subsection{Dynamic Selection and Switching Control}
+	\label{sec:exp_joint_selection}
+	\label{sec:reconfiguration_behavior}	
+	The preceding comparison motivates using $J$
+	together with system latency $T$ in the joint
+	utility $U$ defined in \eqref{eq:joint_utility}.
+	The values $\lambda=0.25$, $0.50$, and $0.75$
+	represent a stronger preference for lower latency,
+	equal weighting of the two normalized terms,
+	and a stronger preference for historical deviation
+	contribution, respectively.
+	Starting from round 6, Greedy evaluates the feasible
+	candidates in every round and selects the distribution
+	with the highest current $U$, allowing candidate
+	choices to adapt as training progresses.
+	This subsection examines how $\lambda$ influences
+	the learning and latency tradeoffs, and how
+	hysteresis and periodic updates regulate
+	mode switching.
+	\subsubsection{Effect of the Joint Utility Weight}
+	
+	Figure~\ref{fig:dynamic_loss_vs_cumulative_latency} examines how
+	the preference between historical deviation contribution and system
+	latency affects learning efficiency. The three Greedy strategies
+	share the same five rounds of $P_0$ initialization within each seed
+	and differ in the weight used for subsequent candidate selection.
+	
+	\begin{figure}[t]
+		\centering
+		\includegraphics[width=0.96\columnwidth]{experiment_greedy_weights_loss_vs_cumulative_T.pdf}
+		\caption{Test loss versus cumulative system latency
+			for the three Greedy weights. Curves show mean
+			loss against mean cumulative latency at
+			matching rounds across three seeds.
+			The inset enlarges the region near loss 1.30.}
+		\label{fig:dynamic_loss_vs_cumulative_latency}
+	\end{figure}
+	
+	The curves show faster mean loss reduction as $\lambda$ increases over the three tested values, with the inset highlighting their separation near loss 1.30. Greedy $\lambda=0.25$, $0.50$, and $0.75$ first reach this threshold at mean rounds $94.7\pm3.8$, $83.0\pm7.8$, and $74.0\pm6.0$, with mean cumulative latencies	$177.28\pm10.03$, $157.60\pm16.21$, and $141.95\pm11.82$ s, respectively. Thus, a stronger preference for lower candidate latency in each	round does not necessarily reduce the cumulative time needed to reach a given loss. Among the tested weights, $\lambda=0.75$ provides the earliest mean crossing of loss 1.30.
+	
+	\subsubsection{Objective Preferences and Switching Control}
+	
+	Figure~\ref{fig:dynamic_controls_loss_vs_cumulative_latency}
+	compares Greedy $\lambda=0.50$ with Maximum $J$ and Minimum $T$
+	to examine the learning consequences of emphasizing either objective
+	alone. Hysteresis and Periodic retain $\lambda=0.50$ while regulating
+	when candidate changes are applied, allowing their learning and
+	latency outcomes to be compared with the same Greedy reference.
+	
+	\begin{figure}[t]
+		\centering
+		\includegraphics[width=0.96\columnwidth]{experiment_objectives_switching_loss_vs_cumulative_T.pdf}
+		\caption{Test loss versus cumulative system latency
+			for the objective and switching controls, with
+			Greedy $\lambda=0.50$ as the reference.
+			The inset enlarges the region near loss 1.30.}
+		\label{fig:dynamic_controls_loss_vs_cumulative_latency}
+	\end{figure}
+	
+	Maximum $J$ follows the same loss and simulated latency trajectory as Greedy $\lambda=0.75$.The decision records show that Maximum $J$ and Greedy $\lambda=0.75$ both select $P_2$ in all 95 decisions after the common prefix in all three seeds. For each recorded state, their choices satisfy the respective	maximum $J$ or maximum utility rule among the feasible members of the five candidate set. 
+	
+	Hysteresis remains close to the Greedy $\lambda=0.50$ reference,
+	while Periodic shows slower mean loss reduction near the threshold.
+	Hysteresis and Periodic reach loss 1.30 in all three seeds at mean
+	rounds $80.0\pm8.9$ and $86.0\pm12.1$, respectively.
+	The corresponding switching behavior is
+	examined in Fig.~\ref{fig:selection_switching}.
+	Hysteresis reduces mode changes while
+	maintaining learning performance comparable
+	to Greedy $\lambda=0.50$, whereas Periodic
+	further reduces switching but exhibits slower
+	loss reduction near the threshold.
+	
+	\subsubsection{Mode Selection and Switching}
+	Figure~\ref{fig:selection_switching} examines how objective
+	preferences affect candidate choices and how switching controls
+	regulate reconfiguration activity. After the common initialization,
+	Greedy $\lambda=0.25$ and Minimum $T$ mainly select $P_1$ and $P_3$,
+	although their relative frequencies differ across seeds.
+	Greedy $\lambda=0.75$ and Maximum $J$ consistently select $P_2$
+	throughout the remaining 95 rounds in all three seeds.
+	Greedy $\lambda=0.50$ selects $P_2$ most frequently in each seed
+	while also selecting other candidates.
+	
+	The switching controls substantially reduce reconfiguration
+	activity relative to Greedy $\lambda=0.50$.
+	Hysteresis and Periodic reduce the mean number of client mode
+	changes by 60.4\% and 75.4\%, respectively.Hysteresis and Periodic therefore reduce reconfiguration activity in the direct sense of fewer candidate and client mode changes. 
+	\begin{figure}[t]
+		\centering
+		\includegraphics[width=0.98\columnwidth]{experiment_selection_switching.pdf}
+		\caption{Candidate selection and switching behavior across three
+			seeds. (a) Executed candidate sequences. Within each strategy,
+			rows correspond to seeds 42, 43, and 44 from top to bottom;
+			rounds 1 to 5 share the common $P_0$ initialization.
+			(b) Gray bars and horizontal error bars show the mean and
+			sample standard deviation of total client mode changes.
+			Numbers above the bars report candidate changes between
+			adjacent rounds as mean $\pm$ sample standard deviation.}
+		\label{fig:selection_switching}
+	\end{figure}	
+	\subsection{Learning Performance and System Tradeoffs}
+	\label{sec:exp_tradeoffs}
+	\label{sec:exp_accuracy_latency}
+	Figure~\ref{fig:greedy_fixed_accuracy_latency} compares the final
+	test loss and cumulative recorded system latency of the three Greedy
+	weights with all five fixed candidates after 100 rounds. This
+	comparison examines how different weights affect the final
+	learning--latency tradeoff relative to fixed mode distributions.
+	Table~\ref{tab:final_tradeoffs} extends the comparison to all
+	15 strategies and includes communication and computation costs.
+	
+	To assess the benefits of dynamic selection,
+	each Greedy strategy is compared with a
+	Fixed strategy at a similar final loss level.
+	Greedy $\lambda=0.25$ and $\lambda=0.50$
+	achieve lower mean cumulative latency than
+	Fixed $P_3$ and Fixed $P_4$, respectively.
+	Greedy $\lambda=0.75$ closely matches
+	Fixed $P_2$ in both final loss and
+	cumulative latency.
+	
+	\begin{figure}[t]
+		\centering
+		\includegraphics[width=0.96\columnwidth]
+		{experiment_final_loss_latency.pdf}
+		\caption{Final test loss versus cumulative system
+			latency after 100 rounds. The dashed staircase
+			marks the observed Fixed frontier, and shading
+			indicates the region dominated by Fixed strategies.}		
+		\label{fig:greedy_fixed_accuracy_latency}
+	\end{figure}
+	All three Greedy mean outcomes lie outside the region dominated 
+	by the observed Fixed means. Greedy $\lambda=0.25$ achieves a lower
+	mean cumulative latency than every Fixed strategy. As $\lambda$
+	increases from 0.25 to 0.75, the observed mean final loss decreases
+	while mean cumulative latency increases, with $\lambda=0.75$
+	approaching Fixed $P_2$. These outcomes associate a stronger
+	preference for historical deviation contribution with lower final
+	loss at a higher latency cost in this experiment.	
+	\begin{table*}[t]
+		\centering
+		\caption{Learning performance and accumulated system costs for
+				all 15 strategies over 100 rounds. Loss is evaluated at round
+				100, and accuracy is averaged over rounds 91--100 within each
+				seed. Entries are means $\pm$ sample standard deviations
+				across three seeds.}
+		\label{tab:final_tradeoffs}
+		\scriptsize
+		\setlength{\tabcolsep}{2.2pt}
+		\begin{tabular}{lrrrrrr}
+			\toprule
+			\textbf{Strategy} & \textbf{Final loss} & \textbf{Accuracy (\%)} &
+			\textbf{Cumulative $T$ (s)} & \textbf{Communication (MB)} &
+			\textbf{Local steps} & \textbf{Mode changes} \\
+			\midrule
+			Fixed $P_0$ & $1.2751\pm0.0268$ & $53.24\pm0.97$ & $191.122\pm2.069$ & $10{,}614.5\pm0.0$ & $32{,}000\pm0$ & $0\pm0$ \\
+			Fixed $P_1$ & $1.2896\pm0.0175$ & $54.81\pm1.66$ & $189.498\pm1.214$ & $10{,}984.8\pm0.0$ & $30{,}000\pm0$ & $0\pm0$ \\
+			Fixed $P_2$ & $1.1992\pm0.0188$ & $54.97\pm0.78$ & $191.868\pm1.628$ & $12{,}836.0\pm0.0$ & $40{,}000\pm0$ & $0\pm0$ \\
+			Fixed $P_3$ & $1.2962\pm0.0320$ & $53.47\pm0.84$ & $188.447\pm5.468$ & $9{,}750.5\pm0.0$ & $30{,}000\pm0$ & $0\pm0$ \\
+			Fixed $P_4$ & $1.2413\pm0.0174$ & $54.44\pm0.17$ & $191.253\pm2.324$ & $12{,}342.4\pm0.0$ & $36{,}000\pm0$ & $0\pm0$ \\
+			\midrule
+			Greedy $\lambda=0.25$ & $1.2826\pm0.0136$ & $53.57\pm0.85$ & $187.258\pm4.344$ & $10{,}506.7\pm577.6$ & $30{,}693\pm566$ & $1{,}021.7\pm715.9$ \\
+			Greedy $\lambda=0.50$ & $1.2412\pm0.0323$ & $54.29\pm1.19$ & $189.896\pm1.948$ & $11{,}782.8\pm275.0$ & $35{,}600\pm1{,}393$ & $1{,}601.3\pm96.6$ \\
+			Greedy $\lambda=0.75$ & $1.2038\pm0.0200$ & $54.95\pm0.85$ & $191.851\pm1.668$ & $12{,}724.9\pm0.0$ & $39{,}600\pm0$ & $20.0\pm0.0$ \\
+			Hysteresis $\lambda=0.50$ & $1.2329\pm0.0313$ & $54.64\pm0.45$ & $189.909\pm3.518$ & $11{,}850.3\pm522.1$ & $36{,}213\pm1{,}633$ & $634.0\pm83.5$ \\
+			Periodic $\lambda=0.50$ & $1.2526\pm0.0390$ & $53.40\pm1.67$ & $190.154\pm2.549$ & $11{,}591.5\pm154.4$ & $34{,}833\pm1{,}518$ & $394.3\pm88.2$ \\
+			Maximum $J$ & $1.2038\pm0.0200$ & $54.95\pm0.85$ & $191.851\pm1.668$ & $12{,}724.9\pm0.0$ & $39{,}600\pm0$ & $20.0\pm0.0$ \\
+			Minimum $T$ & $1.2880\pm0.0192$ & $53.28\pm1.03$ & $187.245\pm4.337$ & $10{,}421.9\pm510.9$ & $30{,}307\pm189$ & $895.0\pm597.6$ \\
+			\midrule
+			Pure $FL_E$ & $1.4146\pm0.0224$ & $52.31\pm1.44$ & $73.117\pm0.254$ & $10{,}121.1\pm0.0$ & $20{,}000\pm0$ & $0\pm0$ \\
+			Pure $FL_{EC}$ & $1.1047\pm0.0103$ & $56.65\pm0.68$ & $185.558\pm0.736$ & $17{,}525.8\pm0.0$ & $60{,}000\pm0$ & $0\pm0$ \\
+			Pure $FL_C$ & $1.4146\pm0.0224$ & $52.31\pm1.44$ & $83.733\pm0.358$ & $4{,}937.1\pm0.0$ & $20{,}000\pm0$ & $0\pm0$ \\
+			\bottomrule
+		\end{tabular}
+	\end{table*}
+	
+	Pure $FL_{EC}$ achieves the lowest mean final loss,
+	$1.1047\pm0.0103$, and the highest mean accuracy over rounds
+	91--100, $56.65\pm0.68\%$, while executing $60{,}000\pm0$
+	local steps and transmitting $17{,}525.8\pm0.0$ MB.
+	At the other extreme, pure $FL_E$ has the shortest mean recorded
+	latency, and pure $FL_C$ transmits the least data, but both finish at a
+	mean loss of 1.4146.
+	
+	Across the means of the 15 observed strategies,
+	local steps and final test loss have Pearson
+	correlation $-0.961$, whereas local steps
+	and mean test accuracy over the last 10 rounds
+	have correlation $0.915$.
+	More local work therefore coincides with
+	lower loss and higher accuracy in this matrix.
+	The strong association highlights training
+	workload as an important factor when comparing
+	collaboration strategies. Complementarily,
+	Fig.~\ref{fig:round6_candidate_jt} shows that
+	the initial $J$ ranking of $P_2$, $P_0$, and
+	$P_3$ agrees with their subsequent loss
+	reductions over five rounds.
+	
+	All 45 strategy runs contain 100 rounds, reach Cloud version 100,
+	record 100 acknowledgements and zero pending units, and remain within
+	$\epsilon=8$. Across the dynamic strategies, the mean per round Python
+	selection time ranges from 7.34 to 7.68 ms; it is recorded separately
+	and is not included in simulated system latency.
+	\begin{figure*}[t]
+		\centering
+		\includegraphics[width=0.98\textwidth]{experiment_final_performance_vs_local_steps.pdf}
+		\caption{Final learning performance and total executed local steps for
+			the 15 strategies over three seeds. Points and bidirectional error bars
+			show the mean and sample standard deviation. Panel (a) relates local
+			steps to final test loss, and panel (b) relates local steps to final
+			test accuracy.}
+		\label{fig:learning_work_relationships}
+	\end{figure*}
+	
+	\subsection{Discussion and Limitations}
+	\label{sec:experiment_limits}
+	
+	
+	The historical aggregate update deviation score
+	summarizes how the weighted historical deviation
+	estimates affect the predicted Cloud update
+	relative to the global reference.
+	The proposed score does not explicitly model
+	the effect of differential privacy noise.
+	Instead, it is constructed from historical
+	updates generated under differential privacy,
+	allowing the effects of privacy protection
+	on update characteristics to be indirectly
+	reflected in the evaluation of candidate
+	mode distributions.
+	This avoids the need to separately estimate
+	the impact of privacy noise on learning
+	performance during candidate evaluation.
+	
+	Within the finite candidate set, a larger weight on $J$ moves the selector from seed dependent low latency choices toward the larger historical deviation contribution of $P_2$. The resulting high weight strategy attains a competitive loss among the mixed candidates. This supports the limited conclusion that the joint utility produces an observable learning and system cost tradeoff under its declared preferences. It does not establish that larger $J$ causes lower loss, predicts accuracy, or separately identifies the effect of privacy noise.
+	
+	Several limitations bound this evidence. The reported matrix uses only three seeds, Fashion MNIST, LeNet 5, one topology, and one range of modeled heterogeneity. CIFAR 10, ResNet 18, larger model payloads, and broader topologies require separate validation. The five candidates cover only a small subset of possible client distributions. The network model does not include shared link contention or a physical deployment. Larger models may increase communication,
+	local computation, aggregation, and evaluation of the parameter vectors used by $J$, but this scaling effect is not tested here. Finally, candidate scoring and execution use the same implementation timeline, so the online comparisons are internally consistent. 
+	\FloatBarrier
+	
+	\section{Conclusion}
+	\label{sec:conclusion}
+	This paper presented a dynamic collaboration reconfiguration framework for hierarchical federated learning under resource and lifetime privacy constraints. The framework adapts execution paths and aggregation strategies to the current system state.
+	
+	Candidate mode distributions are evaluated using
+	historical update deviation contributions and system
+	latency. The two criteria are normalized and combined
+	into a joint utility. At each decision point, Greedy
+	selection chooses the feasible candidate with the
+	highest current joint utility under resource and
+	lifetime privacy constraints. Hysteresis and Periodic
+	selection impose additional switching rules and may
+	retain the current candidate instead of switching
+	to the candidate with the highest current utility.
+	Future work will evaluate the framework using more diverse datasets and model architectures. These evaluations will examine whether historical update deviation contributions remain effective for guiding candidate selection under different learning and system conditions. The computational overhead of candidate selection will also be assessed. Further validation will combine online profiling with physical deployment across the Cloud, Edges, and clients.
+	
+	\appendix
+	\bibliographystyle{elsarticle-num}
+	\bibliography{refs}
+	
 \end{document}

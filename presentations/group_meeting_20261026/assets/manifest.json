@@ -1,0 +1,61 @@
+{
+  "title": "层次化联邦学习中的动态协作模式选择",
+  "date": "2026-10-26",
+  "paper": {
+    "path": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\main.tex",
+    "sha256": "EF7421988ED2194163A25A4281273404A2E0487AD817F2F19EDDE8310D43A726",
+    "unchanged_at_validation": true
+  },
+  "slides": {
+    "main": 27,
+    "backup": 4
+  },
+  "figures": [
+    {
+      "file": "assets/experiment_final_loss_latency.pdf",
+      "source": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\figures\\experiment_final_loss_latency.pdf",
+      "sha256": "8B5F52E4CEBB9F5A79BDFF6F7D18756D0F9ED09DD4410AAC9B30F4E8BA971643"
+    },
+    {
+      "file": "assets/experiment_final_performance_vs_local_steps.pdf",
+      "source": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\figures\\experiment_final_performance_vs_local_steps.pdf",
+      "sha256": "297CF2C6AF758A48683F92A25211BA57BF0ED78DB04A437F13DB83EE7ECA9A7F"
+    },
+    {
+      "file": "assets/experiment_greedy_weights_loss_vs_cumulative_T.pdf",
+      "source": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\figures\\experiment_greedy_weights_loss_vs_cumulative_T.pdf",
+      "sha256": "7BA3E7CFEA3D666938632481A911B8404771FA84DFD2EB7B88E74CA4907E8CF8"
+    },
+    {
+      "file": "assets/experiment_pilot_loss_JT_folded.pdf",
+      "source": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\figures\\experiment_pilot_loss_JT_folded.pdf",
+      "sha256": "7EA298A04E958EB4C02155D25A0AB340D4CCF0D12A73326020716E450777C400"
+    },
+    {
+      "file": "assets/experiment_selection_switching.pdf",
+      "source": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\figures\\experiment_selection_switching.pdf",
+      "sha256": "095363B6932FE1E57B33DD1CCB99D5447005DF668107ACFB38607EA6981B778C"
+    },
+    {
+      "file": "assets/federated_learning_architectures.png",
+      "source": "C:\\Users\\YTT\\AppData\\Local\\Temp\\codex-clipboard-2800980f-f3a2-42dd-9e1f-631a9d1bc07a.png",
+      "sha256": "28C695C0BC73EFA35B42AB88B7996572B31BA3FEB138CF310BD2E3E7E3BFD4B5",
+      "description": "用户提供的研究背景配图；原始文献来源未提供。"
+    },
+    {
+      "file": "assets/client_mode_grouping_a.png",
+      "source": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\figures\\client_mode_grouping_a.png",
+      "sha256": "4770DECBF7A49C83FB36641C52568C272DC2A5ACD02E0A64EDBA4A67CD7DAE5E"
+    },
+    {
+      "file": "assets/client_mode_grouping_b.png",
+      "source": "E:\\YTT\\GROUP\\DynFL-privacy\\paper\\figures\\client_mode_grouping_b.png",
+      "sha256": "1A2E84752356B307BCE03AFAF69D9D5D9AAE68FE5820FCA4FC494B3277DB4CF9"
+    }
+  ],
+  "introduction_source": {
+    "path": "E:\\YTT\\GROUP\\DynFL-reconfiguration\\tex\\paper\\main.tex",
+    "sha256": "B90F48AD7307E4990A01BDF02BF5C62B284E6B8CA2B6F6BFDD17D516FFD8D192",
+    "role": "初始七模式方案；研究过程与调整原因结合作者说明"
+  }
+}

@@ -1,0 +1,8 @@
+strategy,group_size,candidate_switches_mean,candidate_switches_std,candidate_switches_n,client_mode_reassignments_mean,client_mode_reassignments_std,client_mode_reassignments_n
+greedy_lambda025,3,29.6666666667,22.4796204001,3,1021.66666667,715.925508229,3
+greedy_lambda050,3,57,8.66025403784,3,1601.33333333,96.5884741226,3
+greedy_lambda075,3,1,0,3,20,0,3
+hysteresis_lambda050,3,22,4,3,634,83.5164654425,3
+periodic_lambda050,3,13.6666666667,0.57735026919,3,394.333333333,88.1891905697,3
+max_J,3,1,0,3,20,0,3
+min_T,3,23.3333333333,16.2583311977,3,895,597.578446733,3

@@ -85,3 +85,14 @@ PID和完成情况。每个完成场景会审计并统计均值/标准差，全�
 `docs/FORMAL_PREPARATION_ZH.md`。未预登记的100客户端100轮运行会被拒绝。
 `python experiments/prepare_formal.py --output NEW_OUTPUT`只预登记，不启动训练。
 当前不要启动正式矩阵；待验证及耗时估算完成后另行申请。
+
+## 浏览器训练监控
+
+训练输出可用只读仪表盘实时查看；不指定 `--root` 时自动选择 `out/` 下最近更新的运行：
+
+```powershell
+python experiments/monitor_training.py --root out/stage1_20_20261021 --port 8765
+```
+
+浏览器打开 `http://127.0.0.1:8765`。页面每2秒刷新，展示整体/单任务进度、预计剩余时间、
+准确率和损失曲线、隐私预算及运行队列。监控器只读取JSON/CSV输出，不导入或干预训练进程。

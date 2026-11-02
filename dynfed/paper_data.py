@@ -53,11 +53,14 @@ def load_data(config, seed):
             tensor(test_x[test_idx]), torch.tensor(test_y[test_idx]).long())
 
 
-def partitions(labels, clients, edges, alpha, seed):
+def partitions(labels, clients, edges, alpha, seed, client_edge_map=()):
     """Edge-level label skew followed by deterministic within-Edge client splits."""
     rng = np.random.default_rng(seed)
     result = [[] for _ in range(clients)]
-    edge_members = [[client for client in range(clients) if client % edges == edge] for edge in range(edges)]
+    edge_for = ((lambda client: client_edge_map[client]) if client_edge_map else
+                (lambda client: client % edges))
+    edge_members = [[client for client in range(clients) if edge_for(client) == edge]
+                    for edge in range(edges)]
     edge_indices = [[] for _ in range(edges)]
     for label in np.unique(labels):
         indices = np.flatnonzero(labels == label)

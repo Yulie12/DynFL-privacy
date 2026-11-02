@@ -1,3 +1,28 @@
+@article{wei2026dthfl,
+title = {Dynamic resource allocation for digital twin-enhanced hierarchical federated learning in sustainable internet of things},
+journal = {Computer Communications},
+volume = {248},
+pages = {108410},
+year = {2026},
+issn = {0140-3664},
+doi = {https://doi.org/10.1016/j.comcom.2025.108410},
+url = {https://www.sciencedirect.com/science/article/pii/S0140366425003676},
+author = {Ze Wei and Rongxi He and Xiaojing Chen and Chengzhi Song},
+keywords = {Mobile edge computing, Hierarchical federated learning, Digital twin, Wireless power transmission, Collaborative training},
+abstract = {This paper proposes a digital twin (DT)-enhanced hierarchical federated learning framework for sustainable Internet of Things (IoT) networks. In this framework, mobile edge computing servers coordinate collaborative training, while DTs maintain real-time physical-virtual synchronization. Our core contributions are threefold. First, to tackle device heterogeneity, we propose two mechanisms: (1) an elastic time window that dynamically adapts aggregation deadlines based on median training times while incorporating distance-aware resource compensation to mitigate channel degradation, and (2) a DT-enhanced weighting strategy that dynamically balances energy sustainability, channel quality, and model freshness while guaranteeing convergence through closed-loop cross-layer coordination. Second, we derive a convergence bound explicitly linked to the device participation ratio, establishing a direct theoretical connection between resource allocation and learning performance. Then, through theoretical analysis, it can be found that reducing training latency and energy consumption by jointly optimizing computing and communication resources, as well as EH duration, is key to maximizing this ratio without compromising the reliability of the gradients, thereby indirectly enhancing convergence. Third, guided by this insight, we formulate a mixed-integer nonlinear programming problem that aims to maximize the participation ratio while jointly minimizing energy consumption and training latency, by optimizing the energy harvesting time, collaboration ratio, and communication/computation resources. To solve this NP-hard problem, we propose a DT-driven decomposition framework that partitions it into two subproblems, which are then solved by three DT-driven algorithms with provable near-optimality guarantees. Experimental results validate the superiority of our approach, demonstrating significant improvements in convergence performance, latency, energy efficiency, and participant sample rate, while also advancing the sustainability of FL.}
+}
+
+@ARTICLE{su2025adaptivehfl,
+  author={Su, Yi and Fan, Wenhao and Meng, Qingcheng and Chen, Penghui and Liu, Yuan'an},
+  journal={IEEE Transactions on Cloud Computing}, 
+  title={Joint Adaptive Aggregation and Resource Allocation for Hierarchical Federated Learning Systems Based on Edge-Cloud Collaboration}, 
+  year={2025},
+  volume={13},
+  number={1},
+  pages={369-382},
+  keywords={Federated learning;Cloud computing;Training;Resource management;Radio spectrum management;Optimization;Computational modeling;Servers;Data models;Costs;Mobile edge computing;hierarchical federated learning;adaptive aggregation;resource allocation},
+  doi={10.1109/TCC.2025.3530681}}
+
 @ARTICLE{vanerven2014renyi,
   author={van Erven, Tim and Harremos, Peter},
   journal={IEEE Transactions on Information Theory}, 
@@ -742,15 +767,6 @@ isbn="978-3-540-32732-5"
   publisher={IEEE}
 }
 
-@article{li2020federated,
-  title={Federated optimization in heterogeneous networks},
-  author={Li, Tian and Sahu, Anit Kumar and Zaheer, Manzil and Sanjabi, Maziar and Talwalkar, Ameet and Smith, Virginia},
-  journal={Proceedings of Machine learning and systems},
-  volume={2},
-  pages={429--450},
-  year={2020}
-}
-
 @article{t2020personalized,
   title={Personalized federated learning with moreau envelopes},
   author={T Dinh, Canh and Tran, Nguyen and Nguyen, Josh},
@@ -768,18 +784,17 @@ isbn="978-3-540-32732-5"
   year={2021},
   organization={PMLR}
 }
-
-@article{sattler2020clustered,
-  title={Clustered federated learning: Model-agnostic distributed multitask optimization under privacy constraints},
-  author={Sattler, Felix and M{\"u}ller, Klaus-Robert and Samek, Wojciech},
-  journal={IEEE transactions on neural networks and learning systems},
+@ARTICLE{sattler2020clustered,
+  author={Sattler, Felix and Müller, Klaus-Robert and Samek, Wojciech},
+  journal={IEEE Transactions on Neural Networks and Learning Systems}, 
+  title={Clustered Federated Learning: Model-Agnostic Distributed Multitask Optimization Under Privacy Constraints}, 
+  year={2021},
   volume={32},
   number={8},
-  pages={3710--3722},
-  year={2020},
-  publisher={IEEE}
-}
-
+  pages={3710-3722},
+  keywords={Data models;Sociology;Statistics;Servers;Optimization;Privacy;Training;Clustering;distributed learning;federated learning;multi-task learning},
+  doi={10.1109/TNNLS.2020.3015958}}
+  
 @article{long2023multi,
   title={Multi-center federated learning: clients clustering for better personalization},
   author={Long, Guodong and Xie, Ming and Shen, Tao and Zhou, Tianyi and Wang, Xianzhi and Jiang, Jing},
@@ -959,14 +974,6 @@ isbn="978-3-540-32732-5"
   publisher={IEEE}
 }
 
-@inproceedings{fedagg,
-  title={Agglomerative federated learning: Empowering larger model training via end-edge-cloud collaboration},
-  author={Wu, Zhiyuan and Sun, Sheng and Wang, Yuwei and Liu, Min and Gao, Bo and Pan, Quyang and He, Tianliu and Jiang, Xuefeng},
-  booktitle={IEEE INFOCOM 2024-IEEE Conference on Computer Communications},
-  pages={131--140},
-  year={2024},
-  organization={IEEE}
-}
 
 @article{nomahfl,
   title={Client selection and cost-efficient joint optimization for NOMA-enabled hierarchical federated learning},
@@ -999,15 +1006,6 @@ isbn="978-3-540-32732-5"
   publisher={MDPI}
 }
 
-@inproceedings{wu2024agglomerative,
-  title={Agglomerative federated learning: Empowering larger model training via end-edge-cloud collaboration},
-  author={Wu, Zhiyuan and Sun, Sheng and Wang, Yuwei and Liu, Min and Gao, Bo and Pan, Quyang and He, Tianliu and Jiang, Xuefeng},
-  booktitle={IEEE INFOCOM 2024-IEEE Conference on Computer Communications},
-  pages={131--140},
-  year={2024},
-  organization={IEEE}
-}
-
 @article{zhao2023cloud,
   title={Cloud-edge-client collaborative learning in digital twin empowered mobile networks},
   author={Zhao, Lindong and Ni, Shouxiang and Wu, Dan and Zhou, Liang},
@@ -1036,15 +1034,6 @@ isbn="978-3-540-32732-5"
   journal={IEEE Transactions on Industrial Cyber-Physical Systems},
   year={2024},
   publisher={IEEE}
-}
-
-@inproceedings{liu2020client,
-  title={Client-edge-cloud hierarchical federated learning},
-  author={Liu, Lumin and Zhang, Jun and Song, SH and Letaief, Khaled B},
-  booktitle={ICC 2020-2020 IEEE international conference on communications (ICC)},
-  pages={1--6},
-  year={2020},
-  organization={IEEE}
 }
 
 @Article{Ma2021,
@@ -1192,15 +1181,6 @@ abstract = {Federated Learning (FL) enables collaborative model training across 
   pages = {326--344},
   doi = {10.1007/BF02591870},
   url = {https://doi.org/10.1007/BF02591870}
-}
-
-@inproceedings{mironov2017rdp,
-  author = {Mironov, Ilya},
-  title = {R{\'{e}}nyi Differential Privacy},
-  booktitle = {2017 IEEE 30th Computer Security Foundations Symposium},
-  year = {2017},
-  pages = {263--275},
-  doi = {10.1109/CSF.2017.11}
 }
 
 @inproceedings{wang2019subsampled,

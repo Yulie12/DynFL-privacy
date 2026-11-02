@@ -1,0 +1,21 @@
+{
+  "pages": 31,
+  "main_frames": 27,
+  "backup_frames": 4,
+  "research_trajectory_slides": [
+    4,
+    5,
+    6
+  ],
+  "unit_slides": [
+    11,
+    12,
+    13
+  ],
+  "figures": 8,
+  "zip_entries": 13,
+  "pdf_sha256": "8B978A8FD757E4CC6084B48E0E470DF87443BDD785C5E51F8CD12B5F89F16B77",
+  "zip_sha256": "46BCFD37E81C42F2D157BB27B0584B914D76066B360BBA051853CE49FF31358E",
+  "both_manuscript_sources_unchanged": true,
+  "layout_issues": []
+}

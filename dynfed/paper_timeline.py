@@ -50,7 +50,12 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
         switch = config.switch_sec if client in previous and previous[client] != mode else 0.0
         block = config.local_steps * trace["step_sec"]
         if mode == "FL_C":
-            arrival = start + switch + block + payload_mb / trace["lc_rate"] + config.end_cloud_delay
+            upload = payload_mb / trace["lc_rate"] + config.end_cloud_delay
+            arrival = start + switch + block + upload
+            events.append({"event": "direct_cloud_update", "client": client, "mode": mode,
+                           "base": start, "switch_delay": switch,
+                           "execution_delay": block, "communication_delay": upload,
+                           "finish": arrival})
             unit = Unit(f"r{round_index}:FL_C:c{client}", mode, trace["edge"], (client,),
                         samples[client], arrival, generated_round=round_index)
             units.append(unit)
@@ -65,15 +70,34 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
                 trace = traces[client]
                 switch = config.switch_sec if stage == 0 and client in previous and previous[client] != mode else 0
                 returned = 0 if stage == 0 else payload_mb / trace["le_rate"] + config.end_edge_delay
-                arrivals.append(last_finish + switch + returned + config.local_steps * trace["step_sec"]
-                                + payload_mb / trace["le_rate"] + config.end_edge_delay)
-            agg_start = max(arrivals)
+                execution = config.local_steps * trace["step_sec"]
+                upload = payload_mb / trace["le_rate"] + config.end_edge_delay
+                arrival = last_finish + switch + returned + execution + upload
+                arrivals.append(arrival)
+                events.append({"event": "client_edge_stage_arrival", "client": client,
+                               "edge": edge, "mode": mode, "stage": stage + 1,
+                               "base": last_finish, "switch_delay": switch,
+                               "return_communication_delay": returned,
+                               "execution_delay": execution,
+                               "upload_communication_delay": upload,
+                               "finish": arrival})
+            ready = max(arrivals)
+            # paper/main.tex models each (Edge, Mode) group independently.  It
+            # does not serialize different groups on a shared Edge resource.
+            agg_start = ready
             last_finish = agg_start + config.edge_aggregation_sec
             events.append({"event": "edge_stage", "edge": edge, "mode": mode,
-                           "stage": stage + 1, "start": agg_start, "finish": last_finish,
+                           "stage": stage + 1, "ready": ready,
+                           "start": agg_start, "aggregation_delay": config.edge_aggregation_sec,
+                           "finish": last_finish,
                            "clients": members})
         ec_rate = min(traces[client]["ec_rate"] for client in members)
-        arrival = last_finish + payload_mb / ec_rate + config.edge_cloud_delay
+        upload_duration = payload_mb / ec_rate + config.edge_cloud_delay
+        upload_start = last_finish
+        arrival = upload_start + upload_duration
+        events.append({"event": "edge_cloud_upload", "edge": edge, "mode": mode,
+                       "start": upload_start, "communication_delay": upload_duration,
+                       "finish": arrival, "clients": members})
         unit = Unit(f"r{round_index}:{mode}:e{edge}", mode, edge, tuple(members),
                     sum(samples[client] for client in members), arrival,
                     generated_round=round_index)
@@ -85,6 +109,7 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
     cutoff = max((unit.arrival for unit in units), default=start)
     cloud_finish = cutoff + (config.cloud_aggregation_sec if units else 0.)
     events.append({"event": "cloud_acceptance", "cutoff": cutoff, "finish": cloud_finish,
+                   "aggregation_delay": config.cloud_aggregation_sec if units else 0.,
                    "trigger": "all_expected_units", "quorum": config.cloud_quorum,
                    "expected": [unit.identity for unit in units],
                    "accepted": [unit.identity for unit in units], "pending": []})
@@ -105,6 +130,10 @@ def plan(config, profile, traces, samples, payload_mb, start, round_index,
         acknowledgements[client] = acknowledged
         events.append({"event": "model_ack", "client": client, "round": round_index,
                        "broadcast_start": cloud_finish, "received": received,
+                       "downlink_communication_delay": down,
+                       "local_edge_completion": completion.get(client, start),
+                       "installation_delay": config.model_install_sec,
+                       "ack_communication_delay": up,
                        "finish": acknowledged, "mode": mode})
     finish = max(acknowledgements.values(), default=cloud_finish)
     events.append({"event": "global_barrier", "round": round_index,

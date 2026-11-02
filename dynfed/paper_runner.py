@@ -129,7 +129,7 @@ def system_traces(config, seed):
         rows = []
         for client in range(config.clients):
             jitter = lambda: rng.uniform(1-config.network_jitter, 1+config.network_jitter)
-            rows.append({"client": client, "edge": client % config.edges,
+            rows.append({"client": client, "edge": config.edge_for(client),
                          "memory_mb": float(memories[client]),
                          "compute_capacity": float(config.client_compute_capacity / step_factors[client]),
                          "step_sec": float(config.local_step_sec * step_factors[client]),
@@ -233,7 +233,7 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
         # Shared Edge capacity is an admission constraint: excluded clients
         # keep FL_C when feasible, rather than silently changing fixed methods.
         for edge in range(config.edges):
-            members = [client for client in pools if client % config.edges == edge]
+            members = [client for client in pools if config.edge_for(client) == edge]
             eligible = [client for client in members if any(mode in pools[client] for mode in ("FL_E", "FL_EC"))]
             for client in eligible[config.edge_group_capacity:]:
                 pools[client] = tuple(mode for mode in pools[client] if mode == "FL_C") or ("SKIP",)
@@ -363,7 +363,8 @@ def _run_policy(config, policy, seed, data, partition, traces, destination,
         mode_changes = sum(client in previous and previous[client] != mode and mode != "SKIP"
                            for client, mode in profile.items())
         for client, mode in profile.items():
-            decisions.append({"round": round_index, "client": client, "mode": mode,
+            decisions.append({"round": round_index, "client": client,
+                              "edge": config.edge_for(client), "mode": mode,
                               "feasible_modes": ";".join(pools[client]),
                               "epsilon": ledgers[client].epsilon(),
                               "active": mode != "SKIP"})
@@ -559,7 +560,8 @@ def run(config, output, resume=False):
         data = load_data(config, seed)
         if config.model == "resnet18_head":
             data = frozen_features(config, seed, data)
-        partition = partitions(data[1].numpy(), config.clients, config.edges, config.dirichlet_alpha, seed)
+        partition = partitions(data[1].numpy(), config.clients, config.edges,
+                               config.dirichlet_alpha, seed, config.client_edge_map)
         traces = system_traces(config, seed)
         seed_dir = output / f"seed_{seed}"
         seed_dir.mkdir(exist_ok=resume)

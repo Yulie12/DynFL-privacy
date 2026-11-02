@@ -18,6 +18,7 @@ class PaperConfig:
     device: str = "cpu"
     clients: int = 100
     edges: int = 10
+    client_edge_map: tuple[int, ...] = ()
     rounds: int = 100
     seeds: tuple[int, ...] = (42, 43, 44)
     policies: tuple[str, ...] = POLICIES[:8]
@@ -75,6 +76,14 @@ class PaperConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.edges > self.clients or self.clients > self.train_limit:
             raise ValueError("require edges <= clients <= train_limit")
+        if self.client_edge_map:
+            if len(self.client_edge_map) != self.clients:
+                raise ValueError("client_edge_map must contain exactly one Edge per client")
+            if any(not isinstance(edge, int) or isinstance(edge, bool) or
+                   not 0 <= edge < self.edges for edge in self.client_edge_map):
+                raise ValueError("client_edge_map contains an invalid Edge")
+            if set(self.client_edge_map) != set(range(self.edges)):
+                raise ValueError("client_edge_map must use every configured Edge")
         for name in ("epsilon", "clip_norm", "learning_rate", "epsilon_j", "dirichlet_alpha",
                      "local_step_sec", "end_edge_mb_s", "end_cloud_mb_s", "edge_cloud_mb_s",
                      "required_memory_mb", "client_memory_mb", "client_heterogeneity",
@@ -117,13 +126,18 @@ class PaperConfig:
     def to_dict(self):
         return asdict(self)
 
+    def edge_for(self, client):
+        if not 0 <= client < self.clients:
+            raise IndexError("client is outside configured topology")
+        return self.client_edge_map[client] if self.client_edge_map else client % self.edges
+
     @classmethod
     def load(cls, path):
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         unknown = set(data) - {item.name for item in fields(cls)}
         if unknown:
             raise ValueError(f"unknown configuration fields: {sorted(unknown)}")
-        for name in ("seeds", "policies"):
+        for name in ("seeds", "policies", "client_edge_map"):
             if name in data:
                 data[name] = tuple(data[name])
         return cls(**data)

@@ -93,6 +93,17 @@ def test_fl_ec_stages_follow_sequential_edge_feedback():
     assert len(result.units) == 1
 
 
+def test_edge_mode_groups_follow_paper_independent_parallel_timeline():
+    cfg = replace(fixture_config(), client_edge_map=(0, 0, 0))
+    result = plan(cfg, {0:"FL_E", 1:"FL_EC"}, traces(), {0:1, 1:1}, 1, 0, 0)
+    first_stages = [event for event in result.events
+                    if event["event"] == "edge_stage" and event["stage"] == 1]
+    assert len(first_stages) == 2
+    assert all(event["start"] == event["ready"] for event in first_stages)
+    assert first_stages[0]["start"] == first_stages[1]["start"]
+    assert first_stages[0]["finish"] == first_stages[1]["finish"]
+
+
 def test_all_edge_mode_uses_full_quorum_and_all_client_barrier():
     result = plan(fixture_config(), {0:"FL_E"}, traces(), {0:1}, 1, 10, 0)
     assert result.synchronous is True
